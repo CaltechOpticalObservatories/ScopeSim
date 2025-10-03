@@ -104,13 +104,15 @@ class SpectralTrace:
         warnings.warn("The fov_grid method is deprecated and will be removed "
                       "in a future release.", DeprecationWarning, stacklevel=2)
         aperture_id = self.meta["aperture_id"]
+        image_plane_id = self.meta["image_plane_id"]
         lam_arr = self.table[self.meta["wave_colname"]]
 
         wave_max = np.max(lam_arr)
         wave_min = np.min(lam_arr)
 
         return {"wave_min": wave_min, "wave_max": wave_max,
-                "trace_id": self.trace_id, "aperture_id": aperture_id}
+                "trace_id": self.trace_id, "aperture_id": aperture_id,
+                "image_plane_id": image_plane_id}
 
     def compute_interpolation_functions(self):
         """
@@ -688,7 +690,6 @@ class XiLamImage():
             dlam_per_pix_val = dlam_per_pix
             logger.warning("Using scalar dlam_per_pix = %.2g",
                            dlam_per_pix_val)
-
         for i, eta in enumerate(cube_eta):
             lam0 = self.lam + dlam_per_pix_val * eta / d_eta
 

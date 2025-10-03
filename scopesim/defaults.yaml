@@ -33,12 +33,12 @@ properties :
     nan_fill_value: 0.
 
   file :
-    local_packages_path : "./inst_pkgs/"
+    local_packages_path : "/Users/yashvi/Desktop/ZShooter/zs-scopesim/irdb/"
     server_base_url : "https://scopesim.univie.ac.at/InstPkgSvr/"
     example_data_suburl : "example_data"
     example_data_hash_file : "example_data_registry.txt"
     use_cached_downloads : "update"
-    search_path : ["./inst_pkgs/", "./"]
+    search_path : ["./inst_pkgs/", "./", "/Users/yashvi/Desktop/ZShooter/zs-scopesim/irdb/"]
     error_on_missing_file : False
 
   reports :

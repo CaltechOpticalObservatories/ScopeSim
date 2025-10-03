@@ -594,3 +594,44 @@ def rotate(x, y, x0, y0, angle):
     ynew = y0 + (x - x0) * np.sin(angle_rad) + (y - y0) * np.cos(angle_rad)
 
     return xnew, ynew
+
+class FoVSpecificAperture(ApertureList):
+    """
+    An aperture mask list that acts only on a specific FoV, selected by its ID. Everything else is identical to an
+    ApertureList, except that it takes an additional parameter `fov_id` to specify which FoV it applies to.
+    """
+
+    required_keys = {"fov_id"}
+    def __init__(self, **kwargs):
+        if "fov_id" not in kwargs:
+            raise ValueError("fov_id must be specified for FoVSpecificAperture")
+        self.fov_id = kwargs.pop("fov_id")
+        super().__init__(**kwargs)
+
+    def apply_to(self, obj, **kwargs):
+        """See parent docstring."""
+        if isinstance(obj, FovVolumeList):
+            logger.debug("Executing %s, FoV setup", self.meta['name'])
+            new_vols = []
+            for vol in obj.volumes:
+                if vol["meta"]["id"] != self.fov_id:
+                    new_vols += FovVolumeList(initial_volume=vol)
+                    continue
+                vols = FovVolumeList(initial_volume=vol)
+                for row in self.table:
+                    nvols = vols.extract(["x", "y"], ([row["left"], row["right"]],
+                                                [row["bottom"], row["top"]]))
+                    for nvol in nvols:
+                        nvol["meta"]["aperture_id"] = row["id"]
+
+                        # ..todo: HUGE HACK - Get rid of this!
+                        nvol["meta"]["xi_min"] = row["left"] * u.arcsec
+                        nvol["meta"]["xi_max"] = row["right"] * u.arcsec
+                        nvol["conserve_image"] = row["conserve_image"]
+                        nvol["shape"] = row["shape"]
+                        nvol["angle"] = row["angle"]
+                    new_vols += nvols
+            obj.volumes = new_vols
+        return obj
+
+

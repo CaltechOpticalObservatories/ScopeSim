@@ -279,7 +279,6 @@ class OpticalTrain:
                 for effect in tqdm(foveffs, disable=nobar,
                                    desc=" FOV effects", position=1):#, leave=False):
                     fov = effect.apply_to(fov)
-
                 if self.cmds.get("!INST.flatten", True):
                     fov.flatten()
                     self.image_planes[fov.image_plane_id].add(fov.hdu, wcs_suffix="D")
@@ -534,7 +533,7 @@ class OpticalTrain:
             efftype = type(eff).__name__
 
             if efftype == "DetectorList" and eff.include:
-                iheader["DETECTOR"] = eff.meta["detector"]
+                iheader["DETECTOR"] = eff.meta["name"]
 
         for eff in self.optics_manager.detector_array_effects:
             efftype = type(eff).__name__
