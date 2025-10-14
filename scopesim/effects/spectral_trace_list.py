@@ -9,10 +9,14 @@ The Effect is called `SpectralTraceList`, it applies a list of
 from itertools import cycle
 from typing import ClassVar
 
+import astropy
+import numpy as np
+
 from tqdm.auto import tqdm
 
 from astropy.io import fits
 from astropy.table import Table
+import astropy.units as u
 
 from .effects import Effect
 from .ter_curves import FilterCurve
@@ -20,6 +24,8 @@ from .spectral_trace_list_utils import SpectralTrace, make_image_interpolations
 from ..optics.image_plane_utils import header_from_list_of_xy
 from ..optics.fov import FieldOfView
 from ..optics.fov_volume_list import FovVolumeList
+from ..optics import echelle
+
 from ..utils import from_currsys, check_keys, figure_factory, get_logger
 
 
@@ -513,3 +519,94 @@ class SpectralTraceListWheel(Effect):
         if trace_list_name is not None:
             trace_list_eff = self.trace_lists[trace_list_name]
         return trace_list_eff
+
+
+class EchelleSpectralTraceList(SpectralTraceList):
+    def _generate_table(self):
+
+        ### TODO move/integrate with YAML arguments
+        arms = {'ub': {'m0': 29, 'n': 11, 'min_wave_nm': 315, 'max_wave_nm': 515, 'echelle_blaze': 64.2,
+                       'focal_length_mm':225, 'fwhm_pix':4.7, 'detector_pad_pix': 10, 'n_disp_pix': 4096,
+                       'pixel_size_um': 15, 'n_xdisp_pix': 4096, 'xdisp_freq_mm': 1000, 'disp_freq_mm':200,
+                       'slitwid_as': 10, 'dispdir': 'x','platescale': .75/4.7,
+                       'ap_id': 2, 'im_id': 2},
+               'gri': {'m0': 36, 'n': 18, 'min_wave_nm': 490, 'max_wave_nm': 1020, 'echelle_blaze': 64.2,
+                       'focal_length_mm':225, 'fwhm_pix':4.7, 'detector_pad_pix': 10, 'n_disp_pix': 4096,
+                       'pixel_size_um': 15, 'n_xdisp_pix': 4096, 'xdisp_freq_mm': 500, 'disp_freq_mm':100,
+                       'slitwid_as': 10, 'dispdir': 'x','platescale': .75/4.7,
+                       'ap_id': 1, 'im_id': 1},
+               'nIR': {'m0': 40, 'n': 24, 'min_wave_nm': 970, 'max_wave_nm': 2500, 'echelle_blaze': 64.2,
+                       'focal_length_mm':225, 'fwhm_pix':4.7, 'detector_pad_pix': 10, 'n_disp_pix': 4096,
+                       'pixel_size_um': 15, 'n_xdisp_pix': 4096, 'xdisp_freq_mm': 175, 'disp_freq_mm':45,
+                       'slitwid_as': 10, 'dispdir': 'x','platescale': .75/4.7,
+                       'ap_id': 0, 'im_id': 0}
+                }
+
+
+        hdul = astropy.io.fits.HDUList()
+        hdul.append(astropy.io.fits.PrimaryHDU())
+        hdul[0].header["EXTNAME"] = "OVERVIEW"
+        hdul[0].header["ECAT"] = 1
+        hdul[0].header["EDATA"] = 2
+
+        trace_ids = [f'{arm}_{i:d}' for arm, data in arms.items() for i in range(data['m0'], data['m0'] + data['n'] + 1)]
+        ap_ids = [data['ap_id'] for _, data in arms.items() for _ in range(data['m0'], data['m0'] + data['n'] + 1)]
+        im_ids = [data['im_id'] for _, data in arms.items() for _ in range(data['m0'], data['m0'] + data['n'] + 1)]
+
+        hdul.append(astropy.io.fits.BinTableHDU(astropy.table.Table(
+            {'description': trace_ids,
+             'extension_id': np.arange(len(trace_ids), dtype=int)+2,
+             'aperture_id': ap_ids,
+             'image_plane_id': im_ids
+             })))
+
+        for arm, data in arms.items():
+            min_order = data['m0'] - data['n']
+            max_order = data['m0']
+            min_wave = data['min_wave_nm'] * u.nm
+            max_wave = data['max_wave_nm'] * u.nm
+            focal_len = data['focal_length_mm'] * u.mm
+            xdisp_npix = data['n_xdisp_pix']
+            pix_size = data['pixel_size_um'] * u.micron
+            x_disp_len = (xdisp_npix - 2*data['detector_pad_pix']) * pix_size
+
+            echelle_angle = np.deg2rad(data['echelle_blaze'])
+
+            ss = echelle.SpectrographSetup((min_order, max_order),
+                                           max_wave,
+                                           data['fwhm_pix'],
+                                           focal_len,
+                                           echelle.GratingSetup(alpha=echelle_angle, beta_center=echelle_angle,
+                                                                delta=echelle_angle,
+                                                                groove_length=u.mm / data['disp_freq_mm']),
+                                           echelle.Detector(data['n_disp_pix'], xdisp_npix, pix_size),
+                                           cross_disperser=echelle.GratingSetup(
+                                               groove_length=u.mm / data['xdisp_freq_mm'],
+                                               guess_littrow=(min_wave, max_wave,
+                                                              x_disp_len, focal_len)),
+                                           )
+
+            fsr_edges = ss.edge_wave(fsr=True)
+
+            slit_edge = data['slitwid_as'] / 2
+            slit_pos = np.linspace(-slit_edge, slit_edge, num=3)
+            slit_offset_pix = slit_pos / data['platescale']
+
+            for i, order in enumerate(ss.orders):
+                wave = fsr_edges[i]
+                x = ss.wavelength_to_x_pixel(wave, order)
+                y = ss.wavelength_to_y_pixel(wave)
+                s = np.tile(slit_pos, wave.size).reshape(wave.size, slit_pos.size).T.ravel()
+                w = np.tile(wave, slit_offset_pix.size)
+
+                pix_y = y + data['detector_pad_pix'] + slit_offset_pix[:, None]
+
+                order_table = astropy.table.Table(
+                    {'wavelength': w, 's': s,
+                     'x': np.tile(x, slit_offset_pix.size)*pix_size.to('mm'),  # TODO make sure relative to 0,0 at detector center
+                     'y': pix_y.ravel()*pix_size.to('mm')}) # TODO make sure relative to 0,0 at detector center
+
+                trace_hdu = astropy.io.fits.BinTableHDU(order_table)
+                trace_hdu.header['DISPDIR'] = data['dispdir']
+                trace_hdu.header["EXTNAME"] = f'{arm}_{order:d}'
+                hdul.append(trace_hdu)
