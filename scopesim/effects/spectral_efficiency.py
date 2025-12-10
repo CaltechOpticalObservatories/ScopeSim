@@ -79,6 +79,7 @@ class SpectralEfficiency(Effect):
         self.ext_data = hdul[0].header["EDATA"]
         self.ext_cat = hdul[0].header["ECAT"]
         self.catalog = Table(hdul[self.ext_cat].data)
+        self.catalog["extension_id"] = self.catalog["extension_id"].astype(int)
 
         efficiencies = {}
         for row in self.catalog:
@@ -93,6 +94,7 @@ class SpectralEfficiency(Effect):
             params.pop("filename", None)  # don't pass filename to TERCurve!
             effic_curve = TERCurve(array_dict={"wavelength":wavelength,
                                    "transmission":efficiency},
+                                   wavelength_unit=wavelength.unit,
                                    **params)
             efficiencies[name] = effic_curve
 

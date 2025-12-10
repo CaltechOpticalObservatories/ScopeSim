@@ -84,7 +84,7 @@ class TERCurve(Effect):
 
     """
 
-    z_order: ClassVar[tuple[int, ...]] = (10, 110, 510)
+    z_order: ClassVar[tuple[int, ...]] = (10, 110, 510, 610)
     report_plot_include: ClassVar[bool] = True
     report_table_include: ClassVar[bool] = False
 
@@ -151,6 +151,15 @@ class TERCurve(Effect):
 
             obj.shrink("wave", [wave_min.to_value(u.um),
                                 wave_max.to_value(u.um)])
+
+        if isinstance(obj, FieldOfView):
+            # if a FieldOfView is passed, apply throughput to obj cube
+            thru = self.throughput
+            if obj.hdu is not None and obj.hdu.header["NAXIS"] == 3:
+                swcs = WCS(obj.hdu.header).spectral
+                with u.set_enabled_equivalencies(u.spectral()):
+                    wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
+                obj.hdu = apply_throughput_to_cube(obj.hdu, thru, wave)
 
         return obj
 
@@ -1133,12 +1142,10 @@ class DichroicTreeEffect(Effect):
 
         # 1. During setup of the FieldofViews
         if isinstance(obj, FovVolumeList):
-            if len(obj.volumes) != 1:
-                raise ValueError("DichroicTreeEffect can only be applied to a FovVolumeList with a single FoV")
             logger.debug("Executing %s, FoV setup", self.meta['name'])
             new_vols = []
             for row in self.table:
-                aperture_id = row["id"]
+                arm_id = row["id"]
                 vols = deepcopy(obj)
                 for colname in row.colnames:
                     if colname not in self.dichroics.keys():
@@ -1151,9 +1158,9 @@ class DichroicTreeEffect(Effect):
                         dichroic.surface.meta.update(params)
                         vols = dichroic.apply_to(vols, **kwargs)
                 # Set the id of the resulting FoVs. Looks like id field in meta is not being used for anything else.
-                for vol in vols:
-                    vol["meta"]["id"] = aperture_id
-                new_vols += vols
+                for vol in vols.volumes:
+                    vol["meta"]["id"] = arm_id
+                new_vols.extend(vols.volumes)
             obj.volumes = new_vols
         # 2. During observe
         if isinstance(obj, FieldOfView):
@@ -1171,11 +1178,38 @@ class DichroicTreeEffect(Effect):
                 if action is not None:
                     params = {"action": action}
                     dichroic.surface.meta.update(params)
-                    thru = dichroic.throughput
-                    if obj.hdu is not None and obj.hdu.header["NAXIS"] == 3:
-                        # 3D cube
-                        swcs = WCS(obj.hdu.header).spectral
-                        with u.set_enabled_equivalencies(u.spectral()):
-                            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
-                        obj.hdu = apply_throughput_to_cube(obj.hdu, thru, wave)
+                    dichroic.apply_to(obj, **kwargs)
+        return obj
+
+
+class FoVSpecificTERCurve(TERCurve):
+    """
+    A TERCurve that applies only to specific FieldOfView ids.
+    During the application of the effect, the FoV id is checked against the
+    list of specified ids. If there is a match, the TERCurve is applied, otherwise
+    the FoV is returned unchanged.
+    """
+    z_order: ClassVar[tuple[int, ...]] = (118, 218, 618)
+    required_keys = {"fov_ids"}
+
+    def __init__(self, **kwargs):
+        if "fov_ids" not in kwargs:
+            raise ValueError("FoVSpecificTERCurve requires 'fov_ids' kwarg")
+        self.fov_ids = from_currsys(kwargs.pop("fov_ids"), cmds=None)
+        super().__init__(**kwargs)
+
+    def apply_to(self, obj, **kwargs):
+        if isinstance(obj, FovVolumeList):
+            new_vols = [vol for vol in obj.volumes if vol.meta.get("id", None) not in self.fov_ids]
+            vols_to_apply = [vol for vol in obj.volumes if vol.meta.get("id", None) in self.fov_ids]
+            obj.volumes = vols_to_apply
+            obj = super().apply_to(obj, **kwargs)
+            obj.volumes.extend(new_vols)
+
+        if isinstance(obj, FieldOfView):
+            # if a FieldOfView is passed, apply throughput to obj cube
+            if obj.meta.get("id", None) not in self.fov_ids:
+                return obj
+            obj = super().apply_to(obj, **kwargs)
+
         return obj

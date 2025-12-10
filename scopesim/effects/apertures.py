@@ -597,41 +597,25 @@ def rotate(x, y, x0, y0, angle):
 
 class FoVSpecificAperture(ApertureList):
     """
-    An aperture mask list that acts only on a specific FoV, selected by its ID. Everything else is identical to an
-    ApertureList, except that it takes an additional parameter `fov_id` to specify which FoV it applies to.
+    An aperture mask list that acts only on specific FoVs, selected by their IDs. Everything else is identical to an
+    ApertureList, except that it takes an additional parameter `fov_ids` to specify which FoVs it applies to.
     """
 
-    required_keys = {"fov_id"}
+    required_keys = {"fov_ids"}
     def __init__(self, **kwargs):
-        if "fov_id" not in kwargs:
-            raise ValueError("fov_id must be specified for FoVSpecificAperture")
-        self.fov_id = kwargs.pop("fov_id")
+        if "fov_ids" not in kwargs:
+            raise ValueError("fov_ids must be specified for FoVSpecificAperture")
+        self.fov_ids: list = kwargs.pop("fov_ids")
         super().__init__(**kwargs)
 
     def apply_to(self, obj, **kwargs):
         """See parent docstring."""
         if isinstance(obj, FovVolumeList):
-            logger.debug("Executing %s, FoV setup", self.meta['name'])
-            new_vols = []
-            for vol in obj.volumes:
-                if vol["meta"]["id"] != self.fov_id:
-                    new_vols += FovVolumeList(initial_volume=vol)
-                    continue
-                vols = FovVolumeList(initial_volume=vol)
-                for row in self.table:
-                    nvols = vols.extract(["x", "y"], ([row["left"], row["right"]],
-                                                [row["bottom"], row["top"]]))
-                    for nvol in nvols:
-                        nvol["meta"]["aperture_id"] = row["id"]
-
-                        # ..todo: HUGE HACK - Get rid of this!
-                        nvol["meta"]["xi_min"] = row["left"] * u.arcsec
-                        nvol["meta"]["xi_max"] = row["right"] * u.arcsec
-                        nvol["conserve_image"] = row["conserve_image"]
-                        nvol["shape"] = row["shape"]
-                        nvol["angle"] = row["angle"]
-                    new_vols += nvols
-            obj.volumes = new_vols
+            new_vols = [vol for vol in obj.volumes if vol["meta"]["id"] not in self.fov_ids]
+            vols_to_apply = [vol for vol in obj.volumes if vol["meta"]["id"] in self.fov_ids]
+            obj.volumes = vols_to_apply
+            obj = super().apply_to(obj, **kwargs)
+            obj.volumes.extend(new_vols)
         return obj
 
 

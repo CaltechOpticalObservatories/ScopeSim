@@ -130,12 +130,12 @@ class SpectralTrace:
         self.wave_min = quantify(np.min(lam_arr), u.um).value
         self.wave_max = quantify(np.max(lam_arr), u.um).value
 
-        self.xy2xi = Transform2D.fit(x_arr, y_arr, xi_arr)
-        self.xy2lam = Transform2D.fit(x_arr, y_arr, lam_arr)
-        self.xilam2x = Transform2D.fit(xi_arr, lam_arr, x_arr)
-        self.xilam2y = Transform2D.fit(xi_arr, lam_arr, y_arr)
-        self._xiy2x = Transform2D.fit(xi_arr, y_arr, x_arr)
-        self._xiy2lam = Transform2D.fit(xi_arr, y_arr, lam_arr)
+        self.xy2xi = Transform2D.fit(x_arr, y_arr, xi_arr, degree=3)
+        self.xy2lam = Transform2D.fit(x_arr, y_arr, lam_arr, degree=3)
+        self.xilam2x = Transform2D.fit(xi_arr, lam_arr, x_arr, degree=3)
+        self.xilam2y = Transform2D.fit(xi_arr, lam_arr, y_arr, degree=3)
+        self._xiy2x = Transform2D.fit(xi_arr, y_arr, x_arr, degree=3)
+        self._xiy2lam = Transform2D.fit(xi_arr, y_arr, lam_arr, degree=3)
 
         if self.dispersion_axis == "unknown":
             dlam_dx, dlam_dy = self.xy2lam.gradient()
@@ -263,7 +263,7 @@ class SpectralTrace:
                  / xilam_wcs.wcs.cdelt[1]).astype(int)
 
         # truncate images to remove pixel coordinates outside the image
-        ijmask = ((i_img >= 0) * (i_img < npix_lam)
+        ijmask = ((i_img >= 0) #* (i_img < npix_lam)
                   * (j_img >= 0) * (j_img < npix_xi))
 
         # do the actual interpolation
