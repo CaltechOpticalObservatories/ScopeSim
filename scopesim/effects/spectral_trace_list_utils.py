@@ -130,12 +130,12 @@ class SpectralTrace:
         self.wave_min = quantify(np.min(lam_arr), u.um).value
         self.wave_max = quantify(np.max(lam_arr), u.um).value
 
-        self.xy2xi = Transform2D.fit(x_arr, y_arr, xi_arr, degree=3)
-        self.xy2lam = Transform2D.fit(x_arr, y_arr, lam_arr, degree=3)
-        self.xilam2x = Transform2D.fit(xi_arr, lam_arr, x_arr, degree=3)
-        self.xilam2y = Transform2D.fit(xi_arr, lam_arr, y_arr, degree=3)
-        self._xiy2x = Transform2D.fit(xi_arr, y_arr, x_arr, degree=3)
-        self._xiy2lam = Transform2D.fit(xi_arr, y_arr, lam_arr, degree=3)
+        self.xy2xi = Transform2D.fit(x_arr, y_arr, xi_arr)
+        self.xy2lam = Transform2D.fit(x_arr, y_arr, lam_arr)
+        self.xilam2x = Transform2D.fit(xi_arr, lam_arr, x_arr)
+        self.xilam2y = Transform2D.fit(xi_arr, lam_arr, y_arr)
+        self._xiy2x = Transform2D.fit(xi_arr, y_arr, x_arr)
+        self._xiy2lam = Transform2D.fit(xi_arr, y_arr, lam_arr)
 
         if self.dispersion_axis == "unknown":
             dlam_dx, dlam_dy = self.xy2lam.gradient()
