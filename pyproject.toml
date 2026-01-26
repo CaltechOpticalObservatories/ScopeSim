@@ -1,40 +1,45 @@
 [project]
 name = "ScopeSim"
-version = "0.11.1a2"
+version = "0.11.3a0"
 description = "Generalised telescope observation simulator"
 license = {text = "GPL-3.0-or-later"}
 authors = [
-    {name = "Kieran Leschinski", email = "kieran.leschinski@unive.ac.at"}
+    {name = "Kieran Leschinski", email = "kieran.leschinski@univie.ac.at"}
 ]
 maintainers = [
-    {name = "Kieran Leschinski", email = "kieran.leschinski@unive.ac.at"},
+    {name = "Kieran Leschinski", email = "kieran.leschinski@univie.ac.at"},
     {name = "Hugo Buddelmeijer", email = "hugo@buddelmeijer.nl"},
     {name = "Fabian Haberhauer", email = "fabian.haberhauer@univie.ac.at"},
 ]
 readme = "README.md"
 keywords = [ "astronomy" ]
 dynamic = [ "classifiers" ]
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10,<3.15"
 dependencies = [
-    "numpy (>=1.26.4,<2.3.0)",
-    "scipy (>=1.15.3,<2.0.0)",
-    "astropy (>=6.1.7,<7.0.0)",
-    "matplotlib (>=3.10.1,<4.0.0)",
+    "numpy (>=1.26.4,<2.3.0) ; python_version >= '3.10' and python_version < '3.13'",
+    "numpy (>=2.2.6,<3.0.0) ; python_version >= '3.13'",
+    # SciPy is only an indirect dependency through synphot, but has limited
+    # wheels for Python versions, so needs to be specified explicitly.
+    "scipy (>=1.15.3,<1.16.0) ; python_version >= '3.10' and python_version < '3.11'",
+    "scipy (>=1.17.0,<1.18.0) ; python_version >= '3.11'",
+
+    "astropy (>=6.1.7,<8.0.0)",
+    "matplotlib (>=3.10.5,<4.0.0)",
     "pooch (>=1.8.2,<2.0.0)",
 
     "docutils (>=0.19,<1.0)",
     "httpx (>=0.28.1,<1.0)",
     "beautifulsoup4 (>=4.13.3,<5.0.0)",
-    "lxml (>=5.4.0,<6.0.0)",
-    "pyyaml (>=6.0.2,<7.0.0)",
+    "lxml (>=6.0.2,<7.0.0)",
+    "pyyaml (>=6.0.3,<7.0.0)",
     "more-itertools (>=10.2.0,<11.0.0)",
     "tqdm (>=4.66.6,<5.0.0)",
-    "packaging (>=24.2,<26.0)",
+    "packaging (>=25.0,<26.0)",
 
     "synphot (>=1.5.0,<2.0.0)",
-    "skycalc-ipy (>=0.6.0,<1.0)",
-    "anisocado (>=0.4.0,<1.0)",
-    "astar-utils (>=0.4.0,<1.0)"
+    "skycalc-ipy (>=0.7.0,<1.0)",
+    "anisocado (>=0.5.0,<1.0)",
+    "astar-utils (>=0.5.0,<1.0)"
 ]
 
 [project.urls]
@@ -56,14 +61,14 @@ optional = true
 
 [tool.poetry.group.dev.dependencies]
 jupyter = "^1.1.1"
-jupytext = "^1.17.2"
-ipykernel = "^6.30.0"
-ipympl = "^0.9.7"
+jupytext = "^1.18.1"
+ipykernel = "^6.31.0"
+ipympl = "^0.9.8"
 
 [tool.poetry.group.test.dependencies]
-pytest = "^8.3.5"
-pytest-cov = "^6.2.1"
-ipykernel = "^6.30.0"
+pytest = "^9.0.2"
+pytest-cov = "^7.0.0"
+ipykernel = "^6.31.0"
 
 [tool.poetry.group.docs]
 optional = true
@@ -72,14 +77,14 @@ optional = true
 sphinx = "^8.1.3"
 sphinx-book-theme = "^1.1.4"
 jupyter-sphinx = ">=0.5.3"
-sphinx-copybutton = "^0.5.2"
+sphinx-copybutton = ">=0.5.2,<1.0"
 myst-nb = "^1.3.0"
-sphinxcontrib-apidoc = ">=0.6.0"
-sphinxcontrib-mermaid = "^1.0.0"
-nbsphinx = "^0.9.7"
+sphinxcontrib-apidoc = ">=0.6.0,<1.0"
+sphinxcontrib-mermaid = "^2.0"
+nbsphinx = "^0.9.8"
 numpydoc = "^1.9.0"
-ipykernel = "^6.30.0"
-ipympl = "^0.9.7"
+ipykernel = "^6.31.0"
+ipympl = "^0.9.8"
 
 
 [build-system]
@@ -107,12 +112,8 @@ filterwarnings = [
     "ignore:Cannot merge meta key.*:astropy.utils.metadata.MergeConflictWarning",
     "ignore::astropy.wcs.wcs.FITSFixedWarning",
     "default:The fov_grid*:DeprecationWarning",
-    # Raised when saving fits files, not so important to fix:
-    "ignore:.*a HIERARCH card will be created.*:astropy.io.fits.verify.VerifyWarning",
     # Pytest Notebook stuff
     "ignore:Proactor*:RuntimeWarning",
-    # Suddenly appears from Pillow in a few tests
-    "ignore:'mode' parameter is deprecated and will be removed*:DeprecationWarning"
 ]
 
 [tool.coverage.report]

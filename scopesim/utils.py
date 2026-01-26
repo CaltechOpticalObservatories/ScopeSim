@@ -540,8 +540,34 @@ def unit_includes_per_physical_type(unit, physical_type):
     """Check if one of the `unit`'s bases is of 1/`physical_type`."""
     # TODO: Check again if there isn't any builtin functionality in astropy
     #       for the same operation!
+    try:
+        bases, powers = unit.bases, unit.powers
+    except AttributeError:  # Happens for e.g. ABmag
+        return False
+
     return any(1 / (base**power).physical_type == physical_type
-               for base, power in zip(unit.bases, unit.powers))
+               for base, power in zip(bases, powers))
+
+
+def pixel_area(header: fits.Header) -> u.Quantity[u.arcsec**2]:
+    """Calculate area covered by one pixel in arcsec**2 from header.
+
+    .. versionadded:: 0.11.1
+
+    """
+    if header["NAXIS"] == 1:
+        raise ValueError("Cannot calculate pixel area of 1D header.")
+
+    if header["NAXIS"] > 2:
+        logger.warning(
+            "Calculating pixel area of header with more than 2 dimensions, "
+            "assuming first two are spatial without additional checks."
+        )
+
+    area = (header["CDELT1"] * u.Unit(header["CUNIT1"]) *
+            header["CDELT2"] * u.Unit(header["CUNIT2"]))
+
+    return area.to(u.arcsec**2)
 
 
 def has_needed_keywords(header, suffix=""):
@@ -552,9 +578,11 @@ def has_needed_keywords(header, suffix=""):
     return all(key in header.keys() for key in keys)
 
 
-def stringify_dict(dic, ignore_types=(str, int, float, bool)):
+def stringify_dict(dic, ignore_types=(str, int, float, bool), fits_safe=False):
     """Turn a dict entries into strings for addition to FITS headers."""
     for key, value in dic.items():
+        if fits_safe and len(key) > 8:
+            key = f"HIERARCH {key.upper()}"
         if isinstance(value, ignore_types):
             yield key, value
         else:

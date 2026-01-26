@@ -86,11 +86,16 @@ def _handle_svo_download(filename: str, params: dict) -> Path:
 
     return path
 
+
 def download_svo_filter(filter_name, return_style="synphot"):
     """
     Query the SVO service for the true transmittance for a given filter.
 
     Adapted from tynt by Brett Morris.
+
+    .. versionchanged:: 0.11.2
+
+       Added ``fill_value=0.`` to synphot return mode to fix extrapolation.
 
     Parameters
     ----------
@@ -131,7 +136,7 @@ def download_svo_filter(filter_name, return_style="synphot"):
     trans = votbl.array["Transmission"].data
 
     if return_style == "synphot":
-        return SpectralElement(Empirical1D, points=wave, lookup_table=trans)
+        return SpectralElement(Empirical1D, points=wave, lookup_table=trans, fill_value=0.)
     if return_style == "table":
         filt = Table(data=[wave, trans], names=["wavelength", "transmission"])
         filt.meta["wavelength_unit"] = str(wave.unit)
@@ -200,7 +205,8 @@ def get_filter(filter_name):
         tbl = ioascii.read(path)
         wave = quantity_from_table("wavelength", tbl, u.um).to(u.um)
         filt = SpectralElement(Empirical1D, points=wave,
-                               lookup_table=tbl["transmission"])
+                               lookup_table=tbl["transmission"],
+                               fill_value=0.)
     elif filter_name in FILTER_DEFAULTS:
         filt = download_svo_filter(FILTER_DEFAULTS[filter_name])
     else:

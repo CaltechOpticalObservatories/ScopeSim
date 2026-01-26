@@ -1,3 +1,74 @@
+# Version 0.11.2
+**2026-01-20**
+
+Maintenance and bugfix release containing some important fixes regarding flux values.
+
+## What's Changed
+### Bugs fixed
+* Clean up FieldVaryingPSF by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/833
+* Rename lamp off state from 'none' to 'off' by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/835
+* Remove numpy deprecation warning by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/841
+* Fix CUNIT not respected in FVPSF effect by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/851
+* Transmission curves to extrapolate with value 0 by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/859
+* Extrapolate all transmissions with 0 by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/863
+* Fix Astropy warning about HIERARCH keywords by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/864
+* Fix WCU flux mismatch by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/860
+### Changes to or addition of Effects
+* PSFs associated to PupilMaskWheel, download from server by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/838
+* `ReferencePixelBorder` newly implemented by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/840
+* Interactive updating of SkycalcTERCurve by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/853
+### Dependency Changes
+* Bump the dev-dependencies group with 2 updates by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/831
+* Bump pyyaml from 6.0.2 to 6.0.3 in the main-dependencies group by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/830
+* Bump actions/checkout from 5 to 6 by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/837
+* Bump the dev-dependencies group with 2 updates by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/843
+* Bump fonttools from 4.58.4 to 4.61.0 by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/844
+* Bump urllib3 from 2.5.0 to 2.6.0 by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/849
+* Bump synphot from 1.6.0 to 1.6.1 in the main-dependencies group by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/854
+* Bump the dev-dependencies group with 2 updates by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/855
+* Bump pytest-cov from 6.3.0 to 7.0.0 by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/856
+* Bump urllib3 from 2.6.0 to 2.6.3 by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/858
+* Sync dependencies with ecosystem by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/861
+* Allow Python 3.14, sync dependencies by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/865
+### Documentation Improvements
+* Fix email domain for Kieran Leschinski by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/857
+* Fix formatting and docstrings, add change messages by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/862
+### Other Changes
+* Uppercase HIERARCH keywords by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/866
+
+**Full Changelog**: https://github.com/AstarVienna/ScopeSim/compare/v0.11.1...v0.11.2
+
+
+# Version 0.11.1
+**2025-10-26**
+
+## What's Changed
+### API Changes
+* Allow log level to be lower case by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/811
+### Bugs fixed
+* Rename `Effect.__getitem__()` ➡️ `.get_from_meta()` by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/815
+* Improve handling of BUNIT in FOV by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/822
+* Fix BUNIT not added for Source from image + flux by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/823
+* Catch extra special units by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/824
+* No ABmag in BUNIT by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/826
+* Use lower case photlam for headers by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/827
+### Changes to or addition of Effects
+* Inter-pixel capacitance effect by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/806
+* Compute METIS/LMS predisperser angle for given central wavelength  by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/812
+* Local TER library by @oczoske in https://github.com/AstarVienna/ScopeSim/pull/765
+### Dependency Changes
+* Bump jupyterlab from 4.2.5 to 4.4.8 by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/805
+* Bump sphinx from 7.3.7 to 8.1.3 by @dependabot[bot] in https://github.com/AstarVienna/ScopeSim/pull/809
+### Documentation Improvements
+* Fix some docstring formatting, add version info by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/828
+### Other Changes
+* Refactor data collections download by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/810
+* Replace `np.trapz` with `scipy.integrate.trapezoid` by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/813
+* No longer ignore some warnings by @teutoburg in https://github.com/AstarVienna/ScopeSim/pull/814
+
+**Full Changelog**: https://github.com/AstarVienna/ScopeSim/compare/v0.11.0...v0.11.1
+
+
 # Version 0.11.0
 **2025-09-21**
 

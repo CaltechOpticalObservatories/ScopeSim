@@ -73,8 +73,15 @@ from synphot import SourceSpectrum
 
 
 from ..optics import image_plane_utils as imp_utils
-from ..utils import (quantify, quantity_from_table, close_loop, get_logger,
-                     convert_table_comments_to_dict)
+from ..utils import (
+    quantify,
+    quantity_from_table,
+    close_loop,
+    get_logger,
+    convert_table_comments_to_dict,
+    unit_includes_per_physical_type,
+    pixel_area,
+)
 
 
 logger = get_logger(__name__)
@@ -290,6 +297,37 @@ class HDUSourceField(SourceField):
             return "<empty>"
         return str(self.data.shape)
 
+    @property
+    def bunit(self) -> u.Unit:
+        """Extract BUNIT from header and parse into astropy Unit.
+
+        If the BUNIT keyword is not present in the header, this will return the
+        dimensionless unit, which should result in consistent behavior.
+
+        .. versionadded:: 0.11.1
+
+        """
+        value = self.header.get("BUNIT", "").replace("PHOTLAM", "photlam")
+        return u.Unit(value)
+
+    @property
+    def is_bunit_spatially_differential(self) -> bool:
+        """Return True if BUNIT includes any "per solid angle" parts.
+
+        .. versionadded:: 0.11.1
+
+        """
+        return unit_includes_per_physical_type(self.bunit, "solid angle")
+
+    @property
+    def pixel_area(self) -> u.Quantity[u.arcsec**2]:
+        """Area covered by one pixel in arcsec**2.
+
+        .. versionadded:: 0.11.1
+
+        """
+        return pixel_area(self.header)
+
     def _write_stream(self, stream: TextIO) -> None:
         stream.write(f"ImageHDU with size {self.img_size}, referencing "
                      f"spectrum {self.field.header.get('SPEC_REF', '-')}")
@@ -411,4 +449,4 @@ class BackgroundSourceField(SpectrumSourceField):
         return np.array([-np.inf, np.inf])
 
     def _write_stream(self, stream: TextIO) -> None:
-        stream.write(f"Background field ref. spectrum {self.spectrum[0]}")
+        stream.write(f"Background field ref. spectrum {self.spectrum}")
