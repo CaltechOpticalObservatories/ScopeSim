@@ -154,7 +154,7 @@ class WCUSource(TERCurve):
                                              header=hole_hdu.header)
             hole_src = Source(field=hole_fld)
         else:
-            hole_src = Source(image_hdu=self.fpmask.holehdu, spectra=bb_flux)
+            hole_src = Source(image_hdu=self.fpmask.holehdu, spectra=[bb_flux])
 
         self._background_source.append(hole_src)
 
@@ -170,7 +170,7 @@ class WCUSource(TERCurve):
                 opaque_src = Source(field=opaque_fld)
             else:
                 opaque_src = Source(image_hdu=self.fpmask.opaquehdu,
-                                    spectra=mask_flux)
+                                    spectra=[mask_flux])
             self._background_source.append(opaque_src)
 
         return self._background_source
@@ -205,7 +205,7 @@ class WCUSource(TERCurve):
         if "wcu_lms" in self.cmds["!OBS.modes"]:
             lamc = self.cmds["!OBS.wavelen"]
             dlam = self.cmds["!SIM.spectral.spectral_bin_width"]
-            lam = seq(lamc - 3000 * dlam, lamc + 3000 * dlam, dlam) * u.um
+            lam = seq(lamc - 3200 * dlam, lamc + 3200 * dlam, dlam) * u.um
         else:
             filter_name = self.cmds["!OBS.filter_name"]
             filename_format = self.cmds["!INST.filter_file_format"]
@@ -392,7 +392,7 @@ class WCUSource(TERCurve):
                                 * mult_is / (np.pi * u.sr))
         elif self.current_lamp == "laser":
             self.intens_lamp = self._laser_intensity()
-        elif self.current_lamp == "none":
+        elif self.current_lamp == "off":
             self.intens_lamp = np.zeros(len(lam)) * self.bb_scale
         else:
             raise ValueError(f"Unknown lamp: {self.current_lamp}")
@@ -423,13 +423,17 @@ class WCUSource(TERCurve):
         lam = self.wavelength
         dlam = lam[1] - lam[0]
 
+        mult_is = self.is_multiplication(lam)
+
         # Laser 1 (L band)  # TODO move to yaml
         lamc_l = 3.39 * u.um
         power_l = 5e-3 * u.W / (c.c * c.h / lamc_l) * u.ph
+
         # Laser 2 (tunable), power divided among multiple lines
         lam_t = seq(4.68, 4.78, 0.01) * u.um
         nline = len(lam_t)
         power_t = 70e-3 * u.W / (c.c * c.h / lam) * u.ph / nline
+
         # Laser 3 (M band)
         lamc_m = 5.26 * u.um
         power_m = 20e-3 * u.W / (c.c * c.h / lamc_m) * u.ph
@@ -441,9 +445,12 @@ class WCUSource(TERCurve):
         line_m = Gaussian1D(amplitude=amp, mean=lamc_m, stddev=sigma)
         list_t = [Gaussian1D(amplitude=amp, mean=ll, stddev=sigma) for ll in lam_t]
         line_t = sum(list_t[1:], start=list_t[0])
+
         flux = ((power_l * line_l(lam) + power_m * line_m(lam) + power_t
-                 * line_t(lam)) / (np.pi * self.d_is_in**2 / 4))
-        intens = flux / (np.pi * u.sr)
+                 * line_t(lam)) / (np.pi * self.d_is**2 / 4))
+
+        intens = mult_is * flux / (np.pi * u.sr)
+
         return intens.to(self.bb_scale)
 
     def compute_fp_emission(self):

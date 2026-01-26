@@ -3,8 +3,8 @@
 # pylint: disable=missing-class-docstring
 # pylint: disable=missing-function-docstring
 
-import pytest
 from unittest.mock import patch
+import pytest
 
 import numpy as np
 from astropy import units as u
@@ -151,7 +151,7 @@ class TestWCUSource:
         lamc=3.9
         bbsource.cmds = _patched_cmds(mode="wcu_lms",  wavelen=lamc, bin_width=binw)
         bbsource.get_wavelength()
-        lam = 3.6 + (np.arange(6001) * binw)
+        lam = 3.58 + (np.arange(6401) * binw)
         assert len(bbsource.wavelength) == len(lam)
         assert np.all(bbsource.wavelength.value == lam)
 
@@ -209,6 +209,12 @@ def fixture_pinholemask(mock_path):
     return FPMask(maskname="pinhole",
                   fpmask_filename_format=str(mock_path / "fp_mask_{}.dat"))
 
+@pytest.fixture(name="pinholemask_int", scope="function")
+def fixture_pinholemask_int(mock_path):
+    return FPMask(
+        maskname=str(mock_path / "fp_mask_pinhole_int.dat"),
+        shift=(0.4,-0.3))
+
 class TestFPMask:
     def test_fpmask_initialises_correctly(self, fpmask):
         assert isinstance(fpmask, FPMask)
@@ -240,8 +246,13 @@ class TestFPMask:
 
     def test_data_correct(self, fpmask):
         assert fpmask.holehdu.data[241, 1943] == 0
-        assert fpmask.holehdu.data[1023, 1023] < np.pi * (0.007532**2) / 4
-        assert fpmask.holehdu.data[1021:1025, 1021:1025].sum() == np.pi * (0.007532**2) / 4
+        assert fpmask.holehdu.data[1023, 1023] < 1
+        assert fpmask.holehdu.data[1021:1025, 1021:1025].sum() == pytest.approx(
+            np.pi * (0.007532**2) / 4 / fpmask.pixarea.value)
         assert (fpmask.opaquehdu.data[1023, 1023] + fpmask.holehdu.data[1023, 1023]
-                == fpmask.pixarea.value)
-        assert fpmask.opaquehdu.data[748, 1308] == fpmask.pixarea.value
+                == 1)
+        assert fpmask.opaquehdu.data[748, 1308] == 1.
+
+    def test_no_error_with_integer_positions(self, pinholemask_int):
+        """Tests that the bug in Scopesim#868 does not occur"""
+        assert isinstance(pinholemask_int, FPMask)

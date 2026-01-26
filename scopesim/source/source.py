@@ -296,8 +296,12 @@ class Source:
             if flux.unit.physical_type == "spectral flux density":  # ABmag and Jy
                 spec_template = src_tmp.ab_spectrum
                 flux = flux.to(u.ABmag)
-            flux = flux.value
-        spectra = {0: spec_template(flux)}
+        else:
+            raise TypeError("flux must be quantity or unit")
+
+        spectra = {0: spec_template(flux.value)}
+        image_hdu.header["BUNIT"] = "photlam"  # spectrum gets evaluated
+
         self._from_imagehdu_and_spectra(image_hdu, spectra, **kwargs)
 
     def _from_imagehdu_only(self, image_hdu, **kwargs):

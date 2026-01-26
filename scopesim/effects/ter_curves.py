@@ -5,7 +5,7 @@ import warnings
 from copy import deepcopy
 from typing import ClassVar
 from collections.abc import Collection, Iterable
-
+from pooch import retrieve
 import numpy as np
 from scipy import integrate
 from astropy import units as u
@@ -28,7 +28,7 @@ from ..source.source_fields import (CubeSourceField, SpectrumSourceField,
                                     BackgroundSourceField)
 from ..utils import (from_currsys, quantify, check_keys, find_file,
                      figure_factory, get_logger)
-
+from ..server.download_utils import create_retriever
 
 logger = get_logger(__name__)
 
@@ -187,7 +187,7 @@ class TERCurve(Effect):
                 # "CUNIT2": "ARCSEC",
                 # "CDELT1": 0,
                 # "CDELT2": 0,
-                "BUNIT": "PHOTLAM arcsec-2",
+                "BUNIT": "photlam arcsec-2",
                 "SOLIDANG": "arcsec-2",
             })
             bkg_fld = BackgroundSourceField(field=None, spectra=bkg_spec, header=bkg_hdr)
@@ -277,6 +277,122 @@ class AtmosphericTERCurve(TERCurve):
         self.surface.meta.update(self.meta)
 
 
+class AtmoLibraryTERCurve(AtmosphericTERCurve):
+    """
+    Retrieve an atmospheric spectrum from a library file.
+
+    A local file is used if the `kwargs` include the parameter `filename`.
+    To use a remote file, a `url` and a `hash` (to ensure that the file is the
+    correct one) need to be specified.
+
+    The library file is a multi-extension FITS file with the following
+    structure:
+
+    extension 1
+      Catalogue - a table listing all extensions and parameters to identify the
+      one to use.
+
+    extension 2
+      Wavelength - the common wavelength grid on which all atmospheric spectra
+      are sampled.
+
+    extension 3 etc.
+      Tables with columns `transmission` and `emission`.
+
+    Currently the curves are distinguished by a single parameter (`pwv`).
+
+    .. versionadded:: 0.11.1
+
+    Examples
+    --------
+    ::
+
+        - name: atmosphere
+          class: AtmoLibraryTERCurve
+          kwargs:
+             filename: "!ATMO.spectrum.filename
+             pwv: 10.
+
+        - name: atmosphere
+          class: AtmoLibraryTERCurve
+          kwargs:
+             pwv: 25.
+             remote_filename: "!ATMO.spectrum.filename"
+
+    The location of a downloaded file is provided by `.meta['filename']`.
+    """
+
+    z_order: ClassVar[tuple[int, ...]] = (112, 512)
+
+    def __init__(self, cmds=None, **kwargs):
+        if "filename" not in kwargs:
+            if "remote_filename" not in kwargs:
+                raise ValueError("Neither filename nor remote_filename provided")
+            remote_filename = from_currsys(kwargs["remote_filename"], cmds)
+            kwargs["filename"] = self._download_library(remote_filename)
+
+        self.param = 'pwv'
+        super().__init__(cmds=cmds, **kwargs)
+        self.meta.update(kwargs)
+        self.load_table_from_library()
+
+    def update(self, **kwargs):
+        """Update the atmo library."""
+        if self.param not in kwargs:
+            logger.warning("Can only update with parameter %s", self.param)
+            return
+
+        if "remote_filename" in kwargs:
+            kwargs["filename"] = self._download_library(kwargs["remote_filename"])
+
+        self.meta[self.param] = kwargs[self.param]
+        self.load_table_from_library()
+
+    @staticmethod
+    def _download_library(fname: str) -> str:
+        """Download an atmo library from the server."""
+        retriever = create_retriever("atmo")
+        return retriever.fetch(fname, progressbar=True)
+
+    def load_table_from_library(self):
+        """Load the appropriate library extension based on parameter value."""
+        param = 'pwv'
+
+        self.value = from_currsys(self.meta[param], self.cmds)
+        self.ext_data = self._file[0].header["EDATA"]
+        self.ext_cat = self._file[0].header["ECAT"]
+        self.catalog = Table.read(self._file[self.ext_cat])
+
+        # select the row corresponding to param
+        idx = np.argmin(np.abs(self.catalog[param] - self.value)).astype(int)
+        extname = self.catalog["extension_name"][idx]
+        terhdu = self._file[extname]
+        self.meta["extname"] = extname
+        logger.debug("%s: Loading extension %s", self.__class__.__name__,
+                     self.meta["extname"])
+
+        tbl = Table.read(terhdu)
+        if "wavelength" not in tbl.colnames:
+            # Look for wavelength extension
+            if "WAVELENGTH" not in self._file:
+                raise ValueError("No wavelength vector found")
+            wavelength = Table.read(self._file["WAVELENGTH"])["wavelength"]
+            tbl.add_column(wavelength, index=0)
+
+        tbl.meta["wavelength_unit"] = tbl["wavelength"].unit
+        tbl.meta["emission_unit"] = tbl["emission"].unit
+
+        self.surface.table = tbl
+        self.surface.meta.update(tbl.meta)
+
+    def __str__(self) -> str:
+        """Return str(self)."""
+        msg = (f"{self.__class__.__name__}: \"{self.display_name}\"\n"
+               f"  - Parameter: {self.param} = {self.value}\n"
+               )
+        return msg
+
+
 class SkycalcTERCurve(AtmosphericTERCurve):
     """
     Retrieve an atmospheric spectrum from ESO's skycalc server.
@@ -317,6 +433,11 @@ class SkycalcTERCurve(AtmosphericTERCurve):
         self.skycalc_table = None
         self.skycalc_conn = None
 
+        use_local_file = from_currsys(self.meta["use_local_skycalc_file"],
+                                      self.cmds)
+        if not use_local_file:
+            self.skycalc_conn = skycalc_ipy.SkyCalc()
+
         if self.include is True:
             # Only query the database if the effect is actually included.
             # Sets skycalc_conn and skycalc_table.
@@ -332,11 +453,19 @@ class SkycalcTERCurve(AtmosphericTERCurve):
         if item is True and self.skycalc_table is None:
             self.load_skycalc_table()
 
+    ## Nice to have, but would need a setter
+    ##        self.parameters['pwv'] = 20.
+    ## This would have to set self.meta['pwv'] at the same time,
+    ## otherwise meta would always override.
+    #@property
+    #def parameters(self):
+    #    return self.skycalc_conn.values
+
     def load_skycalc_table(self):
+        """Download skycalc table based on the current parameters."""
         use_local_file = from_currsys(self.meta["use_local_skycalc_file"],
                                       self.cmds)
         if not use_local_file:
-            self.skycalc_conn = skycalc_ipy.SkyCalc()
             tbl = self.query_server()
 
             if "name" not in self.meta:
@@ -366,6 +495,7 @@ class SkycalcTERCurve(AtmosphericTERCurve):
         self.skycalc_table = tbl
 
     def query_server(self, **kwargs):
+        """Get table from the skycalc server."""
         self.meta.update(kwargs)
 
         if "wunit" in self.meta:
@@ -375,6 +505,7 @@ class SkycalcTERCurve(AtmosphericTERCurve):
                 if key in self.meta:
                     self.meta[key] = from_currsys(self.meta[key],
                                                   self.cmds) * scale_factor
+            self.meta["wunit"] = "nm"
 
         conn_kwargs = {key: self.meta[key] for key in self.meta
                        if key in self.skycalc_conn.defaults}
@@ -383,12 +514,37 @@ class SkycalcTERCurve(AtmosphericTERCurve):
 
         try:
             tbl = self.skycalc_conn.get_sky_spectrum(return_type="table")
-        except ConnectionError:
-            msg = "Could not connect to skycalc server"
+        except ConnectionError as exc:
+            msg = "Could not connect to skycalc server."
             logger.exception(msg)
-            raise ValueError(msg)
+            raise ValueError(msg) from exc
 
         return tbl
+
+    def update(self, **kwargs):
+        """Update the skycalc table with new parameter values.
+
+        .. versionadded:: 0.11.2
+        """
+        # Needed to update the source field
+        self._background_source = None
+
+        # Validate parameters
+        for key in kwargs:
+            if key not in self.skycalc_conn.keys:
+                logger.warning("Parameter %s not recognised. Ignored." % key)
+                kwargs.pop(key, None)
+        self.meta.update(kwargs)
+        self.load_skycalc_table()
+
+    def __str__(self):
+        """Return str(self)."""
+        msg = f"{self.__class__.__name__}: \"{self.display_name}\"\n"
+        for key, val in self.skycalc_conn.values.items():
+            comment = self.skycalc_conn.comments[key]
+            msg += f"\x1b[32m{'# ' + comment}'\x1b[0m\n"
+            msg += f"{key:15s}: {str(val):24s}\n"
+        return msg
 
 
 class QuantumEfficiencyCurve(TERCurve):
@@ -909,18 +1065,21 @@ class PupilTransmission(TERCurve):
         self.params = {"wave_min": "!SIM.spectral.wave_min",
                        "wave_max": "!SIM.spectral.wave_max"}
         self.params.update(kwargs)
-        self.cmds = cmds
-        wave_min = from_currsys(self.params["wave_min"], self.cmds) * u.um
-        wave_max = from_currsys(self.params["wave_max"], self.cmds) * u.um
-        transmission = from_currsys(transmission, cmds=self.cmds)
+        wave_min = from_currsys(self.params["wave_min"], cmds) * u.um
+        wave_max = from_currsys(self.params["wave_max"], cmds) * u.um
+        transmission = from_currsys(transmission, cmds=cmds)
 
         super().__init__(wavelength=[wave_min, wave_max],
                          transmission=[transmission, transmission],
                          emissivity=[0., 0.], **self.params)
+        self.cmds = cmds
 
     def update_transmission(self, transmission, **kwargs):
         """Set a new transmission value"""
-        self.__init__(transmission, **kwargs)
+        self.surface = SpectralSurface(wavelength=self.meta['wavelength'],
+                                       transmission=[transmission, transmission],
+                                       emission=[0, 0])
+        self.meta.update(self.surface.meta)
 
 
 class PupilMaskWheel(Effect):
@@ -954,13 +1113,14 @@ class PupilMaskWheel(Effect):
 
         self.meta.update(kwargs)
         mask_dict = from_currsys(self.meta["pupil_masks"], cmds=self.cmds)
+        self.meta = from_currsys(self.meta, cmds=self.cmds)
         names = mask_dict['names']
         transmissions = mask_dict['transmissions']
         self.masks = {}
         for name, trans in zip(names, transmissions):
             kwargs["name"] = name
             self.masks[name] = PupilTransmission(transmission=trans,
-                                                 cmds=cmds,
+                                                 cmds=self.cmds,
                                                  **kwargs)
         self.table = self.get_table(mask_dict)
 
@@ -973,16 +1133,23 @@ class PupilMaskWheel(Effect):
         if not maskname or maskname in self.masks:
             self.meta["current_mask"] = maskname
             self.include = maskname
+            if "message" in self.meta:
+                logger.warning(self.meta["message"], maskname)
         else:
             raise ValueError(f"Unknown pupil mask requested: {maskname}")
 
     @property
     def current_mask(self):
         """Return the currently used pupil mask."""
-        currmask = from_currsys(self.meta['current_mask'], cmds=self.cmds)
+        currmask = self.current_mask_name
         if not currmask:
             return False
         return self.masks[currmask]
+
+    @property
+    def current_mask_name(self):
+        """Return the name of the currently used pupil mask."""
+        return from_currsys(self.meta['current_mask'], cmds=self.cmds)
 
     def __getattr__(self, item):
         return getattr(self.current_mask, item)

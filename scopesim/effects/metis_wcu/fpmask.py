@@ -32,7 +32,7 @@ class FPMask:
 
     hdr = {
         "BG_SRC": True,
-        "BG_SURF": "WCU focal plane mask",  # TODO: more specific?
+        "BG_SURF": "WCU focal plane mask",
         "CTYPE1": "LINEAR",
         "CTYPE2": "LINEAR",
         "CRPIX1": 1024.5,
@@ -43,7 +43,7 @@ class FPMask:
         "CUNIT2": "arcsec",
         "CDELT1": 0.00547,
         "CDELT2": 0.00547,
-        "BUNIT": "PHOTLAM arcsec-2",
+        "BUNIT": "photlam arcsec-2",
         "SOLIDANG": "arcsec-2",
     }
 
@@ -52,7 +52,7 @@ class FPMask:
         maskname: Path | str | None = None,
         fpmask_filename_format: str | None = None,
         angle: float = 0,
-        shift: tuple[float, float] = (0, 0),
+        shift: tuple[float, float] = (0., 0.),
         **kwargs
     ):
         logger.debug("Initialising FPMask with %s", maskname)
@@ -64,6 +64,7 @@ class FPMask:
         if maskname == "open":
             self.holehdu = fits.ImageHDU()
             self.holehdu.header.update(self.hdr)
+            self.holehdu.header['BG_SURF'] = "WCU FP mask open"
             self.opaquehdu = None
         else:
             # Try to find the file as a path
@@ -88,17 +89,19 @@ class FPMask:
         """
         holehdu = fits.ImageHDU()
         holehdu.header.update(header)
-        holehdu.data = np.zeros((2047, 2047))
+        holehdu.header['BG_SURF'] = f"WCU FP mask {self.name} holes"
+        holehdu.data = np.zeros((2047, 2047), dtype=np.float32)
 
         opaquehdu = fits.ImageHDU()
         opaquehdu.header.update(header)
-        opaquehdu.data = np.ones((2047, 2047)) * self.pixarea.value
+        opaquehdu.header['BG_SURF'] = f"WCU FP mask {self.name} opaque"
+        opaquehdu.data = np.ones((2047, 2047), dtype=np.float32)
 
         # Hole locations
         tab = self.data_container.table
-        xhole = tab["x"].data
-        yhole = tab["y"].data
-        diam = tab["diam"].data
+        xhole = tab["x"].data.astype(float)
+        yhole = tab["y"].data.astype(float)
+        diam = tab["diam"].data.astype(float)
 
         if self.angle != 0:
             rangle = np.deg2rad(self.angle)
@@ -115,10 +118,11 @@ class FPMask:
         in_field = (xpix > 0) * (xpix < 2047) * (ypix > 0) * (ypix < 2047)
 
         for x, y, d in zip(xpix[in_field], ypix[in_field], diam[in_field]):
-            holearea = (d/2)**2 * np.pi
+            # holearea is the effective number of pixels covered by the hole
+            holearea = (d/2)**2 * np.pi / self.pixarea.value
             xint, yint, fracs = sub_pixel_fractions(x, y)
             holehdu.data[yint, xint] = np.array(fracs) * holearea
-            opaquehdu.data[yint, xint] *= 1 - np.array(fracs) * holearea/self.pixarea.value
+            opaquehdu.data[yint, xint] *= 1 - np.array(fracs) * holearea
 
         self.xpix = xpix
         self.ypix = ypix
