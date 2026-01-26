@@ -33,7 +33,7 @@ properties :
     nan_fill_value: 0.
 
   file :
-    local_packages_path : ""
+    local_packages_path : "./inst_pkgs/"
     server_base_url : "https://scopesim.univie.ac.at/InstPkgSvr/"
     retries: 3
     example_data:
@@ -46,7 +46,7 @@ properties :
       suburl: "atmo"
       hash_file : "atmo_registry.txt"
     use_cached_downloads : "update"
-    search_path : ["./inst_pkgs/", "./",]
+    search_path : ["./inst_pkgs/", "./"]
     error_on_missing_file : False
 
   reports :
