@@ -594,3 +594,27 @@ def rotate(x, y, x0, y0, angle):
     ynew = y0 + (x - x0) * np.sin(angle_rad) + (y - y0) * np.cos(angle_rad)
 
     return xnew, ynew
+
+
+class FoVSpecificAperture(ApertureList):
+    """
+    An aperture mask list that acts only on specific FoVs, selected by their IDs. Everything else is identical to an
+    ApertureList, except that it takes an additional parameter `fov_ids` to specify which FoVs it applies to.
+    """
+
+    required_keys = {"fov_ids"}
+    def __init__(self, **kwargs):
+        if "fov_ids" not in kwargs:
+            raise ValueError("fov_ids must be specified for FoVSpecificAperture")
+        self.fov_ids: list = kwargs.pop("fov_ids")
+        super().__init__(**kwargs)
+
+    def apply_to(self, obj, **kwargs):
+        """See parent docstring."""
+        if isinstance(obj, FovVolumeList):
+            new_vols = [vol for vol in obj.volumes if vol["meta"]["id"] not in self.fov_ids]
+            vols_to_apply = [vol for vol in obj.volumes if vol["meta"]["id"] in self.fov_ids]
+            obj.volumes = vols_to_apply
+            obj = super().apply_to(obj, **kwargs)
+            obj.volumes.extend(new_vols)
+        return obj
