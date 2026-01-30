@@ -11,8 +11,10 @@ from typing import ClassVar
 
 from tqdm.auto import tqdm
 
+import numpy as np
 from astropy.io import fits
 from astropy.table import Table
+import astropy.units as u
 
 from .effects import Effect
 from .ter_curves import FilterCurve
@@ -21,7 +23,8 @@ from ..optics.image_plane_utils import header_from_list_of_xy
 from ..optics.fov import FieldOfView
 from ..optics.fov_volume_list import FovVolumeList
 from ..utils import from_currsys, check_keys, figure_factory, get_logger
-
+from .data_container import DataContainer
+from ..optics import echelle
 
 logger = get_logger(__name__)
 
@@ -512,3 +515,139 @@ class SpectralTraceListWheel(Effect):
         if trace_list_name is not None:
             trace_list_eff = self.trace_lists[trace_list_name]
         return trace_list_eff
+
+
+class EchelleSpectralTraceList(SpectralTraceList):
+    """
+    SpectralTraceList effect for echelle spectrographs. Unlike SpectralTraceList, it generates the trace definitions
+    instead of loading them from FITS file. The arguments required to define the echelle traces are supplied through
+    a txt file containing a table of parameters using the filename kwarg.
+
+    Below is an example of how to define the echelle trace parameters (see irdb/ZShooter/traces/echelle_trace_parameters.txt):
+    ----------------------------------------------------------------
+    # min_wave_unit : nm
+    # max_wave_unit : nm
+    # echelle_blaze_unit : deg
+    # focal_length_unit : mm
+    # fwhm_unit : pixel
+    # detector_pad_unit : pixel
+    # pixel_size_unit : mm
+    # n_disp_unit : pixel
+    # n_xdisp_unit : pixel
+    # disp_freq_unit : mm
+    # xdisp_freq_unit : mm
+    # slitwidth_unit : arcsec
+
+    prefix    aperture_id    image_plane_id    m0    n    min_wave    max_wave    echelle_blaze    focal_length    fwhm    detector_pad    pixel_size    n_disp    n_xdisp     disp_freq    xdisp_freq    slitwidth    dispdir    plate_scale
+    nIR        0              0                40    24    970         2500        64.2             225             4.7     10              0.015         4096      4096        45           175           10           x          0.159574468085
+    gri        1              1                36    18    490         1020        64.2             225             4.7     10              0.015         4096      4096        100          500           10           x          0.159574468085
+    ub         2              2                29    11    315         515         64.2             225             4.7     10              0.015         4096      4096        200          1000          10           x          0.159574468085
+    ----------------------------------------------------------------
+
+    The calculated traces are stored in the same HDUList format as required by SpectralTraceList,
+    and supplied to the parent class through hdulist kwarg.
+
+    """
+    required_keys = {"filename"}
+    z_order = (71, 271, 671)
+
+    def __init__(self, **kwargs):
+        check_keys(kwargs, self.required_keys, action="error")
+
+        trace_params = DataContainer(filename=kwargs['filename'])
+        hdulist = self._generate_trace_hdulist(trace_params)
+        kwargs["hdulist"] = hdulist
+        super().__init__(**kwargs)
+
+    def _generate_trace_hdulist(self, trace_params):
+        hdul = fits.HDUList()
+        hdul.append(fits.PrimaryHDU())
+        hdul[0].header["EXTNAME"] = "OVERVIEW"
+        hdul[0].header["ECAT"] = 1
+        hdul[0].header["EDATA"] = 2
+
+        trace_ids, ap_ids, im_ids = [], [], []
+        for row in trace_params.table:
+            prefix = row["prefix"]
+            for i in range(row["m0"] - row["n"], row["m0"] + 1):
+                trace_ids.append(f'{prefix}_{i:d}')
+                ap_ids.append(row["aperture_id"])
+                im_ids.append(row["image_plane_id"])
+
+        hdul.append(fits.BinTableHDU(Table(
+            {'description': trace_ids,
+             'extension_id': np.arange(len(trace_ids), dtype=int)+2,
+             'aperture_id': ap_ids,
+             'image_plane_id': im_ids
+             })))
+
+        for row in trace_params.table:
+            prefix = row["prefix"]
+            min_order = row['m0'] - row['n']
+            max_order = row['m0']
+            min_wave = row['min_wave'] * u.Unit(trace_params.meta["min_wave_unit"])
+            max_wave = row['max_wave'] * u.Unit(trace_params.meta["max_wave_unit"])
+            focal_len = row['focal_length'] * u.Unit(trace_params.meta["focal_length_unit"])
+            xdisp_npix = row['n_xdisp']
+            pix_size = row['pixel_size'] * u.Unit(trace_params.meta["pixel_size_unit"])
+            x_disp_len = (xdisp_npix - 2 * row['detector_pad']) * pix_size
+            echelle_angle = np.deg2rad(row['echelle_blaze'])
+            alpha = np.deg2rad(row['alpha'])
+            beta_center = np.deg2rad(row['beta_center'])
+            # cross_disperser = echelle.GratingSetup(
+            #     groove_length=u.Unit(trace_params.meta["xdisp_freq_unit"]) / row['xdisp_freq'],
+            #     guess_littrow=(min_wave, max_wave,
+            #                    x_disp_len, focal_len))
+            cross_disperser = echelle.GratingSetup(alpha=alpha, beta_center=beta_center,
+                                                   delta=beta_center,
+                                                   groove_length=u.Unit(trace_params.meta["xdisp_freq_unit"]) / row['xdisp_freq'])
+
+            ss = echelle.SpectrographSetup((min_order, max_order),
+                                           max_wave,
+                                           row['fwhm'] * u.Unit(trace_params.meta["fwhm_unit"]),
+                                           focal_len,
+                                           echelle.GratingSetup(alpha=echelle_angle, beta_center=echelle_angle,
+                                                                delta=echelle_angle,
+                                                                groove_length=u.Unit(trace_params.meta["disp_freq_unit"]) / row['disp_freq']),
+                                           echelle.Detector(row['n_disp'], xdisp_npix, pix_size),
+                                           cross_disperser=cross_disperser
+                                           )
+
+            fsr_edges = ss.edge_wave(fsr=True)
+
+            slit_edge = (row['slitwidth'] / 2) * u.Unit(trace_params.meta["slitwidth_unit"])
+            slit_pos = np.linspace(-slit_edge, slit_edge, num=3)
+            slit_offset_pix = slit_pos / (row['plate_scale'] * u.arcsec)
+
+            xvals, yvals = [], []
+            for i, order in enumerate(ss.orders):
+                wave = fsr_edges[i]
+                x = ss.wavelength_to_x_pixel(wave, order)
+                y = ss.wavelength_to_y_pixel(wave)
+                pix_y = y + row['detector_pad'] + slit_offset_pix[:, None]
+                xval = np.tile(x, slit_offset_pix.size)*pix_size.to('mm')
+                yval = pix_y.ravel()*pix_size.to('mm')
+                xvals.append(xval)
+                yvals.append(yval)
+
+            xcent = (np.min(xvals) + (np.max(xvals) - np.min(xvals))/2) * u.mm
+            ycent = (np.min(yvals) + (np.max(yvals) - np.min(yvals))/2) * u.mm
+
+            for i, order in enumerate(ss.orders):
+                wave = fsr_edges[i]
+                s = np.tile(slit_pos, wave.size).reshape(wave.size, slit_pos.size).T.ravel()
+                w = np.tile(wave, slit_offset_pix.size)
+                xval = xvals[i] - xcent   # Centering on 0,0 at detector center
+                yval = yvals[i] - ycent   # Centering on 0,0 at detector center
+
+                order_table = Table(
+                    {'wavelength': w.to(u.um), 's': s,
+                     'x': xval,
+                     'y': yval})
+
+                trace_hdu = fits.BinTableHDU(order_table)
+                trace_hdu.header['DISPDIR'] = row['dispdir']
+                trace_hdu.header["EXTNAME"] = f'{prefix}_{order:d}'
+                hdul.append(trace_hdu)
+
+        return hdul
