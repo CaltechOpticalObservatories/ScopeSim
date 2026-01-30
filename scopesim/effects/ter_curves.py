@@ -10,6 +10,9 @@ from scipy import integrate
 from astropy import units as u
 from astropy.io import fits
 from astropy.table import Table
+from astropy.wcs import WCS
+from astropy.io import ascii as ioascii
+from copy import deepcopy
 
 import skycalc_ipy
 
@@ -18,6 +21,7 @@ from .ter_curves_utils import (add_edge_zeros, combine_two_spectra,
                                apply_throughput_to_cube, download_svo_filter,
                                download_svo_filter_list)
 from ..optics.fov_volume_list import FovVolumeList
+from ..optics.fov import FieldOfView
 from ..optics.surface import SpectralSurface
 from ..source.source import Source
 from ..source.source_fields import (CubeSourceField, SpectrumSourceField,
@@ -79,8 +83,8 @@ class TERCurve(Effect):
         3.0         0.9             0.1
 
     """
-
-    z_order: ClassVar[tuple[int, ...]] = (10, 110, 510)
+    ## Made TERCurve a FOV effect as well to be able to use it for dichroic trees which act on FoV objects
+    z_order: ClassVar[tuple[int, ...]] = (10, 110, 510, 610)
     report_plot_include: ClassVar[bool] = True
     report_table_include: ClassVar[bool] = False
 
@@ -147,6 +151,15 @@ class TERCurve(Effect):
 
             obj.shrink("wave", [wave_min.to_value(u.um),
                                 wave_max.to_value(u.um)])
+
+        ## If obj is a FieldOfView, apply the throughput
+        if isinstance(obj, FieldOfView):
+            thru = self.throughput
+            if obj.hdu is not None and obj.hdu.header['NAXIS'] == 3:
+                swcs = WCS(obj.hdu.header).spectral
+                with u.set_enabled_equivalencies(u.spectral()):
+                    wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
+                obj.hdu = apply_throughput_to_cube(obj.hdu, thru, wave)
 
         return obj
 
@@ -1232,3 +1245,113 @@ def _guard_plot_axes(which, axes):
         if isinstance(axes, Collection):
             raise TypeError(("axes must be a single axes object if which "
                              "contains only one element"))
+
+
+class DichroicTreeEffect(Effect):
+    """
+    An effect that holds and applies a tree of dichroic TERCurves.
+
+    The tree is defined in a table in a txt file where each row is a tree branch and each column is a dichroic.
+    The column names should match the names of the TERCurve file names.
+    The cells contain either a X (for no dichroic at that position), a T (for a dichroic transmission branch)
+    or a R (for a dichroic reflection branch).
+
+    Example structure of the dichroic tree file with two dichroics:
+    ```
+    # dichroic_tree.txt
+    id dichroic1 dichroic2
+    1       T        X
+    2       R        T
+    3       R        R
+    ```
+    The config definition would look like this:
+    ```
+    name: dichroic_tree
+    class: DichroicTreeEffect
+    kwargs:
+        tree_filename: "dichroic_tree.dat"
+        dichroic_names: ["dichroic1", "dichroic2"]
+        filename_format: "TER_{}.dat"
+    ```
+
+    This effect creates a volume of FoVs, one for each row in the dichroic tree table.
+    """
+    required_keys = {"tree_filename", "dichroic_names", "filename_format"}
+    z_order: ClassVar[tuple[int, ...]] = (117, 217, 617)
+
+    def __init__(self, cmds=None, **kwargs):
+        super().__init__(cmds=cmds, **kwargs)
+        check_keys(kwargs, self.required_keys, action="error")
+
+        self.meta.update(kwargs)
+
+        # Load all the dichroic TER curves
+        self.dichroics = {}
+        dichroic_names = from_currsys(self.meta["dichroic_names"], cmds=self.cmds)
+        filename_format = from_currsys(self.meta["filename_format"], cmds=self.cmds)
+
+        for name in dichroic_names:
+            logger.debug(f"Loading dichroic {name} from {filename_format.format(name)}")
+            self.dichroics[name] = TERCurve(filename=filename_format.format(name),
+                                            cmds=cmds, **kwargs)
+
+        # Load the dichroic tree structure
+        tree_path = find_file(from_currsys(self.meta["tree_filename"], cmds=self.cmds))
+        self.table = ioascii.read(tree_path, format="basic")
+
+    def apply_to(self, obj, **kwargs):
+        """
+        To the object, loop through each row of the table and apply the dichroics (defined by columns)
+        with the corresponding action defined in the table cell.
+        Each dichroic is a TERcurve and has an apply_to method.
+        The output should be a list of FoVs, one for each row in the table.
+        """
+        action_lookup = {"T": "transmission", "R": "reflection", "X": None}
+
+        # 1. During setup of the FieldofViews
+        if isinstance(obj, FovVolumeList):
+            logger.debug("Executing %s, FoV setup", self.meta['name'])
+            new_vols = []
+            for row in self.table:
+                arm_id = row["id"]
+                vols = deepcopy(obj)
+
+                for dichroic_name in row.colnames:
+                    if dichroic_name not in self.dichroics.keys():
+                        continue
+                    dichroic = self.dichroics[dichroic_name]
+                    action = action_lookup.get(row[dichroic_name], None)
+                    if action is not None:
+                        params = {"action": action}
+                        dichroic.surface.meta.update(params)
+                        vols = dichroic.apply_to(vols, **kwargs)
+
+                # Set the id of the resulting FoVs. Looks like id field in meta is not being used for anything else.
+                ## TODO: Update to aperture_id after SelectorWheel is in place??
+                for vol in vols.volumes:
+                    vol["meta"]["id"] = arm_id
+                new_vols.extend(vols.volumes)
+
+            obj.volumes = new_vols
+
+        # 2. During observe
+        if isinstance(obj, FieldOfView):
+            logger.debug("Executing %s, observe", self.meta['name'])
+            obj_id = obj.meta.get("id", None)
+            row = self.table[self.table["id"] == obj_id]
+
+            if len(row) != 1:
+                raise ValueError(f"This FoV does not have the correct id to match "
+                                 f"a row in the dichroic tree table: {obj_id}")
+
+            for dichroic_name in row.colnames:
+                if dichroic_name not in self.dichroics.keys():
+                    raise ValueError(f"Dichroic name {dichroic_name} not found in saved dichroics.")
+                dichroic = self.dichroics[dichroic_name]
+                action = action_lookup.get(row[dichroic_name][0], None)
+                if action is not None:
+                    params = {"action": action}
+                    dichroic.surface.meta.update(params)
+                    dichroic.apply_to(obj, **kwargs)
+
+        return obj
