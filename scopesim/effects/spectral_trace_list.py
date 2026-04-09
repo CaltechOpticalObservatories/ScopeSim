@@ -559,7 +559,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
         trace_params = DataContainer(filename=trace_param_filename)
         hdulist = self._generate_trace_hdulist(trace_params)
         hdulist.writeto(f"{from_rc_config('!SIM.file.local_packages_path')}/"
-                        f"{from_currsys('!OBS.instrument', self.cmds)}/"
+                        f"{self.cmds.package_name}/"
                         f"{os.path.dirname(trace_param_filename)}/"
                         f"analytical_echelle_traces.fits", overwrite=True)
         kwargs["hdulist"] = hdulist
