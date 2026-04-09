@@ -84,9 +84,9 @@ class PalaceLineEmission(Effect):
                "showplot": False
                }
 
-    def __init__(self, cmds=None, **kwargs):
+    def __init__(self, **kwargs):
         check_keys(kwargs, self.required_keys, action="error")
-        super().__init__(cmds=cmds, **kwargs)
+        super().__init__(**kwargs)
 
         ## Set PALACE model output directory if save_model_output is True.
         if self.meta.get("save_model_output", False):
@@ -109,20 +109,20 @@ class PalaceLineEmission(Effect):
             self.parlist["resol"] = resol
 
         ## Set the rest of the PALACE model input params from sim and config settings.
-        if "!OBS.mjdobs" in cmds:
-            obstime = Time(from_currsys("!OBS.mjdobs", cmds), format="mjd") ## assuming local time at !ATMO.location
+        if "!OBS.mjdobs" in self.cmds:
+            obstime = Time(from_currsys("!OBS.mjdobs", self.cmds), format="mjd") ## assuming local time at !ATMO.location
             mbin, tbin = self.get_mbin_tbin(obstime)
         else:
             obstime = None
             mbin, tbin = 0, 0
-        if "!OBS.alt" in cmds:
-            z = 90 - from_currsys("!OBS.alt", cmds)
-        elif "!OBS.ra" in cmds and "!OBS.dec" in cmds and obstime is not None:
-            target = get_target(cmds, {"ra": "!OBS.ra", "dec": "!OBS.dec"})
-            location = get_location(cmds)
+        if "!OBS.alt" in self.cmds:
+            z = 90 - from_currsys("!OBS.alt", self.cmds)
+        elif "!OBS.ra" in self.cmds and "!OBS.dec" in self.cmds and obstime is not None:
+            target = get_target(self.cmds, {"ra": "!OBS.ra", "dec": "!OBS.dec"})
+            location = get_location(self.cmds)
             z = get_zenith_angle(target, location, obstime)
-        elif "!OBS.airmass" in cmds:
-            z = airmass2zendist(from_currsys("!OBS.airmass", cmds))
+        elif "!OBS.airmass" in self.cmds:
+            z = airmass2zendist(from_currsys("!OBS.airmass", self.cmds))
         else:
             z = 0.0
 
@@ -162,12 +162,13 @@ class PalaceLineEmission(Effect):
 
     def apply_to(self, obj, **kwargs):
         if self.meta.get("only_line", False):
-            self.line_TER.apply_to(obj)
+            obj = self.line_TER.apply_to(obj)
         elif self.meta.get("only_continuum", False):
-            self.continuum_TER.apply_to(obj)
+            obj = self.continuum_TER.apply_to(obj)
         else:
-            self.line_TER.apply_to(obj)
-            self.continuum_TER.apply_to(obj)
+            obj = self.line_TER.apply_to(obj)
+            obj = self.continuum_TER.apply_to(obj)
+        return obj
 
     @staticmethod
     def get_mbin_tbin(obstime):
@@ -264,16 +265,15 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
     z_order: ClassVar[tuple[int, ...]] = (112, 512)
     required_keys = {"time_str"}
 
-    def __init__(self, cmds=None, **kwargs):
+    def __init__(self, **kwargs):
         check_keys(kwargs, self.required_keys)
-        self.cmds = cmds if cmds else rc.__currsys__
+        self.cmds = kwargs.get("cmds")
         self.time = self.resolve_time(kwargs["time_str"])
         self.moon = get_body("moon", self.time)
         target_kwargs = kwargs.get("target", {'alt':90, 'az':0})
         target_kwargs['obstime'] = self.time
         self.target = get_target(self.cmds, target_kwargs)
         skycalc_params = self.get_skycalc_inputs(**kwargs)
-        print(skycalc_params)
         kwargs.update(skycalc_params)
 
         super().__init__(**kwargs)
