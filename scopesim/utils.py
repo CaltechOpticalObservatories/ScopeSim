@@ -21,6 +21,8 @@ from astropy import units as u
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.table import Column, Table
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.time import Time
 
 from astar_utils import get_logger, is_bangkey
 
@@ -1030,3 +1032,47 @@ def seq(start, stop, step=1):
         return np.minimum(sequence, stop)
     else:
         return np.maximum(sequence, stop)
+
+def get_target(alt: float = None,
+               az: float = None,
+               location: EarthLocation = None,
+               obstime: Time = None,
+               ra: str | float = None,
+               dec: str | float = None,
+               airmass: float = None) -> SkyCoord:
+    """
+    Gets target coordinates from
+    - alt, az, location, obstime if provided, otherwise
+    - ra, dec if provided, otherwise
+    - airmass, location, obstime if provided (az=0), otherwise returns None.
+    """
+    coord = None
+    if alt is not None and az is not None and obstime is not None and location is not None:
+        coord = SkyCoord(alt=alt, az=az, frame="altaz", unit=(u.deg, u.deg), location=location, obstime=obstime, distance=1*u.AU)
+    elif ra is not None and dec is not None:
+        if isinstance(ra, float) and isinstance(dec, float):
+            coord = SkyCoord(ra=ra, dec=dec, frame="icrs", unit=(u.deg, u.deg), distance=1*u.AU)
+        elif isinstance(ra, str) and isinstance(dec, str):
+            coord = SkyCoord(ra=ra, dec=dec, frame="icrs", unit=(u.hourangle, u.deg), distance=1*u.AU)
+        else:
+            logger.warning("RA and Dec must be both float or both string. Cannot determine target coordinates.")
+    elif airmass is not None and obstime is not None and location is not None:
+        z = airmass2zendist(airmass)
+        coord = SkyCoord(alt=90-z, az=0, frame="altaz", unit=(u.deg, u.deg), location=location, obstime=obstime, distance=1*u.AU)
+    else:
+        raise ValueError("No valid target coordinates provided. Please provide either alt and az, or ra and dec, or airmass.")
+    return coord
+
+def get_location(lon: float, lat: float, alt: float) -> EarthLocation:
+    """
+    Gets observer location from lon (deg), lat (deg), alt (m)
+    """
+    return EarthLocation.from_geodetic(lon=lon*u.deg, lat=lat*u.deg, height=alt*u.m)
+
+
+def get_zenith_angle(target: SkyCoord, location: EarthLocation, obstime: Time) -> float:
+    """
+    Calculates zenith angle from target, location and observation time
+    """
+    altaz = target.transform_to(AltAz(obstime=obstime, location=location))
+    return 90 - altaz.alt.deg

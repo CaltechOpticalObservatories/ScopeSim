@@ -4,12 +4,11 @@ from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun, get_bod
 import astropy.units as u
 from astropy.time import Time
 from astropy.table import Table
-from astropy.units import Quantity
 
 from palace import palace
 
 from ..utils import (check_keys, get_logger, airmass2zendist, zendist2airmass, from_currsys, from_rc_config, find_file,
-                     parallactic_angle)
+                     get_target, get_location, get_zenith_angle)
 from .. import rc
 from ..effects import Effect, SkycalcTERCurve, TERCurve
 
@@ -96,7 +95,7 @@ class PalaceLineEmission(Effect):
                 self.parlist["outdir"] = f"{from_rc_config("!SIM.file.local_packages_path")}/{self.cmds.package_name}"
 
         ## Set PALACE model spectral resolution input from simulation settings if provided.
-        if check_keys(self.cmds, {"!SIM.spectral.spectral_resolution"}):
+        if check_keys(self.cmds, {"!SIM.spectral.spectral_resolution"}, action="warn"):
             resol = 2*from_currsys("!SIM.spectral.spectral_resolution", self.cmds)
             _dlam = 1.0/resol
             if _dlam < 1e-7:
@@ -106,23 +105,27 @@ class PalaceLineEmission(Effect):
                 logger.warning(f"Spectral resolution {resol} is higher than default PALACE dlam (1e-6), setting dlam to 1e-7")
                 self.parlist["dlam"] = 1e-7
             self.parlist["resol"] = resol
-        if check_keys(self.cmds, {"!SIM.spectral.wave_min", "!SIM.spectral.wave_max"}):
-            wave_unit = from_currsys("!SIM.spectral.wave_unit", self.cmds) if check_keys(self.cmds, {"!SIM.spectral.wave_unit"}) else "um"
-            self.parlist["lammin"] = max(from_currsys("!SIM.spectral.wave_min", self.cmds)*u.Unit(wave_unit).to(u.um).value, 0.3)
-            self.parlist["lammax"] = min(from_currsys("!SIM.spectral.wave_max", self.cmds)*u.Unit(wave_unit).to(u.um).value, 2.5)
+        if check_keys(self.cmds, {"!SIM.spectral.wave_min", "!SIM.spectral.wave_max"}, action="warn"):
+            wave_unit = from_currsys("!SIM.spectral.wave_unit", self.cmds) if "!SIM.spectral.wave_unit" in self.cmds else "um"
+            self.parlist["lammin"] = max(from_currsys("!SIM.spectral.wave_min", self.cmds)*u.Unit(wave_unit).to(u.um), 0.3)
+            self.parlist["lammax"] = min(from_currsys("!SIM.spectral.wave_max", self.cmds)*u.Unit(wave_unit).to(u.um), 2.5)
 
         ## Set the rest of the PALACE model input params from sim and config settings.
-        if check_keys(self.cmds, {"!OBS.mjdobs"}):
+        #### month and time
+        if check_keys(self.cmds, {"!OBS.mjdobs"}, action="warn"):
             obstime = Time(from_currsys("!OBS.mjdobs", self.cmds), format="mjd") ## assuming local time at !ATMO.location
             mbin, tbin = self.get_mbin_tbin(obstime)
         else:
             obstime = None
             mbin, tbin = 0, 0
-
-        if check_keys(self.cmds, {"!OBS.alt"}):
+        self.parlist["mbin"] = mbin
+        self.parlist["tbin"] = tbin
+        #### zenith
+        if check_keys(self.cmds, {"!OBS.alt"}, action="warn"):
             logger.info("Using !OBS.alt to determine zenith angle for PALACE model input.")
             z = 90 - from_currsys("!OBS.alt", self.cmds)
-        elif obstime is not None and check_keys(self.cmds, {"!OBS.ra", "!OBS.dec", "!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}):
+        elif (obstime is not None and
+              check_keys(self.cmds, {"!OBS.ra", "!OBS.dec", "!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="warn")):
             logger.info("Using !OBS.ra, !OBS.dec, and !ATMO location info to determine zenith angle for PALACE model input.")
             target = get_target(ra=from_currsys("!OBS.ra", self.cmds),
                                 dec=from_currsys("!OBS.dec", self.cmds))
@@ -130,16 +133,15 @@ class PalaceLineEmission(Effect):
                                     lat=from_currsys("!ATMO.latitude", self.cmds),
                                     alt=from_currsys("!ATMO.altitude", self.cmds))
             z = get_zenith_angle(target, location, obstime)
-        elif check_keys(self.cmds, {"!OBS.airmass"}):
+        elif check_keys(self.cmds, {"!OBS.airmass"}, action="warn"):
             logger.info("Using !OBS.airmass to determine zenith angle for PALACE model input.")
             z = airmass2zendist(from_currsys("!OBS.airmass", self.cmds))
         else:
             logger.warning("No valid input found to determine zenith angle for PALACE model. Defaulting to z=0 (zenith).")
             z = 0.0
-
-        self.parlist.update({"z": z, "mbin": mbin, "tbin": tbin,
-                             "pwv": from_currsys("!ATMO.pwv", self.cmds) if check_keys(self.cmds, "!ATMO.pwv") else 2.5,
-                            })
+        self.parlist["z"] = z
+        #### pwv
+        self.parlist["pwv"] = from_currsys("!ATMO.pwv", self.cmds) if check_keys(self.cmds, {"!ATMO.pwv"}, action="warn") else 2.5
 
         ## Update parlist with values from kwargs if provided, otherwise keep the above.
         kwpars = self.meta.get("parlist", {})
@@ -275,12 +277,18 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
     required_keys = {"time_str"}
 
     def __init__(self, **kwargs):
-        check_keys(kwargs, self.required_keys)
+        check_keys(kwargs, self.required_keys, action="error")
         self.cmds = kwargs.get("cmds")
         self.time = self.resolve_time(kwargs["time_str"])
+        self.location = None
+        if check_keys(self.cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="error"):
+            self.location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
+                                    lat=from_currsys("!ATMO.latitude", self.cmds),
+                                    alt=from_currsys("!ATMO.altitude", self.cmds))
 
         target_kwargs: dict[str, Any] = kwargs.get("target", {'alt':90, 'az':0})
         target_kwargs['obstime'] = self.time
+        target_kwargs['location'] = self.location
         for k, v in target_kwargs.items():
             if isinstance(v, str) and '!' in v:
                 target_kwargs[k] = from_currsys(v, self.cmds)
@@ -296,7 +304,7 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
     def get_skycalc_inputs(self, **kwargs):
         params = {
             "pwv_mode": "pwv",
-            "pwv": from_currsys("!ATMO.pwv", self.cmds) if check_keys(self.cmds, {"!ATMO.pwv"}) else 2.5,
+            "pwv": from_currsys("!ATMO.pwv", self.cmds) if check_keys(self.cmds, {"!ATMO.pwv"}, action="warn") else 2.5,
             "msolflux": 130.0,
             "incl_starlight": "Y",
             "incl_zodiacal": "Y",
@@ -307,13 +315,13 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
             "vacair": "air",
             "wunit": "nm",
             "wgrid_mode": 'fixed_wavelength_step',
-            "wres": from_currsys("!SIM.spectral.spectral_resolution", self.cmds) if check_keys(self.cmds, {"!SIM.spectral.spectral_resolution"}) else 80000,
+            "wres": from_currsys("!SIM.spectral.spectral_resolution", self.cmds) if check_keys(self.cmds, {"!SIM.spectral.spectral_resolution"}, action="warn") else 80000,
         }
-        if check_keys(self.cmds, {"!SIM.spectral.wave_min", "!SIM.spectral.wave_max", "!SIM.spectral.spectral_bin_width"}):
-            wave_unit = from_currsys("!SIM.spectral.wave_unit", self.cmds) if check_keys(self.cmds, {"!SIM.spectral.wave_unit"}) else "um"
-            params["wmin"] = max(from_currsys("!SIM.spectral.wave_min", self.cmds)*u.Unit(wave_unit).to(u.nm).value, 300.0)
-            params["wmax"] = min(from_currsys("!SIM.spectral.wave_max", self.cmds)*u.Unit(wave_unit).to(u.nm).value, 2500.0)
-            params["wdelta"] = (from_currsys("!SIM.spectral.spectral_bin_width", self.cmds)*u.Unit(wave_unit).to(u.nm).value)
+        if check_keys(self.cmds, {"!SIM.spectral.wave_min", "!SIM.spectral.wave_max", "!SIM.spectral.spectral_bin_width"}, action="warn"):
+            wave_unit = from_currsys("!SIM.spectral.wave_unit", self.cmds) if "!SIM.spectral.wave_unit" in self.cmds else "um"
+            params["wmin"] = max(from_currsys("!SIM.spectral.wave_min", self.cmds)*u.Unit(wave_unit).to(u.nm), 300.0)
+            params["wmax"] = min(from_currsys("!SIM.spectral.wave_max", self.cmds)*u.Unit(wave_unit).to(u.nm), 2500.0)
+            params["wdelta"] = (from_currsys("!SIM.spectral.spectral_bin_width", self.cmds)*u.Unit(wave_unit).to(u.nm))
         else:
             params["wmin"] = 300.0
             params["wmax"] = 2500.0
@@ -324,17 +332,10 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
         params["ecl_lon"] = target_ecl.lon.deg
         params["ecl_lat"] = target_ecl.lat.deg
 
-        if check_keys(self.cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}):
-            location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
-                                    lat=from_currsys("!ATMO.latitude", self.cmds),
-                                    alt=from_currsys("!ATMO.altitude", self.cmds))
-        else:
-            raise ValueError("Observer location is required to determine moon position and separation from target for "
-                             "SkyCalc inputs. Please provide !ATMO.longitude, !ATMO.latitude and !ATMO.altitude in the config.")
         moon = get_body("moon", self.time)
-        alt_moon = moon.transform_to(AltAz(obstime=self.time, location=location)).alt.deg
+        alt_moon = moon.transform_to(AltAz(obstime=self.time, location=self.location)).alt.deg
         z_moon = 90 - alt_moon
-        z_target = get_zenith_angle(self.target, location, self.time)
+        z_target = get_zenith_angle(self.target, self.location, self.time)
         moon_target_sep = moon.separation(self.target).deg
         if (abs(z_target - z_moon) < moon_target_sep) and (moon_target_sep < abs(z_target + z_moon)):
             params.update({
@@ -413,12 +414,12 @@ def get_moon_phase(time: Time, get_elongation=False):
     else:
         raise ValueError(f"Invalid time type: {type(time)}, should be astropy Time object.")
 
-def get_moon_fli(phase_angle: Quantity):
+def get_moon_fli(phase_angle: u.Quantity):
     """
     Calculates fraction of lunar illumination (FLI) from moon phase angle.
     FLI ranges from 0 to 1, with 0 being new moon and 1 being full moon.
     """
-    if isinstance(phase_angle, Quantity):
+    if isinstance(phase_angle, u.Quantity):
         return (1 + np.cos(phase_angle.to(u.rad).value)) / 2
     else:
         raise ValueError(f"Invalid phase angle type: {type(phase_angle)}, should be astropy Quantity object with angle units.")
@@ -445,46 +446,3 @@ def get_next_moon(moontype="full"):
         raise ValueError(f"Invalid moon type: {moontype}, should be 'full', 'new' or 'half'.")
 
 
-def get_target(alt: float = None,
-               az: float = None,
-               location: EarthLocation = None,
-               obstime: Time = None,
-               ra: str | float = None,
-               dec: str | float = None,
-               airmass: float = None) -> SkyCoord:
-    """
-    Gets target coordinates from
-    - alt, az, location, obstime if provided, otherwise
-    - ra, dec if provided, otherwise
-    - airmass, location, obstime if provided (az=0), otherwise returns None.
-    """
-    coord = None
-    if alt is not None and az is not None and obstime is not None and location is not None:
-        coord = SkyCoord(alt=alt, az=az, frame="altaz", unit=(u.deg, u.deg), location=location, obstime=obstime, distance=1*u.AU)
-    elif ra is not None and dec is not None:
-        if isinstance(ra, float) and isinstance(dec, float):
-            coord = SkyCoord(ra=ra, dec=dec, frame="icrs", unit=(u.deg, u.deg), distance=1*u.AU)
-        elif isinstance(ra, str) and isinstance(dec, str):
-            coord = SkyCoord(ra=ra, dec=dec, frame="icrs", unit=(u.hourangle, u.deg), distance=1*u.AU)
-        else:
-            logger.warning("RA and Dec must be both float or both string. Cannot determine target coordinates.")
-    elif airmass is not None and obstime is not None and location is not None:
-        z = airmass2zendist(airmass)
-        coord = SkyCoord(alt=90-z, az=0, frame="altaz", unit=(u.deg, u.deg), location=location, obstime=obstime, distance=1*u.AU)
-    else:
-        raise ValueError("No valid target coordinates provided. Please provide either alt and az, or ra and dec, or airmass.")
-    return coord
-
-def get_location(lon: float, lat: float, alt: float) -> EarthLocation:
-    """
-    Gets observer location from lon (deg), lat (deg), alt (m)
-    """
-    return EarthLocation.from_geodetic(lon=lon*u.deg, lat=lat*u.deg, height=alt*u.m)
-
-
-def get_zenith_angle(target: SkyCoord, location: EarthLocation, obstime: Time) -> float:
-    """
-    Calculates zenith angle from target, location and observation time
-    """
-    altaz = target.transform_to(AltAz(obstime=obstime, location=location))
-    return 90 - altaz.alt.deg
