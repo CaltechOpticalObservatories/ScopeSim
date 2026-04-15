@@ -158,13 +158,15 @@ class PalaceLineEmission(Effect):
         ray_per_nm = (1e10 / (4 * np.pi)) * (u.photon / (u.s * u.m ** 2 * u.steradian * u.nm))
 
         ## make TER curves and add to the effect
-        cont_kwargs = {"array_dict": {"wavelength": spec_cont["lam"].data,
+        cont_kwargs = {"name": "palace_airglow_continuum",
+                       "array_dict": {"wavelength": spec_cont["lam"].data,
                                       "transmission": [1.0]*len(spec_cont),
                                       "emission": spec_cont["flux"].data * ray_per_nm.to(u.photon / (u.s * u.m ** 2 * u.um * u.arcsec**2))},
                        "wavelength_unit": "um",
                        "emission_unit": "ph s-1 m-2 um-1"}
         self.continuum_TER = TERCurve(**cont_kwargs)
-        line_kwargs = {"array_dict": {"wavelength": spec_line["lam"].data,
+        line_kwargs = {"name": "palace_airglow_line",
+                       "array_dict": {"wavelength": spec_line["lam"].data,
                                       "transmission": [1.0]*len(spec_line),
                                       "emission": spec_line["flux"].data * ray_per_nm.to(u.photon / (u.s * u.m ** 2 * u.um * u.arcsec**2))},
                        "wavelength_unit": "um",
