@@ -281,6 +281,7 @@ class MoffatPSF(AnalyticalPSF):
         npts = (fov.meta["wave_max"] - fov.meta["wave_min"]) / (from_currsys("!SIM.spectral.spectral_bin_width", self.cmds) * u.um)
         ##sample only npts from len(fov.waveset)
         wavelengths = fov.waveset[::max(1, int(len(fov.waveset) / npts))]
+        ## get fwhm and gamma for the sampled wave pts
         fwhms = self.fwhm(wavelengths).to(u.arcsec) / pixel_scale
         gammas = self.fwhm2gamma(fwhms, self.alpha).value
         ksize = int(4.0*np.max(fwhms).value)
