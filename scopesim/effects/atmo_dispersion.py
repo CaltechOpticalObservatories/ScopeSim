@@ -11,7 +11,7 @@ from scipy.interpolate import make_interp_spline, RegularGridInterpolator
 from scipy.ndimage import map_coordinates
 
 from .effects import Effect
-from ..optics import FieldOfView3D
+from ..optics.fov import FieldOfView3D
 from ..utils import (from_currsys, get_target, get_location, get_zenith_angle, parallactic_angle,
                      get_logger, check_keys, is_night, quantity_from_table)
 
