@@ -21,7 +21,7 @@ from astropy import units as u
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.table import Column, Table
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun
 from astropy.time import Time
 
 from astar_utils import get_logger, is_bangkey
@@ -1076,3 +1076,18 @@ def get_zenith_angle(target: SkyCoord, location: EarthLocation, obstime: Time) -
     """
     altaz = target.transform_to(AltAz(obstime=obstime, location=location))
     return 90 - altaz.alt.deg
+
+def is_night(obstime: Time, location: EarthLocation, return_midnight: bool = True) -> (bool | Time):
+    altaz = AltAz(obstime=obstime, location=location)
+    sun = get_sun(obstime).transform_to(altaz)
+    if sun.alt >= 0.0 * u.deg:
+        logger.warning("Obstime is not after sunset!")
+        if return_midnight:
+            tlocal = Time(obstime.isot.split("T")[0] + "T00:00:00", format="isot", location=location)  # local midnight
+            utcoffset = (location.lon.deg / 15.) * u.hour
+            newtime = tlocal - utcoffset  # midnight in utc
+            logger.info(f"Setting obstime to midnight of the same day. New UTC time is {newtime.isot}.")
+            return newtime
+        else:
+            return False
+    return True

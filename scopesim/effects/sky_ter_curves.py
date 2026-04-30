@@ -1,14 +1,14 @@
 from typing import ClassVar, Any
 import numpy as np
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun, get_body, HeliocentricTrueEcliptic
+from astropy.coordinates import EarthLocation, AltAz, get_sun, get_body, HeliocentricTrueEcliptic
 import astropy.units as u
 from astropy.time import Time
 from astropy.table import Table
 
 from palace import palace
 
-from ..utils import (check_keys, get_logger, airmass2zendist, zendist2airmass, from_currsys, from_rc_config, find_file,
-                     get_target, get_location, get_zenith_angle)
+from ..utils import (check_keys, get_logger, zendist2airmass, from_currsys, from_rc_config, find_file,
+                     get_target, get_location, get_zenith_angle, is_night)
 from .. import rc
 from ..effects import Effect, SkycalcTERCurve, TERCurve
 
@@ -20,6 +20,7 @@ class PalaceAirglowEmission(Effect):
     Ref: https://arxiv.org/pdf/2504.10683
 
     The following PALACE input parameters are settable directly through effect kwargs:
+
     - species: "all" by default # (all, OH, O2, HO2, FeO, Na, K, O, N, H)
     - srf: 130.0 by default # solar radio flux at 10.7 cm in sfu (solar flux units), >=0
     - isair: True by default # True for wavelength in standard air, False for vacuum wavelengths
@@ -30,6 +31,7 @@ class PalaceAirglowEmission(Effect):
     - outname: "palace" by default # output file name prefix for the model results
 
     The following PALACE input parameters are set automatically and cannot be set directly:
+
     - z: set by 'target' kwarg # zenith angle >=0 and <90 deg
     - mbin: set by 'time_str' kwarg # month number, 0 for all, 1-12 for specific month
     - tbin: set by 'time_str' kwarg  # local (solar mean time at Paranal) time bin, 0 for all, 1 for 18-19h and 12 for 5-6h
@@ -40,10 +42,12 @@ class PalaceAirglowEmission(Effect):
     - showplot: False by default
 
     Required kwargs:
-    - time_str: the time of observation, used to determine mbin, tbin, zenith angle.
-        EITHER "bright", "gray" or "dark", OR a specific time in ISOT or MJD format, e.g., "2024-01-01T00:00:00", 59000, or !OBS.mjdobs.
+
+    - time_str: the time of observation in UTC, used to determine mbin, tbin, zenith angle.
+    EITHER "bright", "gray" or "dark", OR a specific time in ISOT or MJD format, e.g., "2024-01-01T00:00:00", 59000, or !OBS.mjdobs.
 
     Optional kwargs:
+
     - target: dict, provide either (ra,dec) or (alt,az) or (airmass) for target, otherwise defaults to alt=90, az=0
                 If providing alt, az, make sure !ATMO.latitude, !ATMO.longitude and !ATMO.altitude are set.
     - save_model_output: False by default.
@@ -51,20 +55,23 @@ class PalaceAirglowEmission(Effect):
     - only_continuum: False by default. Only applies airglow continuum emission curve.
     - lamunit: um by default, update accordingly if setting lammin, lammax
 
+    Example
+    --------
     ::
-        name: palace_ter_curves
-        class: PalaceAirglowEmission
-        kwargs:
-          time_str: "!OBS.mjdobs"
-          target:
-            airmass: "!OBS.airmass"
-          save_model_output: False
-          only_line: False
-          only_continuum: False
-          pwv: "!ATMO.pwv"
-          lammin: "!SIM.spectral.wave_min"
-          lammax: "!SIM.spectral.wave_max"
-          lamunit: "!SIM.spectral.wave_unit"
+
+        - name: palace_ter_curves
+          class: PalaceAirglowEmission
+          kwargs:
+            time_str: "!OBS.mjdobs"
+            target:
+                airmass: "!OBS.airmass"
+            save_model_output: False
+            only_line: False
+            only_continuum: False
+            pwv: "!ATMO.pwv"
+            lammin: "!SIM.spectral.wave_min"
+            lammax: "!SIM.spectral.wave_max"
+            lamunit: "!SIM.spectral.wave_unit"
 
     The output from PALACE are two tables of wavelength and fluxes for the line emission and continuum emission.
     These are read-in and converted to TER curves in ScopeSim's format.
@@ -76,7 +83,56 @@ class PalaceAirglowEmission(Effect):
         check_keys(kwargs, self.required_keys, action="error")
         super().__init__(**kwargs)
 
-        self.parlist = {"species": kwargs.get("species", "all"),
+        self.location = None
+        if check_keys(self.cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="error"):
+            self.location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
+                                    lat=from_currsys("!ATMO.latitude", self.cmds),
+                                    alt=from_currsys("!ATMO.altitude", self.cmds))
+
+        self.time = resolve_time(from_currsys(kwargs["time_str"], self.cmds), location=self.location)
+
+        target_kwargs: dict[str, Any] = kwargs.get("target", {'alt': 90, 'az': 0})
+        for k, v in target_kwargs.items():
+            target_kwargs[k] = from_currsys(v, self.cmds)
+        target_kwargs["obstime"] = self.time
+        target_kwargs["location"] = self.location
+        self.target = get_target(**target_kwargs)
+
+        self.parlist = self.get_palace_inputs(**kwargs)
+
+        ## Run palace model and get line and continuum spectra
+        spec_cont, spec_line = self.run_palace() # astropy tables with columns "lam" and "flux"
+        # assign units to the spectra
+        ray_per_nm = (1e10 / (4 * np.pi)) * (u.photon / (u.s * u.m ** 2 * u.steradian * u.nm))
+
+        ## make TER curves and add to the effect
+        cont_kwargs = {"name": "palace_airglow_continuum",
+                       "array_dict": {"wavelength": spec_cont["lam"].data,
+                                      "transmission": [1.0]*len(spec_cont),
+                                      "emission": spec_cont["flux"].data * ray_per_nm.to(u.photon / (u.s * u.m ** 2 * u.um * u.arcsec**2))},
+                       "wavelength_unit": "um",
+                       "emission_unit": "ph s-1 m-2 um-1 arcsec-2"}
+        self.continuum_TER = TERCurve(**cont_kwargs)
+        line_kwargs = {"name": "palace_airglow_line",
+                       "array_dict": {"wavelength": spec_line["lam"].data,
+                                      "transmission": [1.0]*len(spec_line),
+                                      "emission": spec_line["flux"].data * ray_per_nm.to(u.photon / (u.s * u.m ** 2 * u.um * u.arcsec**2))},
+                       "wavelength_unit": "um",
+                       "emission_unit": "ph s-1 m-2 um-1 arcsec-2"}
+        self.line_TER = TERCurve(**line_kwargs)
+
+    def apply_to(self, obj, **kwargs):
+        if self.meta.get("only_line", False):
+            obj = self.line_TER.apply_to(obj)
+        elif self.meta.get("only_continuum", False):
+            obj = self.continuum_TER.apply_to(obj)
+        else:
+            obj = self.line_TER.apply_to(obj)
+            obj = self.continuum_TER.apply_to(obj)
+        return obj
+
+    def get_palace_inputs(self, **kwargs):
+        parlist = {"species": kwargs.get("species", "all"),
                         "srf": kwargs.get("srf", 130.0),
                         "isair": kwargs.get("isair", True),
                         "isatm": kwargs.get("isatm", True),
@@ -90,94 +146,44 @@ class PalaceAirglowEmission(Effect):
         else:
             logger.warning("Wavelength unit not provided for lammin/lammax, assuming um")
             lamunit = u.um
-        self.parlist["lammin"] = max((from_currsys(kwargs.get("lammin", 0.3), self.cmds) * lamunit).to(u.um).value, 0.3)
-        self.parlist["lammax"] = min((from_currsys(kwargs.get("lammax", 2.5), self.cmds) * lamunit).to(u.um).value, 2.5)
+        parlist["lammin"] = max((from_currsys(kwargs.get("lammin", 0.3), self.cmds) * lamunit).to(u.um).value, 0.3)
+        parlist["lammax"] = min((from_currsys(kwargs.get("lammax", 2.5), self.cmds) * lamunit).to(u.um).value, 2.5)
 
         ## Set PALACE model output directory if save_model_output is True.
         if self.meta.get("save_model_output", False):
             try:
                 atmo_name = [dt.name for dt in self.cmds.yaml_dicts if dt.alias == "!ATMO"][0]
-                self.parlist["outdir"] = [pth for pth in rc.__search_path__ if atmo_name in pth][0]
+                parlist["outdir"] = [pth for pth in rc.__search_path__ if atmo_name in pth][0]
             except:
-                self.parlist["outdir"] = f"{from_rc_config("!SIM.file.local_packages_path")}/{self.cmds.package_name}"
+                parlist["outdir"] = f"{from_rc_config("!SIM.file.local_packages_path")}/{self.cmds.package_name}"
 
         ## Set PALACE model spectral resolution input from simulation settings if provided.
-        resol = 2 * from_currsys("!SIM.spectral.spectral_resolution", self.cmds) if "!SIM.spectral.spectral_resolution" in self.cmds else 100000.0
+        resol = 2 * from_currsys("!SIM.spectral.spectral_resolution", self.cmds) if (
+                "!SIM.spectral.spectral_resolution" in self.cmds) else 100000.0
         _dlam = 1.0/resol
         if _dlam < 1e-7:
-            logger.warning(f"Spectral resolution {resol} is too high for the PALACE model minimum dlam (1e-7). Setting to 1e6.")
+            logger.warning(f"Spectral resolution {resol} is too high for the PALACE model minimum dlam (1e-7). "
+                           f"Setting to 1e6.")
             resol = 1000000.0
             dlam = 1e-7
         elif 1e-7 <= _dlam < 1e-6:
-            logger.warning(f"Spectral resolution {resol} is higher than default PALACE dlam (1e-6), setting dlam to 1e-7")
+            logger.warning(f"Spectral resolution {resol} is higher than default PALACE dlam (1e-6), "
+                           f"setting dlam to 1e-7")
             dlam = 1e-7
         else:
             dlam = 1e-6
-        self.parlist["resol"] = resol
-        self.parlist["dlam"] = dlam
+        parlist["resol"] = resol
+        parlist["dlam"] = dlam
 
         ## month and time
-        obstime = resolve_time(from_currsys(kwargs["time_str"], self.cmds))
-        mbin, tbin = self.get_mbin_tbin(obstime)
-        self.parlist["mbin"] = mbin
-        self.parlist["tbin"] = tbin
+        mbin, tbin = self.get_mbin_tbin(self.time)
+        parlist["mbin"] = mbin
+        parlist["tbin"] = tbin
 
         ## zenith
-        target_kwargs: dict[str, Any] = kwargs.get("target", {'alt': 90, 'az': 0})
-        for k, v in target_kwargs.items():
-            target_kwargs[k] = from_currsys(v, self.cmds)
-        if "alt" in target_kwargs:
-            logger.info("Using target altitude to determine zenith angle for PALACE model input.")
-            z = 90 - target_kwargs["alt"]
-        elif "ra" in target_kwargs and "dec" in target_kwargs:
-            if check_keys(self.cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="warn"):
-                logger.info("Using RA, Dec and ATMO location to determine zenith angle for PALACE model input.")
-                target = get_target(ra=target_kwargs["ra"], dec=target_kwargs["dec"])
-                location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
-                                        lat=from_currsys("!ATMO.latitude", self.cmds),
-                                        alt=from_currsys("!ATMO.altitude", self.cmds))
-                z = get_zenith_angle(target, location, obstime)
-            else:
-                logger.warning("RA and Dec provided for target but ATMO location info is missing. Defaulting to z=0 (zenith) for PALACE model input.")
-                z = 0.0
-        elif "airmass" in target_kwargs:
-            logger.info("Using airmass to determine zenith angle for PALACE model input.")
-            z = airmass2zendist(target_kwargs["airmass"])
-        else:
-            logger.warning("No valid input found to determine zenith angle for PALACE model. Defaulting to z=0 (zenith).")
-            z = 0.0
-        self.parlist["z"] = z
+        parlist["z"] = get_zenith_angle(self.target, self.location, self.time)
 
-        ## Run palace model and get line and continuum spectra
-        spec_cont, spec_line = self.run_palace() # astropy tables with columns "lam" and "flux"
-        # assign units to the spectra
-        ray_per_nm = (1e10 / (4 * np.pi)) * (u.photon / (u.s * u.m ** 2 * u.steradian * u.nm))
-
-        ## make TER curves and add to the effect
-        cont_kwargs = {"name": "palace_airglow_continuum",
-                       "array_dict": {"wavelength": spec_cont["lam"].data,
-                                      "transmission": [1.0]*len(spec_cont),
-                                      "emission": spec_cont["flux"].data * ray_per_nm.to(u.photon / (u.s * u.m ** 2 * u.um * u.arcsec**2))},
-                       "wavelength_unit": "um",
-                       "emission_unit": "ph s-1 m-2 um-1"}
-        self.continuum_TER = TERCurve(**cont_kwargs)
-        line_kwargs = {"name": "palace_airglow_line",
-                       "array_dict": {"wavelength": spec_line["lam"].data,
-                                      "transmission": [1.0]*len(spec_line),
-                                      "emission": spec_line["flux"].data * ray_per_nm.to(u.photon / (u.s * u.m ** 2 * u.um * u.arcsec**2))},
-                       "wavelength_unit": "um",
-                       "emission_unit": "ph s-1 m-2 um-1"}
-        self.line_TER = TERCurve(**line_kwargs)
-
-    def apply_to(self, obj, **kwargs):
-        if self.meta.get("only_line", False):
-            obj = self.line_TER.apply_to(obj)
-        elif self.meta.get("only_continuum", False):
-            obj = self.continuum_TER.apply_to(obj)
-        else:
-            obj = self.line_TER.apply_to(obj)
-            obj = self.continuum_TER.apply_to(obj)
-        return obj
+        return parlist
 
     @staticmethod
     def get_mbin_tbin(obstime):
@@ -189,7 +195,7 @@ class PalaceAirglowEmission(Effect):
         return mbin, tbin
 
     def run_palace(self):
-        _, spec_cont, spec_line = palace.model(**self.meta["parlist"])
+        _, spec_cont, spec_line = palace.model(**self.parlist)
         if len(spec_cont) == 0:
             logger.warning("PALACE model returned empty continuum spectrum.")
             ## Try loading cont emission from saved model output if available
@@ -207,12 +213,12 @@ class PalaceAirglowEmission(Effect):
 
         if self.meta.get("save_model_output", False):
             if len(spec_cont) > 0:
-                self.meta["parlist"]["outname"] = self.meta["parlist"]["outname"] + "_cont"
-                palace.output(spec_cont, **self.meta["parlist"])
+                self.parlist["outname"] = self.parlist["outname"] + "_cont"
+                palace.output(spec_cont, **self.parlist)
             if len(spec_line) > 0:
-                self.meta["parlist"]["outname"] = self.meta["parlist"]["outname"].replace("_cont", "_line")
-                palace.output(spec_line, **self.meta["parlist"])
-            logger.info(f"Saved PALACE models in {self.meta["parlist"]["outdir"]}")
+                self.parlist["outname"] = self.parlist["outname"].replace("_cont", "_line")
+                palace.output(spec_line, **self.parlist)
+            logger.info(f"Saved PALACE models in {self.parlist["outdir"]}")
 
         return spec_cont, spec_line
 
@@ -220,19 +226,24 @@ class PalaceAirglowEmission(Effect):
 class SkyBackgroundTERCurve(SkycalcTERCurve):
     """
     Applies SkycalcTERCurve for continuum sky background emission from scattered moonlight, starlight and zodiacal light.
+
     Airglow emission is disabled in the query by default. Transmission is not applied by default.
 
     Required kwargs:
-    - time_str: the time of observation, used to determine moon phase, position, and season and time of night for SkyCalc.
-        EITHER "bright", "gray" or "dark", OR a specific time in ISOT or MJD format, e.g., "2024-01-01T00:00:00", 59000, or !OBS.mjdobs.
+
+    * time_str: the time of observation in UTC (for moon phase, position, season and time of night).
+    EITHER "bright", "gray" or "dark", OR a specific time in ISOT or MJD format, e.g., "2024-01-01T00:00:00", 59000, or !OBS.mjdobs.
 
     Optional kwargs:
-    - disable_transmission: True by default
-    - disable_airglow: True by default
-    - target: dict, provide either (ra,dec) or (alt,az) or (airmass) for target, otherwise defaults to alt=90, az=0
-                If providing alt, az, make sure !ATMO.latitude, !ATMO.longitude and !ATMO.altitude are set.
+
+    * disable_transmission: True by default
+    * disable_airglow: True by default
+    * target: dict, provide either (ra,dec) or (alt,az) or (airmass) for target, otherwise defaults to alt=90, az=0
+
+    If providing alt, az, make sure !ATMO.latitude, !ATMO.longitude and !ATMO.altitude are set.
 
     The following SkyCalc input parameters can be supplied in kwargs:
+
     - pwv_mode: "pwv" by default
     - pwv: 2.5 mm by default
     - msolflux: 130.0 sfu by default
@@ -250,6 +261,7 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
     - observatory: "paranal" by default  ["paranal, "lasilla", "3060m"]
 
     The following SkyCalc input parameters are set automatically and CANNOT be overridden:
+
     - airmass: set by 'target' kwarg
     - season: set by 'time_str' (used if pwv_mode is 'season')
     - time: set by 'time_str' (used if pwv_mode is 'season')
@@ -264,26 +276,28 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
     - ecl_lat: set by 'time_str' and 'target'
     - incl_therm: "N"
 
-    e.g.
+    Example
+    --------
     ::
-    name: continuum_sky_background
-    class: SkyBackgroundTERCurve
-    kwargs:
-        time_str: "bright"
-        disable_transmission: True
-        disable_airglow: True
-        target:    # provide either (ra,dec) or (alt,az) or (airmass) for target, otherwise defaults to alt=90,az=0
-          ra: "!OBS.ra"
-          dec: "!OBS.dec"
-          alt: "!OBS.alt"
-          az: "!OBS.az"
-          airmass: "!OBS.airmass"
-        pwv: "!ATMO.pwv"
-        wmin: "!SIM.spectral.wave_min"
-        wmax: "!SIM.spectral.wave_max"
-        wdelta: "!SIM.spectral.spectral_bin_width"
-        wres: "!SIM.spectral.spectral_resolution"
-        wunit: "!SIM.spectral.wave_unit"
+
+        - name: continuum_sky_background
+          class: SkyBackgroundTERCurve
+          kwargs:
+            time_str: "bright"
+            disable_transmission: True
+            disable_airglow: True
+            target:    # provide either (ra,dec) or (alt,az) or (airmass) for target, otherwise defaults to alt=90,az=0
+                ra: "!OBS.ra"
+                dec: "!OBS.dec"
+                alt: "!OBS.alt"
+                az: "!OBS.az"
+                airmass: "!OBS.airmass"
+            pwv: "!ATMO.pwv"
+            wmin: "!SIM.spectral.wave_min"
+            wmax: "!SIM.spectral.wave_max"
+            wdelta: "!SIM.spectral.spectral_bin_width"
+            wres: "!SIM.spectral.spectral_resolution"
+            wunit: "!SIM.spectral.wave_unit"
 
     """
     z_order: ClassVar[tuple[int, ...]] = (112, 512)
@@ -292,12 +306,14 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
     def __init__(self, **kwargs):
         check_keys(kwargs, self.required_keys, action="error")
         self.cmds = kwargs.get("cmds")
-        self.time = resolve_time(from_currsys(kwargs["time_str"], self.cmds))
+
         self.location = None
         if check_keys(self.cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="error"):
             self.location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
                                     lat=from_currsys("!ATMO.latitude", self.cmds),
                                     alt=from_currsys("!ATMO.altitude", self.cmds))
+
+        self.time = resolve_time(from_currsys(kwargs["time_str"], self.cmds), location=self.location)
 
         target_kwargs: dict[str, Any] = kwargs.get("target", {'alt':90, 'az':0})
         target_kwargs['obstime'] = self.time
@@ -322,19 +338,23 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
             "incl_zodiacal": "Y",
             "incl_therm": "N",
             "vacair": kwargs.get("vacair", "air"),
-            "wunit": from_currsys(kwargs.get("wunit", "um"), self.cmds),
+            "wunit": from_currsys(kwargs.get("wunit", "nm"), self.cmds),
             "wgrid_mode": kwargs.get("wgrid_mode", "fixed_wavelength_step"),
-            "wmin": from_currsys(kwargs.get("wmin", 0.3), self.cmds),
-            "wmax": from_currsys(kwargs.get("wmax", 2.5), self.cmds),
-            "wdelta": from_currsys(kwargs.get("wdelta", 0.00001), self.cmds),
+            "wmin": from_currsys(kwargs.get("wmin", 300.), self.cmds),
+            "wmax": from_currsys(kwargs.get("wmax", 2500.), self.cmds),
+            "wdelta": from_currsys(kwargs.get("wdelta", 0.01), self.cmds),
             "wres": from_currsys(kwargs.get("wres", 80000), self.cmds),
         }
-        if params["wmin"]*u.Unit(params["wunit"]) < 0.3*u.um:
-            logger.warning(f"wmin {params['wmin']} is below the minimum wavelength covered by SkyCalc. Setting to 0.3 um.")
-            params["wmin"] = (0.3*u.um).to(u.Unit(params["wunit"]))
-        if params["wmax"]*u.Unit(params["wunit"]) > 2.5*u.um:
-            logger.warning(f"wmax {params['wmax']} is above the maximum wavelength covered by SkyCalc. Setting to 2.5 um.")
-            params["wmax"] = (2.5*u.um).to(u.Unit(params["wunit"]))
+        scale_factor = u.Unit(params["wunit"]).to(u.nm)
+        for k in ["wmin", "wmax", "wdelta"]:
+            params[k] = params[k] * scale_factor
+        params["wunit"] = "nm"
+        if params["wmin"] < 300.:
+            logger.warning(f"wmin {params['wmin']} is below the minimum wavelength covered by SkyCalc. Setting to 300 nm.")
+            params["wmin"] = 300.
+        if params["wmax"] > 30000.:
+            logger.warning(f"wmax {params['wmax']} is above the maximum wavelength covered by SkyCalc. Setting to 30000 nm.")
+            params["wmax"] = 30000.
 
         if kwargs.get("disable_airglow", True):
             params.update({"incl_upperatm": "N", "incl_loweratm": "N", "incl_airglow": "N"})
@@ -345,8 +365,8 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
 
         ec_frame = HeliocentricTrueEcliptic(obstime=self.time)
         target_ecl = self.target.transform_to(ec_frame)
-        params["ecl_lon"] = target_ecl.lon.deg
-        params["ecl_lat"] = target_ecl.lat.deg
+        params["ecl_lon"] = target_ecl.lon.wrap_at(180*u.deg).deg
+        params["ecl_lat"] = target_ecl.lat.wrap_at(90*u.deg).deg
 
         moon = get_body("moon", self.time)
         alt_moon = moon.transform_to(AltAz(obstime=self.time, location=self.location)).alt.deg
@@ -382,18 +402,19 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
         return params
 
 ################################# UTILS FOR MOON ILLUMINATION CALCULATIONS #################################
-def resolve_time(time_str):
+def resolve_time(time_str, location: EarthLocation | None = None):
+    t = None
     if isinstance(time_str, int) or isinstance(time_str, float): ## if time_str is a numeric MJD value
-        logger.info(f"Resolving time: {time_str} assuming MJD format")
+        logger.info(f"Resolving time: {time_str} assuming MJD format and UTC scale")
         try:
-            return Time(time_str, format="mjd")
+            t = Time(time_str, format="mjd", location=location)
         except Exception as e:
             logger.warning(f"Failed to parse time from {time_str}: {e}. Defaulting to 'dark'.")
             time_str = "dark"
     elif isinstance(time_str, str):
         if ('T' in time_str) and (':' in time_str): ## ISOT format
-            logger.info(f"Resolving time: {time_str} assuming ISOT format")
-            return Time(time_str, format="isot")
+            logger.info(f"Resolving time: {time_str} assuming ISOT format and UTC scale")
+            t = Time(time_str, format="isot", location=location)
         elif time_str not in ["bright", "gray", "dark"]:
             logger.warning(f"Unrecognized time string input: {time_str}. Defaulting to 'dark'.")
             time_str = "dark"
@@ -401,8 +422,17 @@ def resolve_time(time_str):
         logger.warning(f"Invalid time input type: {type(time_str)}, should be a string or numeric MJD value. Defaulting to 'dark'.")
         time_str = "dark"
 
-    kw = {"bright":"full", "gray":"half", "dark":"new"}
-    return get_next_moon(kw[time_str])
+    if t is None:
+        kw = {"bright":"full", "gray":"half", "dark":"new"}
+        t = Time(get_next_moon(kw[time_str]), format="isot", location=location)
+
+    # check if t is at night
+    if location is not None:
+        nighttime = is_night(t, location, return_midnight=True)
+        if isinstance(nighttime, Time):
+            t = nighttime
+
+    return t
 
 def get_moon_phase(time: Time, get_elongation=False):
     """
@@ -444,11 +474,11 @@ def get_next_moon(moontype="full"):
     else:
         next_half = min(next_new, next_full) + 7.38*u.day
     if moontype == "full":
-        return Time(next_full.isot.split('T')[0]+"T00:00:00")
+        return next_full.isot.split('T')[0]+"T00:00:00"
     elif moontype == "new":
-        return Time(next_new.isot.split('T')[0]+"T00:00:00")
+        return next_new.isot.split('T')[0]+"T00:00:00"
     elif moontype == "half":
-        return Time(next_half.isot.split('T')[0]+"T00:00:00")
+        return next_half.isot.split('T')[0]+"T00:00:00"
     else:
         raise ValueError(f"Invalid moon type: {moontype}, should be 'full', 'new' or 'half'.")
 
