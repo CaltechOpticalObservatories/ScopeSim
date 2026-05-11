@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """Contains simple Vibration, NCPA, Seeing and Diffraction PSFs."""
 
-from typing import ClassVar
+from typing import ClassVar, Any
 from functools import partial
 
 import numpy as np
 from astropy import units as u
-from astropy.convolution import Gaussian2DKernel, Moffat2DKernel
+from astropy.convolution import Gaussian2DKernel
+from astropy.modeling.models import Moffat2D
 from scipy.interpolate import make_interp_spline
 
 from .. import DataContainer
 from ...optics import ImagePlane
 from ...optics.fov import FieldOfView
-from ...utils import (from_currsys, quantify, quantity_from_table,
-                      figure_factory, check_keys, get_logger, airmass2zendist,
-                      get_target, get_location, get_zenith_angle)
+from ...utils import (from_currsys, quantify, quantity_from_table, figure_factory, check_keys, get_logger, find_file,
+                      get_zenith_angle, get_observation_info_from_cmds)
 from . import PSF, PoorMansFOV
 
 logger = get_logger(__name__)
@@ -208,70 +208,81 @@ class GaussianDiffractionPSF(AnalyticalPSF):
 
 
 class MoffatPSF(AnalyticalPSF):
-    """ Moffat PSF with given FWHM (seeing), and alpha (also known as beta) parameters.
+    """
+    Moffat PSF with given FWHM (seeing), and alpha (also known as beta) parameters.
 
-        FWHM (seeing) can be given
-        - using the filename keyword to read it from a table. with columns "wavelength" and "fwhm"
-        - a single value ("seeing")
+    Required kwargs:
 
-        Filename overrides seeing, if both are given.
-        If "seeing" and "pivot" are given, FWHM will be scaled to wavelengths using the seeing law (natural_scale()).
-        If "enable_ao" is set to True, "ao_filename", "ao_alpha" will be used for MoffatPSF.
+    - alpha: Moffat alpha parameter
+    - fwhm: Moffat FWHM (dict OR filename)
 
-        :: Example config using filename for FWHM:
+    Optional kwargs:
+
+    - kernel_size: Size of kernel in multiples of FWHM (int)
+
+    Examples
+    --------
+
+    FWHM as a function of wavelength through seeing law parameters. If "pivot_wave" is not supplied, FWHM is
+    assumed to be wavelength independent and no scaling is applied.
+    ::
+
         name: seeing_psf
         class: MoffatPSF
         kwargs:
-            filename: path/to/fwhm_table.dat
             alpha: 4.765
-            enable_ao: False
-            ao_filename: path/to/ao_fwhm_table.dat
-            ao_alpha: 3.25
+            fwhm:
+                seeing: 0.7
+                seeing_unit: "arcsec"
+                pivot_wave: 500
+                pivot_wave_unit: "nm"
 
-        :: Example config using seeing value:
-        name: seeing_psf
-        class: MoffatPSF
-        kwargs:
-            seeing: 0.7
-            seeing_unit: "arcsec"
-            pivot_wave: 500
-            pivot_wave_unit: "nm"
-            alpha: 4.765
-            enable_ao: False
-            ao_alpha = 3.25
+
+    * If "fwhm" is a float, it is assumed to be wavelength independent and in arcsec unit.
+    * If "fwhm" is a string, it is assumed to be a .dat filename that contains a table with columns
+      "wavelength" and "fwhm".
 
     """
     z_order: ClassVar[tuple[int, ...]] = (43, 643)
-    required_keys = ["alpha"]
+    required_keys = {"alpha", "fwhm"}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        if self.meta.get("enable_ao", False):
-            logger.info("AO enabled, using AO parameters for FWHM.")
-            check_keys(self.meta, {"ao_alpha"}, action="error")
-            if self.meta.get("ao_filename", None):
-                logger.info("filename given for AO FWHM")
-                _file = DataContainer(filename=self.meta["ao_filename"])
-                self.fwhm = self.fwhm_from_table(_file.get_data())
-            else:
-                logger.info("using in-built AO scale for FWHM")
-                self.fwhm = self.ao_scale
-            self.alpha = self.meta["ao_alpha"]
+        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
+        self.alpha = self.meta["alpha"]
+        self.fwhm = self.get_fwhm_interp()
 
-        else:
-            if self.meta.get("filename", None):
-                logger.info("filename given for FWHM")
-                self.fwhm = self.fwhm_from_table(self.table)
-            elif check_keys(self.meta, {"seeing", "seeing_unit", "pivot_wave", "pivot_wave_unit"}, action="warn"):
-                logger.info("using seeing and natural scale for FWHM")
-                self.fwhm = partial(self.natural_scale, seeing=self.meta["seeing"]*u.Unit(self.meta["seeing_unit"]),
-                                    pivot=self.meta["pivot_wave"]*u.Unit(self.meta["pivot_wave_unit"]),
-                                    zenith_angle=self.zenith_angle*u.deg)
-            elif check_keys(self.meta, {"seeing", "seeing_unit"}, action="error"):
-                logger.info("using seeing only (wavelength independent) for FWHM")
-                self.fwhm = lambda wavelengths: self.meta["seeing"] * u.Unit(self.meta["seeing_unit"])
-            self.alpha = self.meta["alpha"]
+    def get_fwhm_interp(self):
+        """
+        Parses supplied FWHM input kwarg and returns a function that takes wavelength as input and returns FWHM.
+        Overwrite this function for subclassing if FWHM input options change.
+        """
+        if isinstance(self.meta["fwhm"], dict):
+            logger.info("dict supplied for FWHM")
+            fwhm = self.meta["fwhm"]
+            if check_keys(fwhm, {"seeing", "seeing_unit", "pivot_wave", "pivot_wave_unit"}, action="warn"):
+                logger.info("seeing and pivot supplied, using natural scale seeing law")
+                zenith_angle = get_zenith_angle(self.target, self.location, self.time)
+
+                return partial(self.natural_scale, seeing=fwhm["seeing"]*u.Unit(fwhm["seeing_unit"]),
+                                pivot=fwhm["pivot_wave"]*u.Unit(fwhm["pivot_wave_unit"]),
+                                zenith_angle=zenith_angle*u.deg)
+
+            elif check_keys(fwhm, {"seeing", "seeing_unit"}, action="error"):
+                logger.info("only seeing supplied, FWHM is wavelength independent")
+                return lambda wavelengths: fwhm["seeing"] * u.Unit(fwhm["seeing_unit"])
+
+        if isinstance(self.meta["fwhm"], (int, float)):
+            logger.info("float value supplied, assuming arcsec")
+            return lambda wavelengths: self.meta["fwhm"] * u.arcsec
+
+        if isinstance(self.meta["fwhm"], str):
+            logger.info("filename supplied for FWHM")
+            self.table = DataContainer(filename=find_file(from_currsys(self.meta["fwhm"], self.cmds))).table
+            return self.fwhm_from_table(self.table)
+
+        raise TypeError("fwhm kwarg must be of type dict or float or str")
 
     def get_kernel(self, fov):
         pixel_scale = fov.header["CDELT1"] * u.deg.to(u.arcsec)
@@ -284,43 +295,22 @@ class MoffatPSF(AnalyticalPSF):
         ## get fwhm and gamma for the sampled wave pts
         fwhms = self.fwhm(wavelengths).to(u.arcsec) / pixel_scale
         gammas = self.fwhm2gamma(fwhms, self.alpha).value
-        ksize = int(4.0*np.max(fwhms).value)
+
+        kx = self.meta.get("kernel_size", 4.0)
+        ksize = int(kx * np.max(fwhms).value)
         ksize = ksize + 1 if ksize % 2 == 0 else ksize
-        kernel = np.zeros((ksize, ksize))
-        for gamma in gammas:
-            kernel += Moffat2DKernel(gamma=gamma, alpha=self.alpha, x_size=ksize, y_size=ksize).array
-        kernel /= len(gammas)
-        kernel /= np.sum(kernel)
+
+        amplitude = (self.alpha - 1)/(np.pi * gammas**2)
+        x, y = np.meshgrid(np.arange(ksize)-ksize//2, np.arange(ksize)-ksize//2)
+        cube = Moffat2D.evaluate(x=x[None, ...], y=y[None, ...],
+                                 amplitude=amplitude[:, None, None], x_0=0, y_0=0,
+                                 gamma=gammas[:, None, None], alpha=self.alpha)
+        kernel = np.mean(cube, axis=0) # average over wavelength axis
+        norm = np.sum(kernel)
+        if norm < 0.98:
+            logger.warning(f"Kernel size too small, kernel sums to {norm}")
+        kernel /= norm
         return kernel
-
-    @staticmethod
-    def fwhm_from_table(table):
-        if "wavelength" not in table.colnames or "fwhm" not in table.colnames:
-            raise ValueError("Table must contain 'wavelength' and 'fwhm' columns.")
-        wave_array = quantity_from_table("wavelength", table, u.um)
-        fwhm_array = quantity_from_table("fwhm", table, u.arcsec)
-        return make_interp_spline(wave_array, fwhm_array)  # returns bspline instance
-
-    @property
-    def zenith_angle(self):
-        if check_keys(self.cmds, {"!OBS.alt"}):
-            logger.info("Using !OBS.alt to determine zenith angle.")
-            return 90 - from_currsys("!OBS.alt", self.cmds)
-        elif check_keys(self.cmds, {"!OBS.ra", "!OBS.dec", "!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude", "!OBS.mjdobs"}):
-            logger.info("Using !OBS.ra, !OBS.dec, and !ATMO location info to determine zenith angle.")
-            target = get_target(ra=from_currsys("!OBS.ra", self.cmds),
-                                dec=from_currsys("!OBS.dec", self.cmds))
-            location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
-                                    lat=from_currsys("!ATMO.latitude", self.cmds),
-                                    alt=from_currsys("!ATMO.altitude", self.cmds))
-            obstime = from_currsys("!OBS.mjdobs", self.cmds)
-            return get_zenith_angle(target, location, obstime)
-        elif check_keys(self.cmds, {"!OBS.airmass"}):
-            logger.info("Using !OBS.airmass to determine zenith angle.")
-            return airmass2zendist(from_currsys("!OBS.airmass", self.cmds))
-        else:
-            logger.warning("No valid input found to determine zenith angle. Defaulting to z=0 (zenith).")
-            return 0.0
 
     @staticmethod
     def natural_scale(wavelengths: u.Quantity,
@@ -335,26 +325,83 @@ class MoffatPSF(AnalyticalPSF):
         return seeing * (wavelengths / pivot) ** -0.2 * 1 / np.cos(zenith_angle.to(u.rad)) ** .6
 
     @staticmethod
-    def ao_scale(wavelengths: u.Quantity) -> u.Quantity:
-        SKYBANDS = (np.array([300, 400]) * u.nm,
-                    np.array([395, 505]) * u.nm,
-                    np.array([495, 635]) * u.nm,
-                    np.array([625, 800]) * u.nm,
-                    np.array([785, 1000]) * u.nm,
-                    np.array([990, 1185]) * u.nm,
-                    np.array([1165, 1400]) * u.nm,
-                    np.array([1500, 1800]) * u.nm,
-                    np.array([2000, 2600]) * u.nm)
-        fwhm_ao = lambda x, *a, **kw: make_interp_spline(
-            [300] + list(map(lambda x: np.mean(x).value, SKYBANDS))[1:][:-1] + [2550],
-            [343, 357, 220, 190, 185, 183, 182, 175, 182], k=1)(x.to(u.nm).value) * u.mas
-        return fwhm_ao(wavelengths)
-
-    @staticmethod
     def fwhm2gamma(fwhm: u.Quantity, alpha) -> u.Quantity:
         """Convert FWHM to Moffat gamma parameter."""
         theta_factor = 0.5 / np.sqrt(2**(1./alpha) - 1.0)
         return fwhm * theta_factor
+
+    @staticmethod
+    def fwhm_from_table(table):
+        if "wavelength" not in table.colnames or "fwhm" not in table.colnames:
+            raise ValueError("Table must contain 'wavelength' and 'fwhm' columns.")
+        wave_array = quantity_from_table("wavelength", table, "um").to_value(u.um)
+        fwhm_array = table["fwhm"]
+        return make_interp_spline(wave_array, fwhm_array)  # returns bspline instance
+
+
+class AOEnhanceablePSF(MoffatPSF):
+    """
+    Wavelength dependent Moffat PSF but with added AO scaling.
+    Required kwargs:
+
+    - ao_table: A .dat file with AO scaling as a function of wavelength. Must have columns "wavelength" and "fwhm".
+                Either supply 'alpha' parameter in table header or as kwarg. Table header value overrides kwarg.
+    - is_absolute: bool, True if fwhm in ao_table are absolute values, False if they are scaling factors for "seeing".
+    - enable_ao: bool, True to turn AO enhancement "on", False for regular seeing law Moffat
+
+    Optional kwargs:
+
+    - kernel_size: Size of kernel in multiples of FWHM (int)
+    - alpha: Moffat alpha parameter
+    - fwhm: Moffat FWHM (dict OR filename), not needed if is_absolute is True
+
+    Examples
+    --------
+
+    FWHM as a function of wavelength through seeing law parameters. If "pivot_wave" is not supplied, FWHM is
+    assumed to be wavelength independent and no scaling is applied.
+    ::
+
+        name: seeing_psf
+        class: MoffatPSF
+        kwargs:
+            ao_table: "path/to/table.dat"
+            is_absolute: True
+            enable_ao: True
+            alpha: 4.765
+            fwhm:
+                seeing: 0.7
+                seeing_unit: "arcsec"
+                pivot_wave: 500
+                pivot_wave_unit: "nm"
+
+    """
+    z_order: ClassVar[tuple[int, ...]] = (43, 643)
+    required_keys = {"ao_table", "is_absolute", "enable_ao"}
+
+    def __init__(self, **kwargs):
+        # setting alpha and fwhm before super().__init__ to avoid KeyError
+        kwargs["alpha"] = None if "alpha" not in kwargs else kwargs["alpha"]
+        kwargs["fwhm"] = 1.0 if "fwhm" not in kwargs else kwargs["fwhm"]
+        super().__init__(**kwargs)
+
+        aotab = DataContainer(filename=find_file(from_currsys(self.meta["ao_table"], self.cmds))).table
+        self.ao_scale = self.fwhm_from_table(aotab)
+
+        if "alpha" in aotab.meta:
+            self.alpha = aotab.meta["alpha"]
+            logger.info(f"Alpha parameter found in AO table header: {self.alpha}")
+        elif self.meta["alpha"] is not None:
+            self.alpha = self.meta["alpha"]
+            logger.info(f"Alpha parameter found in kwargs: {self.alpha}")
+        else:
+            raise ValueError("Alpha parameter missing: Not found in ao_table header or kwargs.")
+
+        if self.meta["enable_ao"]:
+            if self.meta["is_absolute"]:
+                self.fwhm = self.ao_scale
+            else:
+                self.fwhm = lambda wavelengths: (self.fwhm(wavelengths) * self.ao_scale(wavelengths)).to(u.arcsec)
 
 
 def wfe2gauss(wfe, wave, width=None):

@@ -130,10 +130,9 @@ def _make_bounding_header_for_tables(*tables, pixel_scale=1*u.arcsec):
 
     """
     wcs_suffix = "D" if pixel_scale.unit.physical_type == "length" else ""
-    # FIXME: Convert to deg here? If yes, remove the arcsec=True below...
     # Note: this could all be a lot simpler if we have consistent units, i.e.
     #       don't need to convert mm -> mm and arcsec -> arcsec (or deg)
-    new_unit = u.mm if wcs_suffix == "D" else u.deg
+    new_unit = u.mm if wcs_suffix == "D" else u.deg  # arcsec here causes problems later when all header units are expected to be same
     tbl_unit = u.mm if wcs_suffix == "D" else u.arcsec
     x_name = "x_mm" if wcs_suffix == "D" else "x"
     y_name = "y_mm" if wcs_suffix == "D" else "y"

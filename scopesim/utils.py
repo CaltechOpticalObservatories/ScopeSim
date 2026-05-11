@@ -7,7 +7,7 @@ import logging
 from logging.config import dictConfig
 from collections.abc import Iterable, Generator, Set, Mapping
 from copy import deepcopy
-from typing import TextIO, Literal
+from typing import TextIO, Literal, Any
 from io import StringIO
 from importlib import metadata
 import functools
@@ -21,7 +21,7 @@ from astropy import units as u
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.table import Column, Table
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun, get_body
 from astropy.time import Time
 
 from astar_utils import get_logger, is_bangkey
@@ -1033,8 +1033,45 @@ def seq(start, stop, step=1):
     else:
         return np.maximum(sequence, stop)
 
+####### Utility funcs to manage target coordinates and observation time consistently for effects that use them #########
+
+def get_observation_info_from_cmds(cmds):
+    """
+    Queries cmds dict for observation and observer information and returns target, location and observation time.
+    :param cmds: output dict from UserCommands
+    :return: (target: SkyCoord, location: EarthLocation, time: Time)
+    """
+    location, time, target = None, None, None
+
+    if check_keys(cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="error"):
+        location = get_location(lon=from_currsys("!ATMO.longitude", cmds),
+                                lat=from_currsys("!ATMO.latitude", cmds),
+                                alt=from_currsys("!ATMO.altitude", cmds))
+
+    if check_keys(cmds, {"!OBS.mjdobs", "!OBS.brightness"}, action="error", all_any="any"):
+        if "!OBS.mjdobs" in cmds:
+            time_str = from_currsys("!OBS.mjdobs", cmds)
+            logger.info(f'Using !OBS.mjdobs {time_str} for observation time')
+        else:
+            time_str = from_currsys("!OBS.brightness", cmds)
+            logger.info(f'Using !OBS.brightness {time_str} for observation time')
+        time = resolve_time(time_str, location=location)
+
+    target_kwargs: dict[str, Any] = {'alt': '!OBS.alt', 'az': '!OBS.az', 'ra': '!OBS.ra', 'dec': '!OBS.dec',
+                     'airmass': '!OBS.airmass'}
+    for k, v in target_kwargs.items():
+        try:
+            target_kwargs[k] = from_currsys(v, cmds)
+        except:
+            logger.warning(f'Target coord {v} not set in !OBS config.')
+            target_kwargs[k] = None
+    target_kwargs["obstime"] = time
+    target_kwargs["location"] = location
+    target = get_target(**target_kwargs)
+    return target, location, time
+
 def get_target(alt: float = None,
-               az: float = None,
+               az: float = 0,
                location: EarthLocation = None,
                obstime: Time = None,
                ra: str | float = None,
@@ -1042,26 +1079,40 @@ def get_target(alt: float = None,
                airmass: float = None) -> SkyCoord:
     """
     Gets target coordinates from
-    - alt, az, location, obstime if provided, otherwise
-    - ra, dec if provided, otherwise
-    - airmass, location, obstime if provided (az=0), otherwise returns None.
+
+    - alt/airmass, az, location, obstime OR
+    - ra, dec
+
+    If multiple coordinate sources are available, ra/dec overrides alt/az, which overrides airmass/az.
+
+    If both alt and airmass are provided, they are checked for consistency and a warning is raised.
     """
-    coord = None
-    if alt is not None and az is not None and obstime is not None and location is not None:
-        coord = SkyCoord(alt=alt, az=az, frame="altaz", unit=(u.deg, u.deg), location=location, obstime=obstime, distance=1*u.AU)
-    elif ra is not None and dec is not None:
+    if ra is not None and dec is not None:
+        logger.info('Setting coordinates from ra/dec input.')
         if isinstance(ra, float) and isinstance(dec, float):
-            coord = SkyCoord(ra=ra, dec=dec, frame="icrs", unit=(u.deg, u.deg), distance=1*u.AU)
+            logger.debug('ra/dec in float, assuming degree unit.')
+            return SkyCoord(ra=ra, dec=dec, frame="icrs", unit=(u.deg, u.deg), distance=1*u.AU)
         elif isinstance(ra, str) and isinstance(dec, str):
-            coord = SkyCoord(ra=ra, dec=dec, frame="icrs", unit=(u.hourangle, u.deg), distance=1*u.AU)
+            logger.debug('ra/dec in str, assuming hourangle/degree units.')
+            return SkyCoord(ra=ra, dec=dec, frame="icrs", unit=(u.hourangle, u.deg), distance=1*u.AU)
         else:
-            logger.warning("RA and Dec must be both float or both string. Cannot determine target coordinates.")
-    elif airmass is not None and obstime is not None and location is not None:
-        z = airmass2zendist(airmass)
-        coord = SkyCoord(alt=90-z, az=0, frame="altaz", unit=(u.deg, u.deg), location=location, obstime=obstime, distance=1*u.AU)
+            raise TypeError("RA and Dec must be both float or both string. Cannot determine target coordinates.")
+
+    elif obstime is not None and location is not None and (alt is not None or airmass is not None):
+        logger.info('Setting coordinates from alt/airmass, location and obstime input.')
+
+        if alt is not None:
+            if airmass is not None and not np.isclose(zendist2airmass(90-alt), airmass):
+                logger.warning(f"Provided alt input: {alt}=>{zendist2airmass(90-alt)} airmass, and airmass input: {airmass} "
+                               f"are inconsistent. Using alt input.")
+            return SkyCoord(alt=alt, az=az, frame="altaz", unit=(u.deg, u.deg), location=location, obstime=obstime, distance=1*u.AU)
+        else:
+            z = airmass2zendist(airmass)
+            return SkyCoord(alt=90-z, az=az, frame="altaz", unit=(u.deg, u.deg), location=location, obstime=obstime, distance=1*u.AU)
+
     else:
         raise ValueError("No valid target coordinates provided. Please provide either alt and az, or ra and dec, or airmass.")
-    return coord
+
 
 def get_location(lon: float, lat: float, alt: float) -> EarthLocation:
     """
@@ -1077,7 +1128,13 @@ def get_zenith_angle(target: SkyCoord, location: EarthLocation, obstime: Time) -
     altaz = target.transform_to(AltAz(obstime=obstime, location=location))
     return 90 - altaz.alt.deg
 
+
 def is_night(obstime: Time, location: EarthLocation, return_midnight: bool = True) -> (bool | Time):
+    """
+    Checks if the sun is below the horizon at the given observation time and location.
+    If return_midnight is True, it returns the local midnight time of the same day if the sun is not below the horizon,
+    otherwise it returns True or False.
+    """
     altaz = AltAz(obstime=obstime, location=location)
     sun = get_sun(obstime).transform_to(altaz)
     if sun.alt >= 0.0 * u.deg:
@@ -1091,3 +1148,93 @@ def is_night(obstime: Time, location: EarthLocation, return_midnight: bool = Tru
         else:
             return False
     return True
+
+
+def resolve_time(time_str, location: EarthLocation | None = None):
+    """
+    Parses the time input.
+    Checks if the time is in MJD, or ISOT format, or indicates sky brightness ["bright", "gray", "dark"].
+    If it is supplied as a sky brightness string, the next corresponding moon phase time is calculated and used.
+    If the parsed time is not after sunset, the corresponding midnight time of that date is returned.
+    """
+    t = None
+    if isinstance(time_str, int) or isinstance(time_str, float): ## if time_str is a numeric MJD value
+        logger.info(f"Resolving time: {time_str} assuming MJD format and UTC scale")
+        try:
+            t = Time(time_str, format="mjd", location=location)
+        except Exception as e:
+            logger.warning(f"Failed to parse time from {time_str}: {e}. Defaulting to 'dark'.")
+            time_str = "dark"
+    elif isinstance(time_str, str):
+        if ('T' in time_str) and (':' in time_str): ## ISOT format
+            logger.info(f"Resolving time: {time_str} assuming ISOT format and UTC scale")
+            t = Time(time_str, format="isot", location=location)
+        elif time_str not in ["bright", "gray", "dark"]:
+            logger.warning(f"Unrecognized time string input: {time_str}. Defaulting to 'dark'.")
+            time_str = "dark"
+    else:
+        logger.warning(f"Invalid time input type: {type(time_str)}, should be a string or numeric MJD value. Defaulting to 'dark'.")
+        time_str = "dark"
+
+    if t is None:
+        kw = {"bright":"full", "gray":"half", "dark":"new"}
+        t = Time(get_next_moon(kw[time_str]), format="isot", location=location)
+
+    # check if t is at night
+    if location is not None:
+        nighttime = is_night(t, location, return_midnight=True)
+        if isinstance(nighttime, Time):
+            t = nighttime
+
+    return t
+
+def get_moon_phase(time: Time, get_elongation=False):
+    """
+    Calculates moon phase angle and fraction of lunar illumination (FLI) for a given time.
+    Phase angle ranges from 0 to 180 degrees, with 0 being full moon and 180 being new moon.
+    FLI ranges from 0 to 1, with 0 being new moon and 1 being full moon.
+    """
+    if isinstance(time, Time):
+        sun = get_sun(time)
+        moon = get_body("moon", time)
+        elongation = sun.separation(moon)
+        if get_elongation:
+            return elongation
+        else:
+            return np.arctan2(sun.distance * np.sin(elongation), moon.distance - sun.distance * np.cos(elongation))
+    else:
+        raise ValueError(f"Invalid time type: {type(time)}, should be astropy Time object.")
+
+def get_moon_fli(phase_angle: u.Quantity):
+    """
+    Calculates fraction of lunar illumination (FLI) from moon phase angle.
+    FLI ranges from 0 to 1, with 0 being new moon and 1 being full moon.
+    """
+    if isinstance(phase_angle, u.Quantity):
+        return (1 + np.cos(phase_angle.to(u.rad).value)) / 2
+    else:
+        raise ValueError(f"Invalid phase angle type: {type(phase_angle)}, should be astropy Quantity object with angle units.")
+
+def get_next_moon(moontype="full"):
+    """
+    Get time of the next closest moon phase of given moon type (full, half or new).
+    """
+    times = Time.now() + np.linspace(0, 30, 1000)*u.day
+    phases = get_moon_phase(times)
+    flis = get_moon_fli(phases)
+    next_full = times[np.argmax(flis)]
+    next_new = times[np.argmin(flis)]
+    prev_full = next_full - 29.53*u.day
+    prev_new = next_new - 29.53*u.day
+    if min(next_new, next_full) - Time.now() > Time.now() - max(prev_new, prev_full):
+        next_half = min(next_new, next_full) - 7.38*u.day
+    else:
+        next_half = min(next_new, next_full) + 7.38*u.day
+    if moontype == "full":
+        return next_full.isot.split('T')[0]+"T00:00:00"
+    elif moontype == "new":
+        return next_new.isot.split('T')[0]+"T00:00:00"
+    elif moontype == "half":
+        return next_half.isot.split('T')[0]+"T00:00:00"
+    else:
+        raise ValueError(f"Invalid moon type: {moontype}, should be 'full', 'new' or 'half'.")

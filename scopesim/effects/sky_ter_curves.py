@@ -1,14 +1,13 @@
-from typing import ClassVar, Any
+from typing import ClassVar
 import numpy as np
-from astropy.coordinates import EarthLocation, AltAz, get_sun, get_body, HeliocentricTrueEcliptic
+from astropy.coordinates import AltAz, get_body, HeliocentricTrueEcliptic
 import astropy.units as u
-from astropy.time import Time
 from astropy.table import Table
 
 from palace import palace
 
-from ..utils import (check_keys, get_logger, zendist2airmass, from_currsys, from_rc_config, find_file,
-                     get_target, get_location, get_zenith_angle, is_night)
+from ..utils import (get_logger, from_currsys, from_rc_config, find_file,
+                    zendist2airmass, get_zenith_angle, get_moon_phase, get_observation_info_from_cmds)
 from .. import rc
 from ..effects import Effect, SkycalcTERCurve, TERCurve
 
@@ -32,24 +31,18 @@ class PalaceAirglowEmission(Effect):
 
     The following PALACE input parameters are set automatically and cannot be set directly:
 
-    - z: set by 'target' kwarg # zenith angle >=0 and <90 deg
-    - mbin: set by 'time_str' kwarg # month number, 0 for all, 1-12 for specific month
-    - tbin: set by 'time_str' kwarg  # local (solar mean time at Paranal) time bin, 0 for all, 1 for 18-19h and 12 for 5-6h
+    - z: set by target info from !OBS # zenith angle >=0 and <90 deg
+    - mbin: set by !OBS.mjdobs or !OBS.brightness # month number, 0 for all, 1-12 for specific month
+    - tbin: set by !OBS.mjdobs or !OBS.brightness  # local (solar mean time at Paranal) time bin, 0 for all, 1 for 18-19h and 12 for 5-6h
     - resol: set to (2 * !SIM.spectral.spectral_resolution) if provided, otherwise default to 100,000.
     - dlam: 1e-6 by default, 1e-7 (min) if (1/resol < 1e-6), resol changed to 1e6 if (1/resol < 1e-7)
     - outdir: set by package name, used if 'save_model_output' is True
     - specsuffix: "dat" by default
     - showplot: False by default
 
-    Required kwargs:
 
-    - time_str: the time of observation in UTC, used to determine mbin, tbin, zenith angle.
-    EITHER "bright", "gray" or "dark", OR a specific time in ISOT or MJD format, e.g., "2024-01-01T00:00:00", 59000, or !OBS.mjdobs.
+    Other kwargs:
 
-    Optional kwargs:
-
-    - target: dict, provide either (ra,dec) or (alt,az) or (airmass) for target, otherwise defaults to alt=90, az=0
-                If providing alt, az, make sure !ATMO.latitude, !ATMO.longitude and !ATMO.altitude are set.
     - save_model_output: False by default.
     - only_line: False by default. Only applies airglow line emission curve.
     - only_continuum: False by default. Only applies airglow continuum emission curve.
@@ -62,9 +55,6 @@ class PalaceAirglowEmission(Effect):
         - name: palace_ter_curves
           class: PalaceAirglowEmission
           kwargs:
-            time_str: "!OBS.mjdobs"
-            target:
-                airmass: "!OBS.airmass"
             save_model_output: False
             only_line: False
             only_continuum: False
@@ -77,26 +67,12 @@ class PalaceAirglowEmission(Effect):
     These are read-in and converted to TER curves in ScopeSim's format.
     """
     z_order: ClassVar[tuple[int, ...]] = (112, 512)
-    required_keys = {"time_str"}
+    required_keys = {}
 
     def __init__(self, **kwargs):
-        check_keys(kwargs, self.required_keys, action="error")
         super().__init__(**kwargs)
 
-        self.location = None
-        if check_keys(self.cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="error"):
-            self.location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
-                                    lat=from_currsys("!ATMO.latitude", self.cmds),
-                                    alt=from_currsys("!ATMO.altitude", self.cmds))
-
-        self.time = resolve_time(from_currsys(kwargs["time_str"], self.cmds), location=self.location)
-
-        target_kwargs: dict[str, Any] = kwargs.get("target", {'alt': 90, 'az': 0})
-        for k, v in target_kwargs.items():
-            target_kwargs[k] = from_currsys(v, self.cmds)
-        target_kwargs["obstime"] = self.time
-        target_kwargs["location"] = self.location
-        self.target = get_target(**target_kwargs)
+        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
 
         self.parlist = self.get_palace_inputs(**kwargs)
 
@@ -229,18 +205,10 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
 
     Airglow emission is disabled in the query by default. Transmission is not applied by default.
 
-    Required kwargs:
-
-    * time_str: the time of observation in UTC (for moon phase, position, season and time of night).
-    EITHER "bright", "gray" or "dark", OR a specific time in ISOT or MJD format, e.g., "2024-01-01T00:00:00", 59000, or !OBS.mjdobs.
-
     Optional kwargs:
 
     * disable_transmission: True by default
     * disable_airglow: True by default
-    * target: dict, provide either (ra,dec) or (alt,az) or (airmass) for target, otherwise defaults to alt=90, az=0
-
-    If providing alt, az, make sure !ATMO.latitude, !ATMO.longitude and !ATMO.altitude are set.
 
     The following SkyCalc input parameters can be supplied in kwargs:
 
@@ -262,18 +230,18 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
 
     The following SkyCalc input parameters are set automatically and CANNOT be overridden:
 
-    - airmass: set by 'target' kwarg
-    - season: set by 'time_str' (used if pwv_mode is 'season')
-    - time: set by 'time_str' (used if pwv_mode is 'season')
+    - airmass: set by target info from !OBS
+    - season: set by !OBS.mjdobs or !OBS.brightness (used if pwv_mode is 'season')
+    - time: set by !OBS.mjdobs or !OBS.brightness (used if pwv_mode is 'season')
     - incl_moon: "Y" if |z_target-z_moon| < moon-target-sep < |z_target+z_moon|, otherwise "N"
-    - moon_sun_sep: set by 'time_str'
-    - moon_target_sep: set by 'time_str' and 'target'
-    - moon_alt: set by 'time_str'
-    - moon_earth_dist: set by 'time_str'
+    - moon_sun_sep: set by !OBS info
+    - moon_target_sep: set by !OBS info
+    - moon_alt: set by !OBS info
+    - moon_earth_dist: set by !OBS info
     - incl_starlight: "Y"
     - incl_zodiacal: "Y"
-    - ecl_lon: set by 'time_str' and 'target'
-    - ecl_lat: set by 'time_str' and 'target'
+    - ecl_lon: set by !OBS info
+    - ecl_lat: set by !OBS info
     - incl_therm: "N"
 
     Example
@@ -283,15 +251,8 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
         - name: continuum_sky_background
           class: SkyBackgroundTERCurve
           kwargs:
-            time_str: "bright"
             disable_transmission: True
             disable_airglow: True
-            target:    # provide either (ra,dec) or (alt,az) or (airmass) for target, otherwise defaults to alt=90,az=0
-                ra: "!OBS.ra"
-                dec: "!OBS.dec"
-                alt: "!OBS.alt"
-                az: "!OBS.az"
-                airmass: "!OBS.airmass"
             pwv: "!ATMO.pwv"
             wmin: "!SIM.spectral.wave_min"
             wmax: "!SIM.spectral.wave_max"
@@ -301,26 +262,12 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
 
     """
     z_order: ClassVar[tuple[int, ...]] = (112, 512)
-    required_keys = {"time_str"}
+    required_keys = {}
 
     def __init__(self, **kwargs):
-        check_keys(kwargs, self.required_keys, action="error")
         self.cmds = kwargs.get("cmds")
 
-        self.location = None
-        if check_keys(self.cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="error"):
-            self.location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
-                                    lat=from_currsys("!ATMO.latitude", self.cmds),
-                                    alt=from_currsys("!ATMO.altitude", self.cmds))
-
-        self.time = resolve_time(from_currsys(kwargs["time_str"], self.cmds), location=self.location)
-
-        target_kwargs: dict[str, Any] = kwargs.get("target", {'alt':90, 'az':0})
-        target_kwargs['obstime'] = self.time
-        target_kwargs['location'] = self.location
-        for k, v in target_kwargs.items():
-            target_kwargs[k] = from_currsys(v, self.cmds)
-        self.target = get_target(**target_kwargs)
+        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
 
         skycalc_params = self.get_skycalc_inputs(**kwargs)
         kwargs.update(skycalc_params)
@@ -401,85 +348,5 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
                     params["time"] = 3
         return params
 
-################################# UTILS FOR MOON ILLUMINATION CALCULATIONS #################################
-def resolve_time(time_str, location: EarthLocation | None = None):
-    t = None
-    if isinstance(time_str, int) or isinstance(time_str, float): ## if time_str is a numeric MJD value
-        logger.info(f"Resolving time: {time_str} assuming MJD format and UTC scale")
-        try:
-            t = Time(time_str, format="mjd", location=location)
-        except Exception as e:
-            logger.warning(f"Failed to parse time from {time_str}: {e}. Defaulting to 'dark'.")
-            time_str = "dark"
-    elif isinstance(time_str, str):
-        if ('T' in time_str) and (':' in time_str): ## ISOT format
-            logger.info(f"Resolving time: {time_str} assuming ISOT format and UTC scale")
-            t = Time(time_str, format="isot", location=location)
-        elif time_str not in ["bright", "gray", "dark"]:
-            logger.warning(f"Unrecognized time string input: {time_str}. Defaulting to 'dark'.")
-            time_str = "dark"
-    else:
-        logger.warning(f"Invalid time input type: {type(time_str)}, should be a string or numeric MJD value. Defaulting to 'dark'.")
-        time_str = "dark"
-
-    if t is None:
-        kw = {"bright":"full", "gray":"half", "dark":"new"}
-        t = Time(get_next_moon(kw[time_str]), format="isot", location=location)
-
-    # check if t is at night
-    if location is not None:
-        nighttime = is_night(t, location, return_midnight=True)
-        if isinstance(nighttime, Time):
-            t = nighttime
-
-    return t
-
-def get_moon_phase(time: Time, get_elongation=False):
-    """
-    Calculates moon phase angle and fraction of lunar illumination (FLI) for a given time.
-    Phase angle ranges from 0 to 180 degrees, with 0 being full moon and 180 being new moon.
-    FLI ranges from 0 to 1, with 0 being new moon and 1 being full moon.
-    """
-    if isinstance(time, Time):
-        sun = get_sun(time)
-        moon = get_body("moon", time)
-        elongation = sun.separation(moon)
-        if get_elongation:
-            return elongation
-        else:
-            return np.arctan2(sun.distance * np.sin(elongation), moon.distance - sun.distance * np.cos(elongation))
-    else:
-        raise ValueError(f"Invalid time type: {type(time)}, should be astropy Time object.")
-
-def get_moon_fli(phase_angle: u.Quantity):
-    """
-    Calculates fraction of lunar illumination (FLI) from moon phase angle.
-    FLI ranges from 0 to 1, with 0 being new moon and 1 being full moon.
-    """
-    if isinstance(phase_angle, u.Quantity):
-        return (1 + np.cos(phase_angle.to(u.rad).value)) / 2
-    else:
-        raise ValueError(f"Invalid phase angle type: {type(phase_angle)}, should be astropy Quantity object with angle units.")
-
-def get_next_moon(moontype="full"):
-    times = Time.now() + np.linspace(0, 30, 1000)*u.day
-    phases = get_moon_phase(times)
-    flis = get_moon_fli(phases)
-    next_full = times[np.argmax(flis)]
-    next_new = times[np.argmin(flis)]
-    prev_full = next_full - 29.53*u.day
-    prev_new = next_new - 29.53*u.day
-    if min(next_new, next_full) - Time.now() > Time.now() - max(prev_new, prev_full):
-        next_half = min(next_new, next_full) - 7.38*u.day
-    else:
-        next_half = min(next_new, next_full) + 7.38*u.day
-    if moontype == "full":
-        return next_full.isot.split('T')[0]+"T00:00:00"
-    elif moontype == "new":
-        return next_new.isot.split('T')[0]+"T00:00:00"
-    elif moontype == "half":
-        return next_half.isot.split('T')[0]+"T00:00:00"
-    else:
-        raise ValueError(f"Invalid moon type: {moontype}, should be 'full', 'new' or 'half'.")
 
 

@@ -12,7 +12,7 @@ from scipy.ndimage import map_coordinates
 
 from .effects import Effect
 from ..optics.fov import FieldOfView3D
-from ..utils import (from_currsys, get_target, get_location, get_zenith_angle, parallactic_angle,
+from ..utils import (from_currsys, get_zenith_angle, get_observation_info_from_cmds, parallactic_angle,
                      get_logger, check_keys, is_night, quantity_from_table)
 
 logger = get_logger(__name__)
@@ -101,7 +101,7 @@ class ShiftFoV3D(Effect):
                     self.meta["method"] = "map_coords"
             shift_func = getattr(self, self.meta["method"]+"_shift")
 
-            obj = shift_func(obj.data, dxs, dys)
+            obj.hdu.data = shift_func(obj.data, dxs, dys)
 
         return obj
 
@@ -192,7 +192,7 @@ class ADShift(ShiftFoV3D):
     """
     Shift the FoV by the amount of atmospheric dispersion, which depends on the zenith angle, temperature (in deg_C),
     pressure (in bar), humidity (fractional), and wavelength (um).
-    Zenith angle of target is determined by 'target' and 'mjdobs' kwargs. Supply either alt/az or ra/dec or airmass (az=0).
+    Zenith angle of target is determined by !OBS information.
 
     Example
     -------
@@ -204,10 +204,6 @@ class ADShift(ShiftFoV3D):
             temperature: !ATMO.temperature
             pressure: !ATMO.pressure
             humidity: !ATMO.humidity
-            target:
-                alt: !OBS.alt
-                az: !OBS.az
-            mjdobs: !OBS.mjdobs
             wave_ref_um: 0.5
 
     """
@@ -216,33 +212,13 @@ class ADShift(ShiftFoV3D):
         "temperature",
         "humidity",
         "pressure",
-        "target",
-        "mjdobs"
         "wave_ref_um",
     }
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        # target info
-        self.location = None
-        if check_keys(self.cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="error"):
-            self.location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
-                                    lat=from_currsys("!ATMO.latitude", self.cmds),
-                                    alt=from_currsys("!ATMO.altitude", self.cmds))
-
-        self.time = Time(from_currsys(kwargs.get("mjdobs"), self.cmds), format="mjd") # utc
-        # check utc time is within local night
-        nighttime = is_night(self.time, self.location, return_midnight=True)
-        if isinstance(nighttime, Time):
-            self.time = nighttime
-
-        target_kwargs: dict[str, Any] = kwargs.get("target", {'alt': 90, 'az': 0})
-        for k, v in target_kwargs.items():
-            target_kwargs[k] = from_currsys(v, self.cmds)
-        target_kwargs["location"] = self.location
-        target_kwargs["obstime"] = self.time
-        self.target = get_target(**target_kwargs)
+        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
 
         self.zenith_angle = get_zenith_angle(self.target, self.location, self.time) * u.deg
 
@@ -300,10 +276,6 @@ class ADCShift(ShiftFoV3D):
           class: ADCShift
           kwargs:
             filename: "adc_residuals.dat"
-            target:
-                alt: "!OBS.alt"
-                az: "!OBS.az"
-            mjdobs: "!OBS.mjdobs"
             use_broadband: False
             zenith_angle_error: 0.1  # in degrees
             wave_ref_um: 0.5
@@ -320,32 +292,13 @@ class ADCShift(ShiftFoV3D):
 
     """
     z_order = (652, )
-    required_keys = {'target', 'mjdobs'}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         if 'filename' not in kwargs and 'zenith_angle_error' not in kwargs:
             raise ValueError("Residuals must be supplied through either filename or zenith_angle_error.")
 
-        # target info
-        self.location = None
-        if check_keys(self.cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="error"):
-            self.location = get_location(lon=from_currsys("!ATMO.longitude", self.cmds),
-                                         lat=from_currsys("!ATMO.latitude", self.cmds),
-                                         alt=from_currsys("!ATMO.altitude", self.cmds))
-
-        self.time = Time(from_currsys(kwargs.get("mjdobs"), self.cmds), format="mjd")  # utc
-        # check utc time is within local night
-        nighttime = is_night(self.time, self.location, return_midnight=True)
-        if isinstance(nighttime, Time):
-            self.time = nighttime
-
-        target_kwargs: dict[str, Any] = kwargs.get("target", {'alt': 90, 'az': 0})
-        for k, v in target_kwargs.items():
-            target_kwargs[k] = from_currsys(v, self.cmds)
-        target_kwargs["location"] = self.location
-        target_kwargs["obstime"] = self.time
-        self.target = get_target(**target_kwargs)
+        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
 
         self.zenith_angle = get_zenith_angle(self.target, self.location, self.time) * u.deg
 
@@ -393,7 +346,7 @@ class ADCShift(ShiftFoV3D):
 
         if self.meta.get('zenith_angle_error', 0.0) != 0.0:
             logger.info(f'Additional residual from zenith angle error: {self.meta["zenith_angle_error"]}')
-            ad_kwargs = {'target': self.meta['target'], 'mjdobs': self.meta['mjdobs']}
+            ad_kwargs = {}
             ad_defaults = {'temperature':'!ATMO.temperature', 'pressure':'!ATMO.pressure', 'humidity':'!ATMO.humidity',
                        'x_co2':'!ATMO.x_co2', 'wave_ref_um':0.5}
             for k, v in ad_defaults.items():
