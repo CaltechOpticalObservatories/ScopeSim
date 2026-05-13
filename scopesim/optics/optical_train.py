@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import copy
-
+import os
 from datetime import datetime
 
 import numpy as np
@@ -480,7 +480,7 @@ class OpticalTrain:
             if filename is not None and isinstance(filename, str):
                 fname = filename
                 if len(self.detector_managers) > 1:
-                    fname = f"{i}_{filename}"
+                    fname = f"{os.path.dirname(filename)}/{i}_{os.path.basename(filename)}"
                 hdul.writeto(fname, overwrite=True)
 
             hduls.append(hdul)
