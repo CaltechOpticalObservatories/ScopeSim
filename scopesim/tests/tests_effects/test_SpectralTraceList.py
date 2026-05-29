@@ -7,8 +7,9 @@ from astropy.io import fits
 
 
 from scopesim.effects.spectral_trace_list import SpectralTraceList, \
-    SpectralTraceListWheel
+    SpectralTraceListWheel, EchelleSpectralTraceList
 from scopesim.effects.spectral_trace_list_utils import SpectralTrace
+from scopesim.commands import UserCommands
 from scopesim.tests.mocks.py_objects import trace_list_objects as tlo
 from scopesim.tests.mocks.py_objects import header_objects as ho
 
@@ -101,3 +102,65 @@ class TestSpectralTraceListWheel:
         assert stw.meta["trace_list_names"] == ["foo"]
         assert isinstance(stw.trace_lists["foo"], SpectralTraceList)
         assert stw.trace_lists["foo"].meta["filename"] == "bogus_foo"
+
+
+def _write_echelle_trace_params(path):
+    path.write_text(
+        "# min_wave_unit : nm\n"
+        "# max_wave_unit : nm\n"
+        "# echelle_blaze_unit : deg\n"
+        "# focal_length_unit : mm\n"
+        "# fwhm_unit : pixel\n"
+        "# detector_pad_unit : pixel\n"
+        "# pixel_size_unit : mm\n"
+        "# n_disp_unit : pixel\n"
+        "# n_xdisp_unit : pixel\n"
+        "# disp_freq_unit : mm\n"
+        "# xdisp_freq_unit : mm\n"
+        "# slitlength_unit : arcsec\n"
+        "prefix aperture_id image_plane_id m0 n min_wave max_wave "
+        "design_res echelle_blaze focal_length fwhm detector_pad "
+        "pixel_size n_disp n_xdisp disp_freq xdisp_freq slitlength "
+        "dispdir xbeta_center\n"
+        "b 0 0 91 0 310 420 17799 65.6 225 4.5 10 0.015 "
+        "128 128 65.0 1.0 10 x 0\n",
+        encoding="utf-8",
+    )
+
+
+def _echelle_cmds():
+    cmds = UserCommands()
+    cmds["!INST.pixel_scale"] = 0.004
+    return cmds
+
+
+class TestEchelleSpectralTraceList:
+    def test_does_not_write_generated_hdulist_by_default(self, tmp_path):
+        params_file = tmp_path / "echelle_trace_parameters.dat"
+        _write_echelle_trace_params(params_file)
+
+        spt = EchelleSpectralTraceList(
+            cmds=_echelle_cmds(),
+            filename=str(params_file),
+            wave_colname="wavelength",
+            s_colname="s",
+        )
+
+        assert isinstance(spt, EchelleSpectralTraceList)
+        assert not (tmp_path / "analytical_echelle_traces.fits").exists()
+
+    def test_writes_generated_hdulist_to_working_dir_when_requested(
+            self, tmp_path, monkeypatch):
+        params_file = tmp_path / "echelle_trace_parameters.dat"
+        _write_echelle_trace_params(params_file)
+        monkeypatch.chdir(tmp_path)
+
+        EchelleSpectralTraceList(
+            cmds=_echelle_cmds(),
+            filename=str(params_file),
+            wave_colname="wavelength",
+            s_colname="s",
+            save_generated_hdulist=True,
+        )
+
+        assert (tmp_path / "analytical_echelle_traces.fits").exists()

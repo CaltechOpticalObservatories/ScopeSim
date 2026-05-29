@@ -6,6 +6,7 @@ The Effect is called `SpectralTraceList`, it applies a list of
 `spectral_trace_list_utils.SpectralTrace` objects to a `FieldOfView`.
 """
 from itertools import cycle
+from pathlib import Path
 from typing import ClassVar
 
 from tqdm.auto import tqdm
@@ -14,7 +15,6 @@ import numpy as np
 from astropy.io import fits
 from astropy.table import Table
 import astropy.units as u
-import os
 
 from .effects import Effect
 from .ter_curves import FilterCurve
@@ -22,7 +22,7 @@ from .spectral_trace_list_utils import SpectralTrace, make_image_interpolations
 from ..optics.image_plane_utils import header_from_list_of_xy
 from ..optics.fov import FieldOfView
 from ..optics.fov_volume_list import FovVolumeList
-from ..utils import from_currsys, check_keys, figure_factory, get_logger, from_rc_config
+from ..utils import from_currsys, check_keys, figure_factory, get_logger
 from .data_container import DataContainer
 from ..optics import echelle
 
@@ -556,12 +556,17 @@ class EchelleSpectralTraceList(SpectralTraceList):
         self.cmds = cmds
 
         trace_param_filename = kwargs.pop("filename")
+        save_generated_hdulist = kwargs.pop("save_generated_hdulist", False)
+        generated_hdulist_filename = kwargs.pop(
+            "generated_hdulist_filename", "analytical_echelle_traces.fits")
         trace_params = DataContainer(filename=trace_param_filename)
         hdulist = self._generate_trace_hdulist(trace_params)
-        hdulist.writeto(f"{from_rc_config('!SIM.file.local_packages_path')}/"
-                        f"{self.cmds.package_name}/"
-                        f"{os.path.dirname(trace_param_filename)}/"
-                        f"analytical_echelle_traces.fits", overwrite=True)
+        if save_generated_hdulist:
+            output_path = Path(generated_hdulist_filename).expanduser()
+            if not output_path.is_absolute():
+                output_path = Path.cwd() / output_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            hdulist.writeto(output_path, overwrite=True)
         kwargs["hdulist"] = hdulist
         super().__init__(cmds=cmds, **kwargs)
 

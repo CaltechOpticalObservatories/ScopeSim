@@ -186,10 +186,10 @@ class GratingSetup:
         t = detector_length / focal_length
         k = (l_max - l_min) / d
         x = k * (1 + np.sqrt(1 + t ** 2)) / 2 / t
-        u = np.arccos(np.sqrt(x))
-        v = np.arcsin(k / 2 / np.sqrt(x))
-        beta_max = u+v
-        beta_min = u-v
+        beta_center_guess = np.arccos(np.sqrt(x))
+        beta_half_range = np.arcsin(k / 2 / np.sqrt(x))
+        beta_max = beta_center_guess + beta_half_range
+        beta_min = beta_center_guess - beta_half_range
         alpha = np.arcsin(l_max / d - np.sin(beta_max))
         return alpha.to(u.rad), ((beta_min + beta_max) / 2).to(u.rad)
 
