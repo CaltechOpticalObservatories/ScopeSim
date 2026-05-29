@@ -555,6 +555,32 @@ class QuantumEfficiencyCurve(TERCurve):
         self.meta["position"] = -1          # position in surface table
 
 
+class SpectralQuantumEfficiency(TERCurve):
+    """Throughput-only detector QE for spectroscopic FOV cubes.
+
+    Detector QE should attenuate photons reaching the detector, but it should
+    not create a thermal background source from detector emissivity. Place this
+    effect before spectral trace mapping so each order cube is multiplied by the
+    detector QE as a function of wavelength.
+    """
+
+    z_order: ClassVar[tuple[int, ...]] = (610,)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.meta["action"] = "transmission"
+        self.meta["position"] = -1
+
+    def apply_to(self, obj, **kwargs):
+        if not isinstance(obj, FieldOfView):
+            return obj
+        return super().apply_to(obj, **kwargs)
+
+    @property
+    def background_source(self):
+        return None
+
+
 class FilterCurve(TERCurve):
     """
     Descripton TBA.

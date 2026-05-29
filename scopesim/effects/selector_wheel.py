@@ -10,12 +10,15 @@ This module implements a SelectorWheel effect that allows the user to define mul
 ( e.g. different aperture masks for different arms) in the wheel dictionary where each effect corresponds to a
 "selector_id" value. The user can set which id to use as the "selector", for e.g. aperture_id or id of the FoV object.
 """
+import importlib
+from numbers import Integral
+
 from ..utils import (check_keys, get_logger, real_colname)
 from .effects import Effect
 from ..optics.fov_volume_list import FovVolumeList
 from ..optics.fov import FieldOfView
+from ..optics.image_plane import ImagePlane
 from ..detector.detector import Detector
-import importlib
 
 logger = get_logger(__name__)
 
@@ -72,8 +75,7 @@ class SelectorWheel(Effect):
             else:
                 self.wheel_effects[selector_value] = effect_class(cmds=self.cmds, **effect_kwargs)
 
-        # Use the wheel effects' z_order as the z_order of the selector wheel
-        self.z_order = [eff.z_order for eff in self.wheel_effects.values()][0]
+        self.z_order = self._resolve_z_order()
 
 
     def apply_to(self, obj, **kwargs):
@@ -128,6 +130,15 @@ class SelectorWheel(Effect):
 
             obj = effect_to_apply.apply_to(obj, **kwargs)
 
+        if isinstance(obj, ImagePlane):
+            selector_value = self._selector_value_from_image_plane(obj)
+            effect_to_apply = self.get_effect(selector_value)
+            if effect_to_apply is None:
+                logger.warning(f"No effect found for image plane ID: {selector_value}, skipping effect application.")
+                return obj
+
+            obj = effect_to_apply.apply_to(obj, **kwargs)
+
         return obj
 
 
@@ -141,3 +152,25 @@ class SelectorWheel(Effect):
         return eff
 
 
+    def _resolve_z_order(self):
+        """Use an explicit wheel z_order if supplied, otherwise inherit one."""
+        configured_z_order = self.meta.get("z_order")
+        if configured_z_order is not None:
+            if isinstance(configured_z_order, Integral):
+                return (int(configured_z_order),)
+            return tuple(configured_z_order)
+
+        if not self.wheel_effects:
+            return ()
+        return tuple(next(iter(self.wheel_effects.values())).z_order)
+
+
+    def _selector_value_from_image_plane(self, obj):
+        selector_key = self.meta["selector_key"]
+        if selector_key in obj.meta:
+            return obj.meta[selector_key]
+        if selector_key in obj.hdu.header:
+            return obj.hdu.header[selector_key]
+        if selector_key in {"id", "image_plane_id", "IMGPLANE"}:
+            return obj.id
+        raise ValueError(f"Selector key {selector_key} not found in ImagePlane.")

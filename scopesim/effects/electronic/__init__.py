@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 
 from .electrons import LinearityCurve, ADConversion, InterPixelCapacitance
 from .noise import (Bias, PoorMansHxRGReadoutNoise, BasicReadoutNoise,
-                    ShotNoise, DarkCurrent)
+                    PixelResponseNonUniformity, ShotNoise, DarkCurrent)
 from .exposure import AutoExposure, ExposureIntegration, ExposureOutput
 from .pixels import ReferencePixelBorder, BinnedImage, UnequalBinnedImage
 from .dmps import DetectorModePropertiesSetter

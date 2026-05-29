@@ -48,6 +48,44 @@ class TestTERCurveApplyTo:
             plt.show()
 
 
+class TestSpectralQuantumEfficiency:
+    def test_is_fov_phase_only(self):
+        qe = tc.SpectralQuantumEfficiency(
+            array_dict={
+                "wavelength": [0.5, 1.0],
+                "transmission": [0.8, 0.9],
+            },
+            wavelength_unit="um",
+        )
+
+        assert qe.z_order == (610,)
+
+    def test_does_not_create_background_source(self):
+        qe = tc.SpectralQuantumEfficiency(
+            array_dict={
+                "wavelength": [0.5, 1.0],
+                "transmission": [0.8, 0.9],
+            },
+            wavelength_unit="um",
+        )
+
+        assert qe.background_source is None
+
+    def test_does_not_apply_to_source(self):
+        src = so._empty_sky()
+        n_fields = len(src.fields)
+        qe = tc.SpectralQuantumEfficiency(
+            array_dict={
+                "wavelength": [0.5, 1.0],
+                "transmission": [0.8, 0.9],
+            },
+            wavelength_unit="um",
+        )
+
+        assert qe.apply_to(src) is src
+        assert len(src.fields) == n_fields
+
+
 class TestTERCurvePlot:
     def test_plots_only_transmission(self):
         filt = eo._filter_surface(wave_min=0.8, wave_max=2.5)
