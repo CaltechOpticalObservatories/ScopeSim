@@ -2,15 +2,23 @@
 
 import numpy as np
 import pytest
+from astropy import units as u
+from astropy.table import Table
+from synphot.units import PHOTLAM
 
 from scopesim.effects.illumination import (
     ImagePlaneBackground,
     Illumination,
+    PostDisperserDiffuseBackground,
+    effective_diffuse_qe,
     gaussian2d,
+    integrate_spectral_background,
+    post_disperser_diffuse_spectrum,
     quadratic_vignetting,
 )
 from scopesim.optics.image_plane import ImagePlane
 from scopesim.tests.mocks.py_objects.imagehdu_objects import _image_hdu_square
+from scopesim.utils import pixel_area
 
 
 @pytest.fixture
@@ -101,3 +109,94 @@ def test_image_plane_background_skips_non_imageplane():
 def test_image_plane_background_plot_raises_before_apply():
     with pytest.raises(RuntimeError):
         ImagePlaneBackground(value=1).plot()
+
+
+class ConstantCurve:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self, wave):
+        return np.full(wave.size, self.value)
+
+
+class ConstantEmission:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self, wave):
+        return np.full(wave.size, self.value) * PHOTLAM
+
+
+class FakeSurface:
+    def __init__(self, transmission, emission):
+        self.transmission = ConstantCurve(transmission)
+        self.emission = ConstantEmission(emission)
+
+
+class FakeSurfaceList:
+    table = Table({
+        "name": ["pre", "camera"],
+        "action": ["transmission", "transmission"],
+        "emission_phase": ["pre_disperser", "post_disperser"],
+    })
+
+    def __init__(self):
+        self.surfaces = {
+            "pre": FakeSurface(transmission=0.5, emission=100.0),
+            "camera": FakeSurface(transmission=0.8, emission=2.0),
+        }
+
+
+class FakeQE:
+    throughput = ConstantCurve(0.5)
+
+
+def test_effective_diffuse_qe_uses_average_positional_response():
+    wave = np.linspace(1.0, 2.0, 3) * u.um
+    positional_qe = np.array([[0.8, 1.0], [0.6, 1.0]])
+
+    qe = effective_diffuse_qe(FakeQE(), wave, positional_qe=positional_qe)
+
+    np.testing.assert_allclose(qe, np.full(wave.size, 0.425))
+
+
+def test_post_disperser_diffuse_spectrum_uses_phase_metadata_and_qe():
+    wave = np.linspace(1.0, 2.0, 3) * u.um
+    qe = np.full(wave.size, 0.5)
+
+    spectrum = post_disperser_diffuse_spectrum(
+        FakeSurfaceList(), wave, qe_values=qe,
+    )
+
+    np.testing.assert_allclose(spectrum.value, np.full(wave.size, 1.0))
+
+
+def test_integrate_spectral_background_returns_image_plane_rate():
+    wave = np.array([1.0, 2.0]) * u.um
+    spectrum = np.full(wave.size, 1.0) * PHOTLAM
+
+    rate = integrate_spectral_background(
+        spectrum,
+        wave,
+        telescope_area=1.0 * u.m**2,
+        image_pixel_area=0.01 * u.arcsec**2,
+    )
+
+    assert rate == pytest.approx(1.0e6)
+
+
+def test_post_disperser_diffuse_background_adds_integrated_rate(imageplane):
+    eff = PostDisperserDiffuseBackground(
+        surface_list=FakeSurfaceList(),
+        detector_qe=FakeQE(),
+        wave_min=1.0,
+        wave_max=2.0,
+        wave_bin=1.0,
+        wave_unit="um",
+        area=1.0 * u.m**2,
+    )
+
+    eff.apply_to(imageplane)
+
+    expected = 1.0 + 1.0e8 * pixel_area(imageplane.header).to_value(u.arcsec**2)
+    assert imageplane.hdu.data[0, 0] == pytest.approx(expected)
