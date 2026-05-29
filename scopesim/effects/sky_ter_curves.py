@@ -108,11 +108,14 @@ class PalaceAirglowEmission(Effect):
         return obj
 
     def get_palace_inputs(self, **kwargs):
+        package_name = getattr(self.cmds, "package_name", "palace")
+        default_outdir = f"{from_rc_config('!SIM.file.local_packages_path')}/{package_name}"
         parlist = {"species": kwargs.get("species", "all"),
                         "srf": kwargs.get("srf", 130.0),
                         "isair": kwargs.get("isair", True),
                         "isatm": kwargs.get("isatm", True),
                         "pwv": from_currsys(kwargs.get("pwv", 2.5), self.cmds),
+                        "outdir": kwargs.get("outdir", default_outdir),
                         "outname": kwargs.get("outname", "palace"),
                         "specsuffix": "dat",
                         "showplot": False}
@@ -131,7 +134,7 @@ class PalaceAirglowEmission(Effect):
                 atmo_name = [dt.name for dt in self.cmds.yaml_dicts if dt.alias == "!ATMO"][0]
                 parlist["outdir"] = [pth for pth in rc.__search_path__ if atmo_name in pth][0]
             except:
-                parlist["outdir"] = f"{from_rc_config("!SIM.file.local_packages_path")}/{self.cmds.package_name}"
+                parlist["outdir"] = default_outdir
 
         ## Set PALACE model spectral resolution input from simulation settings if provided.
         resol = 2 * from_currsys("!SIM.spectral.spectral_resolution", self.cmds) if (
@@ -164,14 +167,26 @@ class PalaceAirglowEmission(Effect):
     @staticmethod
     def get_mbin_tbin(obstime):
         mbin = obstime.datetime.month
-        tbin = obstime.datetime.hour
-        if not ((0 <= tbin <= 6) or (18 <= tbin <= 24)):
+        tbin = (obstime.datetime.hour
+                + obstime.datetime.minute / 60
+                + obstime.datetime.second / 3600)
+        if not ((0 <= tbin < 6) or (18 <= tbin < 24)):
             logger.warning("Local time is outside of the range covered by the PALACE model (18-6h). Defaulting to tbin=0 (all times).")
             tbin = 0
         return mbin, tbin
 
     def run_palace(self):
         _, spec_cont, spec_line = palace.model(**self.parlist)
+
+        for label, spectrum in (("continuum", spec_cont), ("line", spec_line)):
+            if not isinstance(spectrum, Table):
+                raise RuntimeError(f"PALACE {label} spectrum has type {type(spectrum).__name__}; expected astropy Table.")
+
+            missing_columns = {"lam", "flux"} - set(spectrum.colnames)
+            if missing_columns:
+                raise RuntimeError(f"PALACE {label} spectrum is missing required columns: "
+                                   f"{', '.join(sorted(missing_columns))}.")
+
         if len(spec_cont) == 0:
             logger.warning("PALACE model returned empty continuum spectrum.")
             ## Try loading cont emission from saved model output if available
@@ -194,7 +209,7 @@ class PalaceAirglowEmission(Effect):
             if len(spec_line) > 0:
                 self.parlist["outname"] = self.parlist["outname"].replace("_cont", "_line")
                 palace.output(spec_line, **self.parlist)
-            logger.info(f"Saved PALACE models in {self.parlist["outdir"]}")
+            logger.info(f"Saved PALACE models in {self.parlist['outdir']}")
 
         return spec_cont, spec_line
 
@@ -347,6 +362,5 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
                 else:
                     params["time"] = 3
         return params
-
 
 
