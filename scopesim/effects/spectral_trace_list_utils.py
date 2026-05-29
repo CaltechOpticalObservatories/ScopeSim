@@ -283,6 +283,7 @@ class SpectralTrace:
         img_header["XMAX"] = xmax
         img_header["YMIN"] = ymin
         img_header["YMAX"] = ymax
+        img_header["BUNIT"] = "ph s-1"
 
         if np.any(image < 0):
             logger.warning("map_spectra_to_focal_plane: %d negative pixels",
