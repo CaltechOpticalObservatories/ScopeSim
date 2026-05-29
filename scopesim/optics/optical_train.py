@@ -602,6 +602,10 @@ class OpticalTrain:
     def effects(self):
         return self.optics_manager.list_effects()
 
+    @property
+    def effect_order(self):
+        return self.optics_manager.effect_order_table()
+
     def __repr__(self):
         return f"{self.__class__.__name__}({self.cmds!r})"
 

@@ -49,6 +49,53 @@ class TestOpticsManager:
                           opt_mgr.OpticalElement)
         assert isinstance(opt_man.optical_elements[0].effects[0], Effect)
 
+    def test_effect_order_table_uses_runtime_phase_order(self,
+                                                         detector_yaml_dict):
+        opt_man = opt_mgr.OpticsManager([detector_yaml_dict])
+
+        tbl = opt_man.effect_order_table()
+        source_rows = tbl[tbl["phase"] == "source"]
+        fov_rows = tbl[tbl["phase"] == "fov"]
+        detector_setup_rows = tbl[tbl["phase"] == "detector_setup"]
+
+        assert source_rows["effect"].tolist() == ["detector_qe_curve"]
+        assert fov_rows["effect"].tolist() == ["detector_qe_curve"]
+        assert detector_setup_rows["effect"].tolist() == [
+            "micado_detector_geometry"]
+
+    def test_effect_order_table_summarises_selector_wheels(self):
+        yaml_dict = {
+            "object": "instrument",
+            "alias": "INST",
+            "name": "selector_test",
+            "properties": {"pixel_scale": 0.004},
+            "effects": [{
+                "name": "selected_qe",
+                "class": "SelectorWheel",
+                "kwargs": {
+                    "selector_key": "aperture_id",
+                    "wheel": [{
+                        "selector_value": [1, 2],
+                        "effect_class": "TERCurve",
+                        "effect_kwargs": {"filename": "TER_blank.dat"},
+                    }],
+                },
+            }],
+        }
+
+        opt_man = opt_mgr.OpticsManager([yaml_dict])
+
+        tbl = opt_man.effect_order_table()
+        source_row = tbl[tbl["phase"] == "source"][0]
+        fov_row = tbl[tbl["phase"] == "fov"][0]
+
+        assert source_row["effect"] == "selected_qe"
+        assert source_row["class"] == "SelectorWheel"
+        assert source_row["selector_key"] == "aperture_id"
+        assert source_row["selector_values"] == "1, 2"
+        assert source_row["selected_classes"] == "TERCurve"
+        assert fov_row["phase_z_orders"] == "610"
+
 
 @pytest.mark.usefixtures("patch_mock_path")
 class TestOpticsManagerImagePlaneHeader:
