@@ -5,6 +5,7 @@ from warnings import warn
 from copy import deepcopy
 from itertools import chain
 from collections.abc import Iterable, Generator
+from weakref import WeakKeyDictionary
 
 import numpy as np
 from scipy.interpolate import interp1d
@@ -43,6 +44,8 @@ from ..source.source import Source
 
 
 logger = get_logger(__name__)
+
+_SPECTRUM_WAVESET_AA_CACHE = WeakKeyDictionary()
 
 
 class FieldOfView:
@@ -1166,15 +1169,15 @@ def extract_range_from_spectrum(spectrum, waverange):
         f"spectrum must be of type synphot.SourceSpectrum: {type(spectrum)}")
 
     wave_min, wave_max = quantify(waverange, u.um).to(u.AA).value
-    spec_waveset = spectrum.waveset.to(u.AA).value
-    mask = (spec_waveset > wave_min) * (spec_waveset < wave_max)
+    spec_waveset = _spectrum_waveset_aa_value(spectrum)
+    mask = (spec_waveset > wave_min) & (spec_waveset < wave_max)
 
     # FIXME: Why did I comment this out in 2023? Seems useful to have...
     # if sum(mask) == 0:
     #     logger.info(
     #         "Waverange does not overlap with Spectrum waveset: %s <> %s for "
     #         "spectrum %s", [wave_min, wave_max], spec_waveset, spectrum)
-    if wave_min < min(spec_waveset) or wave_max > max(spec_waveset):
+    if wave_min < spec_waveset[0] or wave_max > spec_waveset[-1]:
         logger.info(("Waverange only partially overlaps with Spectrum waveset: "
                      "%s <> %s for spectrum %s"),
                      [wave_min, wave_max], spec_waveset, spectrum)
@@ -1186,3 +1189,12 @@ def extract_range_from_spectrum(spectrum, waverange):
     new_spectrum.meta.update(spectrum.meta)
 
     return new_spectrum
+
+
+def _spectrum_waveset_aa_value(spectrum):
+    """Return cached spectrum waveset values in Angstrom."""
+    spec_waveset = _SPECTRUM_WAVESET_AA_CACHE.get(spectrum)
+    if spec_waveset is None:
+        spec_waveset = spectrum.waveset.to(u.AA).value
+        _SPECTRUM_WAVESET_AA_CACHE[spectrum] = spec_waveset
+    return spec_waveset
