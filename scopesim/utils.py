@@ -1169,6 +1169,8 @@ def resolve_time(time_str, location: EarthLocation | None = None):
         if ('T' in time_str) and (':' in time_str): ## ISOT format
             logger.info(f"Resolving time: {time_str} assuming ISOT format and UTC scale")
             t = Time(time_str, format="isot", location=location)
+        elif time_str == "grey":
+            time_str = "gray"
         elif time_str not in ["bright", "gray", "dark"]:
             logger.warning(f"Unrecognized time string input: {time_str}. Defaulting to 'dark'.")
             time_str = "dark"
@@ -1219,14 +1221,21 @@ def get_next_moon(moontype="full"):
     """
     Get time of the next closest moon phase of given moon type (full, half or new).
     """
-    times = Time.now() + np.linspace(0, 30, 1000)*u.day
+    today = Time.now().isot.split("T")[0]
+    return _get_next_moon_cached(moontype, today)
+
+
+@functools.lru_cache(maxsize=32)
+def _get_next_moon_cached(moontype="full", today=None):
+    now = Time.now()
+    times = now + np.linspace(0, 30, 1000)*u.day
     phases = get_moon_phase(times)
     flis = get_moon_fli(phases)
     next_full = times[np.argmax(flis)]
     next_new = times[np.argmin(flis)]
     prev_full = next_full - 29.53*u.day
     prev_new = next_new - 29.53*u.day
-    if min(next_new, next_full) - Time.now() > Time.now() - max(prev_new, prev_full):
+    if min(next_new, next_full) - now > now - max(prev_new, prev_full):
         next_half = min(next_new, next_full) - 7.38*u.day
     else:
         next_half = min(next_new, next_full) + 7.38*u.day
