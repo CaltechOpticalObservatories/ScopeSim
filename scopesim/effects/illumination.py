@@ -14,7 +14,7 @@ from . import Effect
 from .surface_list import SurfaceList
 from .ter_curves import SpectralQuantumEfficiency
 from ..optics.image_plane import ImagePlane
-from ..utils import figure_factory, from_currsys, pixel_area, quantify, real_colname
+from ..utils import figure_factory, from_currsys, quantify, real_colname
 
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "PostDisperserDiffuseBackground",
     "effective_diffuse_qe",
     "gaussian2d",
+    "image_plane_pixel_area",
     "integrate_spectral_background",
     "post_disperser_diffuse_spectrum",
     "quadratic_vignetting",
@@ -239,6 +240,69 @@ def integrate_spectral_background(
         return rate.to_value(u.ph / u.s) * image_pixel_area.to_value(u.arcsec**2)
 
 
+def image_plane_pixel_area(header, cmds=None) -> u.Quantity:
+    """Return the angular area represented by one image-plane pixel.
+
+    Some spectroscopic image-plane headers only carry detector WCS keywords
+    such as ``CDELT1D``/``CUNIT1D``. Those are detector lengths, not sky angles,
+    so diffuse surface-brightness backgrounds need the instrument angular pixel
+    scale instead of :func:`scopesim.utils.pixel_area`.
+    """
+    for suffix in ("", "S", "D"):
+        area = _angular_pixel_area_from_header(header, suffix)
+        if area is not None:
+            return area
+
+    detector_area = _detector_pixel_area_from_header(header, cmds)
+    if detector_area is not None:
+        return detector_area
+
+    if cmds is not None and "!INST.pixel_scale" in cmds:
+        scale = quantify(from_currsys("!INST.pixel_scale", cmds), u.arcsec)
+        return (abs(scale) ** 2).to(u.arcsec**2)
+
+    raise KeyError(
+        "Image-plane header has no angular WCS pixel scale and "
+        "!INST.pixel_scale is unavailable."
+    )
+
+
+def _angular_pixel_area_from_header(header, suffix: str) -> u.Quantity | None:
+    keys = (f"CDELT1{suffix}", f"CUNIT1{suffix}",
+            f"CDELT2{suffix}", f"CUNIT2{suffix}")
+    if not all(key in header for key in keys):
+        return None
+
+    unit1 = u.Unit(header[keys[1]])
+    unit2 = u.Unit(header[keys[3]])
+    area = abs(header[keys[0]] * header[keys[2]]) * unit1 * unit2
+    if area.unit.is_equivalent(u.arcsec**2):
+        return area.to(u.arcsec**2)
+    return None
+
+
+def _detector_pixel_area_from_header(header, cmds) -> u.Quantity | None:
+    keys = ("CDELT1D", "CUNIT1D", "CDELT2D", "CUNIT2D")
+    if cmds is None or not all(key in header for key in keys):
+        return None
+
+    unit1 = u.Unit(header["CUNIT1D"])
+    unit2 = u.Unit(header["CUNIT2D"])
+    if not (
+        unit1.is_equivalent(u.mm)
+        and unit2.is_equivalent(u.mm)
+        and "!INST.plate_scale" in cmds
+    ):
+        return None
+
+    plate_scale = quantify(
+        from_currsys("!INST.plate_scale", cmds), u.arcsec / u.mm,
+    )
+    dx = abs(header["CDELT1D"]) * unit1
+    dy = abs(header["CDELT2D"]) * unit2
+    return (dx * plate_scale * dy * plate_scale).to(u.arcsec**2)
+
+
 class Illumination(Effect):
     """Large-scale multiplicative illumination variation on the image plane."""
 
@@ -436,7 +500,7 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
             spectrum,
             wave,
             telescope_area=area,
-            image_pixel_area=pixel_area(image_plane.header),
+            image_pixel_area=image_plane_pixel_area(image_plane.header, self.cmds),
         )
 
     def _waveset(self) -> u.Quantity:

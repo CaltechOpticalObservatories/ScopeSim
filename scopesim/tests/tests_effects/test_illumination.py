@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 from astropy import units as u
+from astropy.io import fits
 from astropy.table import Table
 from synphot.units import PHOTLAM
 
@@ -12,6 +13,7 @@ from scopesim.effects.illumination import (
     PostDisperserDiffuseBackground,
     effective_diffuse_qe,
     gaussian2d,
+    image_plane_pixel_area,
     integrate_spectral_background,
     post_disperser_diffuse_spectrum,
     quadratic_vignetting,
@@ -185,6 +187,27 @@ def test_integrate_spectral_background_returns_image_plane_rate():
     assert rate == pytest.approx(1.0e6)
 
 
+def test_image_plane_pixel_area_uses_detector_wcs_with_plate_scale():
+    header = fits.Header({
+        "CDELT1D": 0.015,
+        "CUNIT1D": "mm",
+        "CDELT2D": 0.015,
+        "CUNIT2D": "mm",
+    })
+
+    area = image_plane_pixel_area(header, {"!INST.plate_scale": 10.0})
+
+    assert area.to_value(u.arcsec**2) == pytest.approx(0.0225)
+
+
+def test_image_plane_pixel_area_falls_back_to_instrument_pixel_scale():
+    header = fits.Header()
+
+    area = image_plane_pixel_area(header, {"!INST.pixel_scale": 0.16})
+
+    assert area.to_value(u.arcsec**2) == pytest.approx(0.0256)
+
+
 def test_post_disperser_diffuse_background_adds_integrated_rate(imageplane):
     eff = PostDisperserDiffuseBackground(
         surface_list=FakeSurfaceList(),
@@ -200,3 +223,27 @@ def test_post_disperser_diffuse_background_adds_integrated_rate(imageplane):
 
     expected = 1.0 + 1.0e8 * pixel_area(imageplane.header).to_value(u.arcsec**2)
     assert imageplane.hdu.data[0, 0] == pytest.approx(expected)
+
+
+def test_post_disperser_diffuse_background_accepts_detector_wcs(imageplane):
+    for key in ("CDELT1", "CUNIT1", "CDELT2", "CUNIT2"):
+        imageplane.header.remove(key, ignore_missing=True, remove_all=True)
+    imageplane.header["CDELT1D"] = 0.015
+    imageplane.header["CUNIT1D"] = "mm"
+    imageplane.header["CDELT2D"] = 0.015
+    imageplane.header["CUNIT2D"] = "mm"
+
+    eff = PostDisperserDiffuseBackground(
+        surface_list=FakeSurfaceList(),
+        detector_qe=FakeQE(),
+        wave_min=1.0,
+        wave_max=2.0,
+        wave_bin=1.0,
+        wave_unit="um",
+        area=1.0 * u.m**2,
+        cmds={"!INST.plate_scale": 10.0},
+    )
+
+    eff.apply_to(imageplane)
+
+    assert imageplane.hdu.data[0, 0] == pytest.approx(1.0 + 2.25e6)
