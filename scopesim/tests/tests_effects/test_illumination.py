@@ -153,6 +153,30 @@ class FakeQE:
     throughput = ConstantCurve(0.5)
 
 
+class CountingEmission(ConstantEmission):
+    def __init__(self, value):
+        super().__init__(value)
+        self.calls = 0
+
+    def __call__(self, wave):
+        self.calls += 1
+        return super().__call__(wave)
+
+
+class CountingSurfaceList:
+    table = Table({
+        "name": ["camera"],
+        "action": ["transmission"],
+        "emission_phase": ["post_disperser"],
+    })
+
+    def __init__(self):
+        self.emission = CountingEmission(2.0)
+        surface = FakeSurface(transmission=1.0, emission=2.0)
+        surface.emission = self.emission
+        self.surfaces = {"camera": surface}
+
+
 def test_effective_diffuse_qe_uses_average_positional_response():
     wave = np.linspace(1.0, 2.0, 3) * u.um
     positional_qe = np.array([[0.8, 1.0], [0.6, 1.0]])
@@ -247,3 +271,27 @@ def test_post_disperser_diffuse_background_accepts_detector_wcs(imageplane):
     eff.apply_to(imageplane)
 
     assert imageplane.hdu.data[0, 0] == pytest.approx(1.0 + 2.25e6)
+
+
+def test_post_disperser_diffuse_background_reuses_spectral_rate_cache(
+    imageplane,
+):
+    surface_list = CountingSurfaceList()
+    detector_qe = FakeQE()
+    cmds = {"!INST.pixel_scale": 0.16}
+    kwargs = {
+        "surface_list": surface_list,
+        "detector_qe": detector_qe,
+        "wave_min": 1.0,
+        "wave_max": 2.0,
+        "wave_bin": 1.0,
+        "wave_unit": "um",
+        "area": 1.0 * u.m**2,
+        "cmds": cmds,
+    }
+
+    value_1 = PostDisperserDiffuseBackground(**kwargs).background_value(imageplane)
+    value_2 = PostDisperserDiffuseBackground(**kwargs).background_value(imageplane)
+
+    assert value_2 == pytest.approx(value_1)
+    assert surface_list.emission.calls == 1

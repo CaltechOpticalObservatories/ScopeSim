@@ -17,6 +17,10 @@ from ..optics.image_plane import ImagePlane
 from ..utils import figure_factory, from_currsys, quantify, real_colname
 
 
+_POST_DISPERSER_RATE_CACHE_MAXSIZE = 64
+_POST_DISPERSER_RATE_CACHE: dict[tuple, float] = {}
+
+
 __all__ = [
     "Illumination",
     "ImagePlaneBackground",
@@ -109,6 +113,33 @@ def _representative_positional_qe(positional_qe, wave: u.Quantity):
     if values.shape == wave.shape:
         return values
     return float(np.nanmean(values))
+
+
+def _cache_object_key(filename, obj):
+    if filename is not None:
+        return ("file", str(filename))
+    if obj is None:
+        return None
+    return ("object", id(obj))
+
+
+def _image_plane_cache_key(image_plane):
+    header = image_plane.header
+    return (
+        header.get("EXTNAME"),
+        header.get("IMAGEID"),
+        header.get("IMGPLANE"),
+        header.get("CDELT1"),
+        header.get("CDELT2"),
+        header.get("CDELT1D"),
+        header.get("CDELT2D"),
+    )
+
+
+def _store_post_disperser_rate_cache(key: tuple, value: float) -> None:
+    if len(_POST_DISPERSER_RATE_CACHE) >= _POST_DISPERSER_RATE_CACHE_MAXSIZE:
+        _POST_DISPERSER_RATE_CACHE.clear()
+    _POST_DISPERSER_RATE_CACHE[key] = value
 
 
 def effective_diffuse_qe(
@@ -485,6 +516,18 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
 
     def background_value(self, image_plane: ImagePlane) -> float:
         """Return the scalar background in ``ph s-1 pixel-1``."""
+        rate_per_arcsec2 = self._background_rate_per_arcsec2(image_plane)
+        pixel_area = image_plane_pixel_area(
+            image_plane.header, self.cmds,
+        ).to_value(u.arcsec**2)
+        return rate_per_arcsec2 * pixel_area
+
+    def _background_rate_per_arcsec2(self, image_plane: ImagePlane) -> float:
+        """Return the image-plane background rate before pixel-area scaling."""
+        key = self._background_rate_cache_key(image_plane)
+        if key in _POST_DISPERSER_RATE_CACHE:
+            return _POST_DISPERSER_RATE_CACHE[key]
+
         wave = self._waveset()
         qe_values = effective_diffuse_qe(
             self._detector_qe, wave, positional_qe=self._positional_qe,
@@ -496,11 +539,48 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
             emission_phase=self.meta["emission_phase"],
         )
         area = quantify(from_currsys(self.meta["area"], self.cmds), u.m**2)
-        return integrate_spectral_background(
+        rate = integrate_spectral_background(
             spectrum,
             wave,
             telescope_area=area,
-            image_pixel_area=image_plane_pixel_area(image_plane.header, self.cmds),
+            image_pixel_area=1.0 * u.arcsec**2,
+        )
+        _store_post_disperser_rate_cache(key, rate)
+        return rate
+
+    def _background_rate_cache_key(self, image_plane: ImagePlane) -> tuple:
+        wave_unit = u.Unit(from_currsys(self.meta["wave_unit"], self.cmds))
+        wave_min = quantify(
+            from_currsys(self.meta["wave_min"], self.cmds), wave_unit,
+        ).to_value(wave_unit)
+        wave_max = quantify(
+            from_currsys(self.meta["wave_max"], self.cmds), wave_unit,
+        ).to_value(wave_unit)
+        wave_bin = quantify(
+            from_currsys(self.meta["wave_bin"], self.cmds), wave_unit,
+        ).to_value(wave_unit)
+        area = quantify(
+            from_currsys(self.meta["area"], self.cmds), u.m**2,
+        ).to_value(u.m**2)
+        filename = self.meta["filename"]
+        qe_filename = self.meta["detector_qe_filename"]
+        positional_qe_key = None
+        if self._positional_qe is not None:
+            positional_qe_key = (
+                id(self._positional_qe),
+                _image_plane_cache_key(image_plane),
+            )
+        return (
+            id(self.cmds),
+            _cache_object_key(filename, self._surface_list),
+            _cache_object_key(qe_filename, self._detector_qe),
+            positional_qe_key,
+            str(self.meta["emission_phase"]),
+            str(wave_unit),
+            float(wave_min),
+            float(wave_max),
+            float(wave_bin),
+            float(area),
         )
 
     def _waveset(self) -> u.Quantity:
