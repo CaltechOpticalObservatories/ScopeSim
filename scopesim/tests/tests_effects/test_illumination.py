@@ -186,6 +186,38 @@ def test_effective_diffuse_qe_uses_average_positional_response():
     np.testing.assert_allclose(qe, np.full(wave.size, 0.425))
 
 
+def test_effective_diffuse_qe_uses_detector_diffuse_method():
+    class DiffuseAwareQE:
+        def throughput(self, wave):
+            return np.full(wave.size, 0.9)
+
+        def effective_diffuse_throughput(self, wave, footprint=None):
+            return np.full(wave.size, footprint["average_qe"])
+
+    wave = np.linspace(1.0, 2.0, 3) * u.um
+
+    qe = effective_diffuse_qe(
+        DiffuseAwareQE(), wave, footprint={"average_qe": 0.6})
+
+    np.testing.assert_allclose(qe, np.full(wave.size, 0.6))
+
+
+def test_effective_diffuse_qe_passes_footprint_to_positional_qe():
+    wave = np.linspace(1.0, 2.0, 3) * u.um
+
+    def positional_qe(_wave, footprint=None):
+        return footprint["qe_map"]
+
+    qe = effective_diffuse_qe(
+        FakeQE(),
+        wave,
+        positional_qe=positional_qe,
+        footprint={"qe_map": np.array([[0.2, 0.4], [0.6, 0.8]])},
+    )
+
+    np.testing.assert_allclose(qe, np.full(wave.size, 0.25))
+
+
 def test_post_disperser_diffuse_spectrum_uses_phase_metadata_and_qe():
     wave = np.linspace(1.0, 2.0, 3) * u.um
     qe = np.full(wave.size, 0.5)

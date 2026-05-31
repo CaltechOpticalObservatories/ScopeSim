@@ -32,6 +32,49 @@ from ..server.download_utils import create_retriever
 logger = get_logger(__name__)
 
 
+def detector_qe_at(
+    detector_qe,
+    wave: u.Quantity,
+    detector_x=None,
+    detector_y=None,
+    **kwargs,
+):
+    """Evaluate detector QE for trace-mapped light.
+
+    Spectral-only QE curves ignore detector position. Position-dependent QE
+    effects can provide ``throughput_at(wave, detector_x=..., detector_y=...)``
+    to support tapered coatings without changing callers that only need
+    wavelength-dependent throughput.
+    """
+    if detector_qe is None:
+        return np.ones(np.size(wave), dtype=float)
+
+    if hasattr(detector_qe, "throughput_at"):
+        return detector_qe.throughput_at(
+            wave, detector_x=detector_x, detector_y=detector_y, **kwargs)
+
+    if detector_x is not None or detector_y is not None:
+        try:
+            return detector_qe.throughput(
+                wave, detector_x=detector_x, detector_y=detector_y, **kwargs)
+        except TypeError:
+            pass
+
+    return detector_qe.throughput(wave)
+
+
+def diffuse_detector_qe(detector_qe, wave: u.Quantity, footprint=None, **kwargs):
+    """Evaluate effective detector QE for non-dispersed diffuse light."""
+    if detector_qe is None:
+        return np.ones(np.size(wave), dtype=float)
+
+    if hasattr(detector_qe, "effective_diffuse_throughput"):
+        return detector_qe.effective_diffuse_throughput(
+            wave, footprint=footprint, **kwargs)
+
+    return detector_qe_at(detector_qe, wave, **kwargs)
+
+
 class TERCurve(Effect):
     """
     Transmission, Emissivity, Reflection Curve.
@@ -562,9 +605,14 @@ class SpectralQuantumEfficiency(TERCurve):
     not create a thermal background source from detector emissivity. Place this
     effect before spectral trace mapping so each order cube is multiplied by the
     detector QE as a function of wavelength.
+
+    ``throughput_at`` and ``effective_diffuse_throughput`` define the detector
+    QE interface used by future position-dependent coatings. Spectral QE ignores
+    detector position; tapered QE effects should override these methods.
     """
 
     z_order: ClassVar[tuple[int, ...]] = (610,)
+    uses_detector_footprint: ClassVar[bool] = False
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -575,6 +623,18 @@ class SpectralQuantumEfficiency(TERCurve):
         if not isinstance(obj, FieldOfView):
             return obj
         return super().apply_to(obj, **kwargs)
+
+    def throughput_at(self, wave, detector_x=None, detector_y=None, **kwargs):
+        """Return trace-mapped detector QE.
+
+        Spectral QE is independent of detector position. Position-dependent QE
+        subclasses should override this method.
+        """
+        return self.throughput(wave)
+
+    def effective_diffuse_throughput(self, wave, footprint=None, **kwargs):
+        """Return footprint-averaged QE for diffuse image-plane backgrounds."""
+        return self.throughput(wave)
 
     @property
     def background_source(self):

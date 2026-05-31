@@ -12,7 +12,7 @@ from synphot.units import PHOTLAM
 
 from . import Effect
 from .surface_list import SurfaceList
-from .ter_curves import SpectralQuantumEfficiency
+from .ter_curves import SpectralQuantumEfficiency, diffuse_detector_qe
 from ..optics.image_plane import ImagePlane
 from ..utils import figure_factory, from_currsys, quantify, real_colname
 
@@ -105,10 +105,20 @@ def wavelength_bin_widths(wave: u.Quantity) -> u.Quantity:
     return widths * wave.unit
 
 
-def _representative_positional_qe(positional_qe, wave: u.Quantity):
+def _representative_positional_qe(
+    positional_qe,
+    wave: u.Quantity,
+    footprint=None,
+):
     if positional_qe is None:
         return 1.0
-    values = positional_qe(wave) if callable(positional_qe) else positional_qe
+    if callable(positional_qe):
+        try:
+            values = positional_qe(wave, footprint=footprint)
+        except TypeError:
+            values = positional_qe(wave)
+    else:
+        values = positional_qe
     values = _as_float_array(values)
     if values.shape == wave.shape:
         return values
@@ -146,6 +156,7 @@ def effective_diffuse_qe(
     detector_qe,
     wave: u.Quantity,
     positional_qe=None,
+    footprint=None,
 ) -> np.ndarray:
     """Return effective detector QE for non-dispersed diffuse backgrounds.
 
@@ -154,11 +165,10 @@ def effective_diffuse_qe(
     that positional response to a representative footprint average instead of
     skipping QE for diffuse image-plane backgrounds.
     """
-    if detector_qe is None:
-        spectral_qe = np.ones(wave.size, dtype=float)
-    else:
-        spectral_qe = _as_float_array(detector_qe.throughput(wave))
-    return spectral_qe * _representative_positional_qe(positional_qe, wave)
+    spectral_qe = _as_float_array(
+        diffuse_detector_qe(detector_qe, wave, footprint=footprint))
+    return spectral_qe * _representative_positional_qe(
+        positional_qe, wave, footprint=footprint)
 
 
 def _row_value(row, name):
@@ -530,7 +540,10 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
 
         wave = self._waveset()
         qe_values = effective_diffuse_qe(
-            self._detector_qe, wave, positional_qe=self._positional_qe,
+            self._detector_qe,
+            wave,
+            positional_qe=self._positional_qe,
+            footprint=image_plane,
         )
         spectrum = post_disperser_diffuse_spectrum(
             self._surface_list,
@@ -565,7 +578,10 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
         filename = self.meta["filename"]
         qe_filename = self.meta["detector_qe_filename"]
         positional_qe_key = None
-        if self._positional_qe is not None:
+        if (
+            self._positional_qe is not None
+            or getattr(self._detector_qe, "uses_detector_footprint", False)
+        ):
             positional_qe_key = (
                 id(self._positional_qe),
                 _image_plane_cache_key(image_plane),

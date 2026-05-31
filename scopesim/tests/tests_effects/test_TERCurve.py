@@ -85,6 +85,54 @@ class TestSpectralQuantumEfficiency:
         assert qe.apply_to(src) is src
         assert len(src.fields) == n_fields
 
+    def test_trace_and_diffuse_qe_methods_use_spectral_throughput(self):
+        qe = tc.SpectralQuantumEfficiency(
+            array_dict={
+                "wavelength": [0.5, 1.0],
+                "transmission": [0.8, 0.9],
+            },
+            wavelength_unit="um",
+        )
+        wave = np.array([0.5, 1.0]) * u.um
+
+        np.testing.assert_allclose(
+            qe.throughput_at(wave, detector_x=[0, 1], detector_y=[2, 3]),
+            [0.8, 0.9],
+        )
+        np.testing.assert_allclose(
+            qe.effective_diffuse_throughput(wave, footprint=object()),
+            [0.8, 0.9],
+        )
+
+    def test_detector_qe_at_uses_position_aware_method(self):
+        class PositionAwareQE:
+            def throughput_at(self, wave, detector_x=None, detector_y=None):
+                return np.asarray(detector_x, dtype=float) + np.asarray(detector_y, dtype=float)
+
+        wave = np.array([0.5, 1.0]) * u.um
+
+        np.testing.assert_allclose(
+            tc.detector_qe_at(
+                PositionAwareQE(), wave, detector_x=[0.1, 0.2],
+                detector_y=[0.3, 0.4],
+            ),
+            [0.4, 0.6],
+        )
+
+    def test_diffuse_detector_qe_uses_effective_diffuse_method(self):
+        class DiffuseAwareQE:
+            uses_detector_footprint = True
+
+            def effective_diffuse_throughput(self, wave, footprint=None):
+                return np.full(wave.size, footprint["qe"])
+
+        wave = np.array([0.5, 1.0]) * u.um
+
+        np.testing.assert_allclose(
+            tc.diffuse_detector_qe(DiffuseAwareQE(), wave, footprint={"qe": 0.7}),
+            [0.7, 0.7],
+        )
+
 
 class TestTERCurvePlot:
     def test_plots_only_transmission(self):
