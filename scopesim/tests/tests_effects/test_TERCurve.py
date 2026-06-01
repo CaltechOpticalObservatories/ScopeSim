@@ -5,6 +5,8 @@ from matplotlib import pyplot as plt
 from astropy import units as u
 
 from scopesim.effects import ter_curves as tc
+from scopesim.optics.fov import FieldOfView
+from scopesim.tests.mocks.py_objects.header_objects import _fov_header
 from scopesim.tests.mocks.py_objects import source_objects as so
 from scopesim.tests.mocks.py_objects import effects_objects as eo
 
@@ -132,6 +134,72 @@ class TestSpectralQuantumEfficiency:
             tc.diffuse_detector_qe(DiffuseAwareQE(), wave, footprint={"qe": 0.7}),
             [0.7, 0.7],
         )
+
+
+class TestTaperedQuantumEfficiency:
+    def test_position_dependent_peak_wavelength(self):
+        qe = tc.TaperedQuantumEfficiency(
+            center_wave_min=0.5,
+            center_wave_max=1.0,
+            position_min=0,
+            position_max=100,
+            fwhm=0.1,
+            peak=0.99,
+            floor=0.01,
+        )
+
+        values = qe.throughput_at(
+            np.array([0.5, 1.0]) * u.um,
+            detector_y=np.array([0, 100]),
+        )
+
+        np.testing.assert_allclose(values, [0.99, 0.99])
+
+    def test_taper_suppresses_wavelength_away_from_position_peak(self):
+        qe = tc.TaperedQuantumEfficiency(
+            center_wave_min=0.5,
+            center_wave_max=1.0,
+            position_min=0,
+            position_max=100,
+            fwhm=0.1,
+            peak=0.99,
+            floor=0.01,
+        )
+
+        value = qe.throughput_at(1.0 * u.um, detector_y=0)
+
+        assert value < 0.02
+
+    def test_effective_diffuse_throughput_averages_over_taper(self):
+        qe = tc.TaperedQuantumEfficiency(
+            center_wave_min=0.5,
+            center_wave_max=1.0,
+            position_min=0,
+            position_max=100,
+            fwhm=0.4,
+            peak=0.99,
+            floor=0.01,
+            diffuse_position_samples=16,
+        )
+
+        values = qe.effective_diffuse_throughput(np.array([0.5, 0.75, 1.0]) * u.um)
+
+        assert values.shape == (3,)
+        assert np.all(values > 0.01)
+        assert np.all(values < 0.99)
+
+    def test_apply_to_tags_field_of_view(self):
+        fov = FieldOfView(_fov_header(), (1, 2) * u.um, area=1 * u.m**2)
+        qe = tc.TaperedQuantumEfficiency(
+            center_wave_min=0.5,
+            center_wave_max=1.0,
+            position_min=0,
+            position_max=100,
+            fwhm=0.1,
+        )
+
+        assert qe.apply_to(fov) is fov
+        assert fov.meta["detector_qe"] is qe
 
 
 class TestTERCurvePlot:

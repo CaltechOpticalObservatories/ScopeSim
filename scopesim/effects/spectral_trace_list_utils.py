@@ -24,11 +24,33 @@ from astropy import units as u
 from astropy.wcs import WCS
 from astropy.modeling.models import Polynomial2D
 
+from .ter_curves import detector_qe_at
 from ..utils import (power_vector, quantify, from_currsys, close_loop,
                      figure_factory, get_logger)
 
 
 logger = get_logger(__name__)
+
+
+def apply_detector_qe_to_trace_image(
+    image: np.ndarray,
+    detector_qe,
+    wave_um: np.ndarray,
+    detector_x: np.ndarray,
+    detector_y: np.ndarray,
+    **kwargs,
+) -> np.ndarray:
+    """Apply detector QE to an already trace-mapped image."""
+    if detector_qe is None:
+        return image
+    qe_values = detector_qe_at(
+        detector_qe,
+        wave_um * u.um,
+        detector_x=detector_x,
+        detector_y=detector_y,
+        **kwargs,
+    )
+    return image * np.asarray(qe_values, dtype=float)
 
 
 class SpectralTrace:
@@ -275,6 +297,24 @@ class SpectralTrace:
         dlam_per_pix = pixsize * np.sqrt(dlam_by_dx(ximg_fpa, yimg_fpa)**2 +
                                          dlam_by_dy(ximg_fpa, yimg_fpa)**2)
         image *= pixscale * dlam_per_pix        # [arcsec/pix] * [um/pix]
+
+        detector_qe = fov.meta.get("detector_qe")
+        if detector_qe is not None:
+            xpix_img, ypix_img = np.meshgrid(
+                np.arange(xmin, xmax, dtype=np.float32),
+                np.arange(ymin, ymax, dtype=np.float32),
+            )
+            image = apply_detector_qe_to_trace_image(
+                image,
+                detector_qe,
+                lam_fpa,
+                xpix_img,
+                ypix_img,
+                detector_x_mm=ximg_fpa,
+                detector_y_mm=yimg_fpa,
+                trace=self,
+                fov=fov,
+            )
 
         # img_header = sub_wcs.to_header()
         # img_header.update(det_wcs.to_header())

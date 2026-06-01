@@ -12,6 +12,7 @@ from astropy.io import fits
 from scopesim.effects.spectral_trace_list_utils import SpectralTrace
 from scopesim.effects.spectral_trace_list_utils import Transform2D, power_vector
 from scopesim.effects.spectral_trace_list_utils import make_image_interpolations
+from scopesim.effects.spectral_trace_list_utils import apply_detector_qe_to_trace_image
 from scopesim.tests.mocks.py_objects import trace_list_objects as tlo
 
 class TestSpectralTrace:
@@ -35,6 +36,22 @@ class TestSpectralTrace:
         trace_tbl = tlo.trace_5()
         spt = SpectralTrace(trace_tbl)
         assert spt.dispersion_axis == 'y'
+
+
+def test_apply_detector_qe_to_trace_image_uses_detector_position():
+    class PositionAwareQE:
+        def throughput_at(self, wave, detector_x=None, detector_y=None, **kwargs):
+            return 0.5 + 0.1 * np.asarray(detector_y)
+
+    image = np.ones((2, 2), dtype=float)
+    wave = np.ones((2, 2), dtype=float)
+    detector_x = np.zeros((2, 2), dtype=float)
+    detector_y = np.array([[0, 1], [2, 3]], dtype=float)
+
+    result = apply_detector_qe_to_trace_image(
+        image, PositionAwareQE(), wave, detector_x, detector_y)
+
+    np.testing.assert_allclose(result, [[0.5, 0.6], [0.7, 0.8]])
 
 class TestPowerVec:
     """Test function power_vector()"""
