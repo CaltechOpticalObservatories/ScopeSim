@@ -143,7 +143,7 @@ class TestTaperedQuantumEfficiency:
             center_wave_max=1.0,
             position_min=0,
             position_max=100,
-            fwhm=0.1,
+            flat_width=0.1,
             peak=0.99,
             floor=0.01,
         )
@@ -161,14 +161,14 @@ class TestTaperedQuantumEfficiency:
             center_wave_max=1.0,
             position_min=0,
             position_max=100,
-            fwhm=0.1,
+            flat_width=0.1,
             peak=0.99,
             floor=0.01,
             transition_width=0.04,
         )
 
         values = qe.throughput_at(
-            np.array([1.0, 1.02, 1.05, 1.08]) * u.um,
+            np.array([1.0, 1.05, 1.07, 1.09]) * u.um,
             detector_y=100,
         )
 
@@ -182,7 +182,7 @@ class TestTaperedQuantumEfficiency:
             center_wave_max=1.0,
             position_min=0,
             position_max=100,
-            fwhm=0.1,
+            flat_width=0.1,
             peak=0.99,
             floor=0.01,
         )
@@ -197,7 +197,7 @@ class TestTaperedQuantumEfficiency:
             center_wave_max=1.0,
             position_min=0,
             position_max=100,
-            fwhm=0.4,
+            flat_width=0.4,
             peak=0.99,
             floor=0.01,
             diffuse_position_samples=16,
@@ -215,7 +215,7 @@ class TestTaperedQuantumEfficiency:
             center_wave_max=1.0,
             position_min=0,
             position_max=100,
-            fwhm=0.1,
+            flat_width=0.1,
             peak=0.99,
             floor=0.01,
             transition_width=-0.01,
@@ -231,7 +231,7 @@ class TestTaperedQuantumEfficiency:
             center_wave_max=1.0,
             position_min=0,
             position_max=100,
-            fwhm=0.1,
+            flat_width=0.1,
         )
 
         assert qe.apply_to(fov) is fov
