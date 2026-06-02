@@ -642,9 +642,9 @@ class SpectralQuantumEfficiency(TERCurve):
 
 
 class TaperedQuantumEfficiency(Effect):
-    """Position-dependent Gaussian detector QE coating.
+    """Position-dependent flattop detector QE coating.
 
-    The QE peak wavelength varies linearly with one detector coordinate. This
+    The QE bandpass center varies linearly with one detector coordinate. This
     represents tapered coatings whose bandpass is intentionally shifted along
     the cross-dispersion axis. Trace-mapped light should call
     :meth:`throughput_at` with detector pixel coordinates. Non-dispersed
@@ -670,6 +670,8 @@ class TaperedQuantumEfficiency(Effect):
             "position_unit": "pix",
             "peak": 0.99,
             "floor": 0.0,
+            "transition_width": None,
+            "transition_fraction": 0.5,
             "clip_position": True,
             "diffuse_position_samples": 256,
         }
@@ -691,14 +693,14 @@ class TaperedQuantumEfficiency(Effect):
         wave_values = self._wave_values(wave)
         position = self._position_values(detector_x, detector_y)
         center = self._center_wave_values(position)
-        return self._gaussian_response(wave_values, center)
+        return self._flattop_response(wave_values, center)
 
     def effective_diffuse_throughput(self, wave, footprint=None, **kwargs):
         """Return QE averaged over a representative detector footprint."""
         wave_values = np.atleast_1d(self._wave_values(wave))
         positions = self._diffuse_positions(footprint)
         centers = self._center_wave_values(positions)
-        values = self._gaussian_response(
+        values = self._flattop_response(
             wave_values[:, None],
             centers[None, :],
         )
@@ -752,7 +754,7 @@ class TaperedQuantumEfficiency(Effect):
         ).to_value(wave_unit)
         return center_min + fraction * (center_max - center_min)
 
-    def _gaussian_response(self, wave_values, center_values) -> np.ndarray:
+    def _flattop_response(self, wave_values, center_values) -> np.ndarray:
         wave_unit = u.Unit(from_currsys(self.meta["wave_unit"], self.cmds))
         fwhm = quantify(
             from_currsys(self.meta["fwhm"], self.cmds), wave_unit,
@@ -760,12 +762,44 @@ class TaperedQuantumEfficiency(Effect):
         if fwhm <= 0:
             raise ValueError("fwhm must be positive.")
 
-        sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
+        transition_width = self._transition_width(wave_unit, fwhm)
+        flat_half_width = 0.5 * (fwhm - transition_width)
+        outer_half_width = flat_half_width + transition_width
         peak = float(from_currsys(self.meta["peak"], self.cmds))
         floor = float(from_currsys(self.meta["floor"], self.cmds))
-        values = floor + (peak - floor) * np.exp(
-            -0.5 * ((wave_values - center_values) / sigma) ** 2)
+        distance = np.abs(
+            np.asarray(wave_values, dtype=float)
+            - np.asarray(center_values, dtype=float)
+        )
+
+        if transition_width <= 0:
+            values = np.where(distance <= 0.5 * fwhm, peak, floor)
+            return np.clip(values, 0.0, 1.0)
+
+        edge_fraction = np.clip(
+            (distance - flat_half_width) / transition_width, 0.0, 1.0,
+        )
+        edge_values = (
+            floor
+            + (peak - floor) * 0.5 * (1 + np.cos(np.pi * edge_fraction))
+        )
+        values = np.where(
+            distance <= flat_half_width,
+            peak,
+            np.where(distance < outer_half_width, edge_values, floor),
+        )
         return np.clip(values, 0.0, 1.0)
+
+    def _transition_width(self, wave_unit, fwhm: float) -> float:
+        value = from_currsys(self.meta.get("transition_width"), self.cmds)
+        if value in (None, "None"):
+            fraction = float(from_currsys(
+                self.meta["transition_fraction"], self.cmds))
+            value = fraction * fwhm
+        width = quantify(value, wave_unit).to_value(wave_unit)
+        if width < 0:
+            raise ValueError("transition_width must not be negative.")
+        return min(width, fwhm)
 
     def _diffuse_positions(self, footprint=None) -> np.ndarray:
         nsamp = int(from_currsys(

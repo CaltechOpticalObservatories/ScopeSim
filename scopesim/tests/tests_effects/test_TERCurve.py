@@ -155,7 +155,28 @@ class TestTaperedQuantumEfficiency:
 
         np.testing.assert_allclose(values, [0.99, 0.99])
 
-    def test_taper_suppresses_wavelength_away_from_position_peak(self):
+    def test_flattop_has_peak_core_and_cosine_edges(self):
+        qe = tc.TaperedQuantumEfficiency(
+            center_wave_min=0.5,
+            center_wave_max=1.0,
+            position_min=0,
+            position_max=100,
+            fwhm=0.1,
+            peak=0.99,
+            floor=0.01,
+            transition_width=0.04,
+        )
+
+        values = qe.throughput_at(
+            np.array([1.0, 1.02, 1.05, 1.08]) * u.um,
+            detector_y=100,
+        )
+
+        np.testing.assert_allclose(values[:2], [0.99, 0.99])
+        np.testing.assert_allclose(values[2], 0.5, atol=1e-12)
+        np.testing.assert_allclose(values[3], 0.01)
+
+    def test_taper_suppresses_wavelength_away_from_position_bandpass(self):
         qe = tc.TaperedQuantumEfficiency(
             center_wave_min=0.5,
             center_wave_max=1.0,
@@ -168,7 +189,7 @@ class TestTaperedQuantumEfficiency:
 
         value = qe.throughput_at(1.0 * u.um, detector_y=0)
 
-        assert value < 0.02
+        np.testing.assert_allclose(value, 0.01)
 
     def test_effective_diffuse_throughput_averages_over_taper(self):
         qe = tc.TaperedQuantumEfficiency(
@@ -187,6 +208,21 @@ class TestTaperedQuantumEfficiency:
         assert values.shape == (3,)
         assert np.all(values > 0.01)
         assert np.all(values < 0.99)
+
+    def test_rejects_negative_transition_width(self):
+        qe = tc.TaperedQuantumEfficiency(
+            center_wave_min=0.5,
+            center_wave_max=1.0,
+            position_min=0,
+            position_max=100,
+            fwhm=0.1,
+            peak=0.99,
+            floor=0.01,
+            transition_width=-0.01,
+        )
+
+        with pytest.raises(ValueError, match="transition_width"):
+            qe.throughput(0.75 * u.um)
 
     def test_apply_to_tags_field_of_view(self):
         fov = FieldOfView(_fov_header(), (1, 2) * u.um, area=1 * u.m**2)
