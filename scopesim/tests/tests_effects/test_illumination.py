@@ -153,6 +153,11 @@ class FakeQE:
     throughput = ConstantCurve(0.5)
 
 
+class FakeThroughput:
+    def __init__(self, value):
+        self.throughput = ConstantCurve(value)
+
+
 class CountingEmission(ConstantEmission):
     def __init__(self, value):
         super().__init__(value)
@@ -278,6 +283,26 @@ def test_post_disperser_diffuse_background_adds_integrated_rate(imageplane):
     eff.apply_to(imageplane)
 
     expected = 1.0 + 1.0e8 * pixel_area(imageplane.header).to_value(u.arcsec**2)
+    assert imageplane.hdu.data[0, 0] == pytest.approx(expected)
+
+
+def test_post_disperser_diffuse_background_applies_downstream_throughput(
+    imageplane,
+):
+    eff = PostDisperserDiffuseBackground(
+        surface_list=FakeSurfaceList(),
+        detector_qe=FakeQE(),
+        downstream_throughputs=[FakeThroughput(0.25)],
+        wave_min=1.0,
+        wave_max=2.0,
+        wave_bin=1.0,
+        wave_unit="um",
+        area=1.0 * u.m**2,
+    )
+
+    eff.apply_to(imageplane)
+
+    expected = 1.0 + 0.25e8 * pixel_area(imageplane.header).to_value(u.arcsec**2)
     assert imageplane.hdu.data[0, 0] == pytest.approx(expected)
 
 

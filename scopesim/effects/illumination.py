@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Image-plane illumination effects."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+import importlib
 from typing import ClassVar
 
 import numpy as np
@@ -12,7 +13,7 @@ from synphot.units import PHOTLAM
 
 from . import Effect
 from .surface_list import SurfaceList
-from .ter_curves import SpectralQuantumEfficiency, diffuse_detector_qe
+from .ter_curves import SpectralQuantumEfficiency, TERCurve, diffuse_detector_qe
 from ..optics.image_plane import ImagePlane
 from ..utils import figure_factory, from_currsys, quantify, real_colname
 
@@ -131,6 +132,48 @@ def _cache_object_key(filename, obj):
     if obj is None:
         return None
     return ("object", id(obj))
+
+
+def _as_effect_specs(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, (str, Mapping)):
+        return [value]
+    if isinstance(value, Sequence):
+        return list(value)
+    return [value]
+
+
+def _effect_from_spec(spec, cmds=None):
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        return TERCurve(filename=spec, cmds=cmds)
+    if isinstance(spec, Mapping):
+        effect_module = importlib.import_module("scopesim.effects")
+        effect_class = getattr(effect_module, spec["class"])
+        kwargs = dict(spec.get("kwargs", {}))
+        return effect_class(cmds=cmds, **kwargs)
+    return spec
+
+
+def _detector_qe_from_spec(spec, filename=None, cmds=None):
+    if spec is not None:
+        if isinstance(spec, str):
+            return SpectralQuantumEfficiency(filename=spec, cmds=cmds)
+        return _effect_from_spec(spec, cmds=cmds)
+    if filename is not None:
+        return SpectralQuantumEfficiency(filename=filename, cmds=cmds)
+    return None
+
+
+def _throughput_values(effect, wave: u.Quantity) -> np.ndarray:
+    if hasattr(effect, "throughput"):
+        return _as_float_array(effect.throughput(wave))
+    surface = getattr(effect, "surface", None)
+    if surface is not None and hasattr(surface, "throughput"):
+        return _as_float_array(surface.throughput(wave))
+    raise TypeError(f"Cannot evaluate throughput for {effect!r}")
 
 
 def _image_plane_cache_key(image_plane):
@@ -475,6 +518,10 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
         detector_qe_filename: str | None = None,
         surface_list=None,
         detector_qe=None,
+        downstream_throughput=None,
+        downstream_throughputs=None,
+        downstream_throughput_filename: str | None = None,
+        downstream_throughput_filenames=None,
         positional_qe=None,
         emission_phase: str = "post_disperser",
         **kwargs,
@@ -490,20 +537,25 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
             "wave_unit": kwargs.get("wave_unit", "!SIM.spectral.wave_unit"),
             "area": kwargs.get("area", "!TEL.area"),
             "emission_phase": emission_phase,
+            "downstream_throughput_filename": downstream_throughput_filename,
+            "downstream_throughput_filenames": downstream_throughput_filenames,
         })
         self._surface_list = (
             surface_list if surface_list is not None
             else SurfaceList(filename=filename, cmds=self.cmds)
         )
-        self._detector_qe = (
-            detector_qe if detector_qe is not None
-            else (
-                SpectralQuantumEfficiency(
-                    filename=detector_qe_filename, cmds=self.cmds)
-                if detector_qe_filename is not None
-                else None
-            )
+        self._detector_qe = _detector_qe_from_spec(
+            detector_qe, filename=detector_qe_filename, cmds=self.cmds,
         )
+        downstream_specs = []
+        downstream_specs.extend(_as_effect_specs(downstream_throughputs))
+        downstream_specs.extend(_as_effect_specs(downstream_throughput))
+        downstream_specs.extend(_as_effect_specs(downstream_throughput_filenames))
+        downstream_specs.extend(_as_effect_specs(downstream_throughput_filename))
+        self._downstream_throughput_specs = downstream_specs
+        self._downstream_throughputs = [
+            _effect_from_spec(spec, cmds=self.cmds) for spec in downstream_specs
+        ]
         self._positional_qe = positional_qe
         self._last_value = None
 
@@ -551,6 +603,8 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
             qe_values=qe_values,
             emission_phase=self.meta["emission_phase"],
         )
+        if spectrum is not None:
+            spectrum = spectrum * self._downstream_throughput_values(wave)
         area = quantify(from_currsys(self.meta["area"], self.cmds), u.m**2)
         rate = integrate_spectral_background(
             spectrum,
@@ -560,6 +614,12 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
         )
         _store_post_disperser_rate_cache(key, rate)
         return rate
+
+    def _downstream_throughput_values(self, wave: u.Quantity) -> np.ndarray:
+        values = np.ones(wave.size, dtype=float)
+        for throughput in self._downstream_throughputs:
+            values *= _throughput_values(throughput, wave)
+        return values
 
     def _background_rate_cache_key(self, image_plane: ImagePlane) -> tuple:
         wave_unit = u.Unit(from_currsys(self.meta["wave_unit"], self.cmds))
@@ -586,10 +646,22 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
                 id(self._positional_qe),
                 _image_plane_cache_key(image_plane),
             )
+        downstream_key = tuple(
+            _cache_object_key(
+                spec if isinstance(spec, str) else None,
+                throughput,
+            )
+            for spec, throughput in zip(
+                self._downstream_throughput_specs,
+                self._downstream_throughputs,
+                strict=True,
+            )
+        )
         return (
             id(self.cmds),
             _cache_object_key(filename, self._surface_list),
             _cache_object_key(qe_filename, self._detector_qe),
+            downstream_key,
             positional_qe_key,
             str(self.meta["emission_phase"]),
             str(wave_unit),
