@@ -1,5 +1,7 @@
 """Tests for SelectorWheel."""
 
+import logging
+
 import numpy as np
 
 from scopesim.effects import SelectorWheel
@@ -65,3 +67,46 @@ def test_selector_wheel_applies_image_plane_effect_by_id():
     wheel.apply_to(image_plane)
 
     assert np.all(image_plane.hdu.data == 3.0)
+
+
+def test_selector_wheel_warns_for_unexpected_missing_selector_value(caplog):
+    image_plane = make_image_plane()
+    wheel = SelectorWheel(
+        selector_key="image_plane_id",
+        wheel=[
+            {
+                "selector_value": 1,
+                "effect_class": "ImagePlaneBackground",
+                "effect_kwargs": {"value": 2.0},
+            },
+        ],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        wheel.apply_to(image_plane)
+
+    assert np.all(image_plane.hdu.data == 1.0)
+    assert "Entry for selector value 0 not found" in caplog.text
+    assert "No effect found for image plane ID: 0" in caplog.text
+
+
+def test_selector_wheel_allows_declared_missing_selector_value(caplog):
+    image_plane = make_image_plane()
+    wheel = SelectorWheel(
+        selector_key="image_plane_id",
+        allowed_missing_selector_values=[0],
+        wheel=[
+            {
+                "selector_value": 1,
+                "effect_class": "ImagePlaneBackground",
+                "effect_kwargs": {"value": 2.0},
+            },
+        ],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        wheel.apply_to(image_plane)
+
+    assert np.all(image_plane.hdu.data == 1.0)
+    assert "Entry for selector value 0 not found" not in caplog.text
+    assert "No effect found for image plane ID: 0" not in caplog.text

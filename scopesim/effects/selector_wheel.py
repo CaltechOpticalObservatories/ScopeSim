@@ -87,7 +87,7 @@ class SelectorWheel(Effect):
 
             effect_to_apply = self.get_effect(selector_value)
             if effect_to_apply is None:
-                logger.warning(f"No effect found for selector value: {selector_value}, skipping effect application.")
+                self._log_no_effect(selector_value, "selector value")
                 return obj
 
             obj = effect_to_apply.apply_to(obj, **kwargs)
@@ -125,7 +125,7 @@ class SelectorWheel(Effect):
 
             effect_to_apply = self.get_effect(selector_value)
             if effect_to_apply is None:
-                logger.warning(f"No effect found for detector ID: {selector_value}, skipping effect application.")
+                self._log_no_effect(selector_value, "detector ID")
                 return obj
 
             obj = effect_to_apply.apply_to(obj, **kwargs)
@@ -134,7 +134,7 @@ class SelectorWheel(Effect):
             selector_value = self._selector_value_from_image_plane(obj)
             effect_to_apply = self.get_effect(selector_value)
             if effect_to_apply is None:
-                logger.warning(f"No effect found for image plane ID: {selector_value}, skipping effect application.")
+                self._log_no_effect(selector_value, "image plane ID")
                 return obj
 
             obj = effect_to_apply.apply_to(obj, **kwargs)
@@ -145,11 +145,42 @@ class SelectorWheel(Effect):
     def get_effect(self, selector_value):
         eff = None
         if selector_value not in self.wheel_effects.keys():
-            logger.warning(f"Entry for selector value {selector_value} not found in wheel effects. "
-                           f"Assuming no effect to apply for this selector value.")
+            if self._is_missing_selector_value_allowed(selector_value):
+                logger.debug(
+                    "Entry for selector value %s intentionally absent from wheel effects.",
+                    selector_value,
+                )
+            else:
+                logger.warning(f"Entry for selector value {selector_value} not found in wheel effects. "
+                               f"Assuming no effect to apply for this selector value.")
         else:
             eff = self.wheel_effects[selector_value]
         return eff
+
+    def _is_missing_selector_value_allowed(self, selector_value):
+        values = self.meta.get(
+            "allowed_missing_selector_values",
+            self.meta.get("allow_missing_selector_values", ()),
+        )
+        if values is None:
+            return False
+        if isinstance(values, str):
+            if values.lower() in {"all", "any", "*"}:
+                return True
+            values = (values,)
+        elif not isinstance(values, (list, tuple, set, frozenset)):
+            values = (values,)
+        return selector_value in values
+
+    def _log_no_effect(self, selector_value, selector_label):
+        message = (
+            f"No effect found for {selector_label}: {selector_value}, "
+            "skipping effect application."
+        )
+        if self._is_missing_selector_value_allowed(selector_value):
+            logger.debug(message)
+        else:
+            logger.warning(message)
 
 
     def _resolve_z_order(self):
