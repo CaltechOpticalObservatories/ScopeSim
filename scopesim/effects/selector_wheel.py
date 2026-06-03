@@ -87,7 +87,6 @@ class SelectorWheel(Effect):
 
             effect_to_apply = self.get_effect(selector_value)
             if effect_to_apply is None:
-                self._log_no_effect(selector_value, "selector value")
                 return obj
 
             obj = effect_to_apply.apply_to(obj, **kwargs)
@@ -106,12 +105,15 @@ class SelectorWheel(Effect):
                     continue
 
                 effect_to_apply = self.get_effect(val)
-                logger.debug(f"Applying effect for {self.meta['selector_key']}: {val} -> {effect_to_apply}, volumes: {len(vols_with_val)}")
 
                 if effect_to_apply is None:
                     new_volumes.extend(vols_with_val)
                     continue
 
+                logger.debug(
+                    f"Applying effect for {self.meta['selector_key']}: "
+                    f"{val} -> {effect_to_apply}, volumes: {len(vols_with_val)}"
+                )
                 newvollist = FovVolumeList()
                 newvollist.volumes = vols_with_val
                 newvollist = effect_to_apply.apply_to(newvollist, **kwargs)
@@ -125,7 +127,6 @@ class SelectorWheel(Effect):
 
             effect_to_apply = self.get_effect(selector_value)
             if effect_to_apply is None:
-                self._log_no_effect(selector_value, "detector ID")
                 return obj
 
             obj = effect_to_apply.apply_to(obj, **kwargs)
@@ -134,7 +135,6 @@ class SelectorWheel(Effect):
             selector_value = self._selector_value_from_image_plane(obj)
             effect_to_apply = self.get_effect(selector_value)
             if effect_to_apply is None:
-                self._log_no_effect(selector_value, "image plane ID")
                 return obj
 
             obj = effect_to_apply.apply_to(obj, **kwargs)
@@ -171,17 +171,6 @@ class SelectorWheel(Effect):
         elif not isinstance(values, (list, tuple, set, frozenset)):
             values = (values,)
         return selector_value in values
-
-    def _log_no_effect(self, selector_value, selector_label):
-        message = (
-            f"No effect found for {selector_label}: {selector_value}, "
-            "skipping effect application."
-        )
-        if self._is_missing_selector_value_allowed(selector_value):
-            logger.debug(message)
-        else:
-            logger.warning(message)
-
 
     def _resolve_z_order(self):
         """Use an explicit wheel z_order if supplied, otherwise inherit one."""

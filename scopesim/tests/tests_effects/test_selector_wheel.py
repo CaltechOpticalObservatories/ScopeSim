@@ -87,7 +87,7 @@ def test_selector_wheel_warns_for_unexpected_missing_selector_value(caplog):
 
     assert np.all(image_plane.hdu.data == 1.0)
     assert "Entry for selector value 0 not found" in caplog.text
-    assert "No effect found for image plane ID: 0" in caplog.text
+    assert "No effect found" not in caplog.text
 
 
 def test_selector_wheel_allows_declared_missing_selector_value(caplog):
@@ -104,9 +104,10 @@ def test_selector_wheel_allows_declared_missing_selector_value(caplog):
         ],
     )
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG):
         wheel.apply_to(image_plane)
 
     assert np.all(image_plane.hdu.data == 1.0)
     assert "Entry for selector value 0 not found" not in caplog.text
-    assert "No effect found for image plane ID: 0" not in caplog.text
+    assert "Entry for selector value 0 intentionally absent" in caplog.text
+    assert "No effect found" not in caplog.text
