@@ -130,10 +130,9 @@ def _make_bounding_header_for_tables(*tables, pixel_scale=1*u.arcsec):
 
     """
     wcs_suffix = "D" if pixel_scale.unit.physical_type == "length" else ""
-    # FIXME: Convert to deg here? If yes, remove the arcsec=True below...
     # Note: this could all be a lot simpler if we have consistent units, i.e.
     #       don't need to convert mm -> mm and arcsec -> arcsec (or deg)
-    new_unit = u.mm if wcs_suffix == "D" else u.arcsec  # u.deg
+    new_unit = u.mm if wcs_suffix == "D" else u.deg  # arcsec here causes problems later when all header units are expected to be same
     tbl_unit = u.mm if wcs_suffix == "D" else u.arcsec
     x_name = "x_mm" if wcs_suffix == "D" else "x"
     y_name = "y_mm" if wcs_suffix == "D" else "y"
@@ -150,7 +149,7 @@ def _make_bounding_header_for_tables(*tables, pixel_scale=1*u.arcsec):
 
     # TODO: check if this could just use create_wcs_from_points
     hdr = header_from_list_of_xy(pnts[:, 0], pnts[:, 1], pixel_scale.value,
-                                 wcs_suffix, arcsec=wcs_suffix != "D")
+                                 wcs_suffix)#, arcsec=wcs_suffix != "D")
     return hdr
 
 

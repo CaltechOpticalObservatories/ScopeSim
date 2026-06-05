@@ -4,14 +4,12 @@
 import warnings
 from typing import ClassVar
 from collections.abc import Collection, Iterable
-from pooch import retrieve
 import numpy as np
 from scipy import integrate
 from astropy import units as u
 from astropy.io import fits
 from astropy.table import Table
 from astropy.wcs import WCS
-from astropy.io import ascii as ioascii
 from copy import deepcopy
 
 import skycalc_ipy

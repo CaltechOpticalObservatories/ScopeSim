@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import copy
-
+import os
 from datetime import datetime
 
 import numpy as np
@@ -471,7 +471,7 @@ class OpticalTrain:
                     hdul = effect.apply_to(hdul, optical_train=self)
             else:
                 try:
-                    hdul = self.write_header(hdul)
+                    hdul = self.write_header(hdul, detector_array)
                 except Exception:
                     logger.exception("Header update failed, data will be "
                                      "saved with incomplete header. See stack "
@@ -480,7 +480,7 @@ class OpticalTrain:
             if filename is not None and isinstance(filename, str):
                 fname = filename
                 if len(self.detector_managers) > 1:
-                    fname = f"{i}_{filename}"
+                    fname = f"{os.path.dirname(filename)}/{i}_{os.path.basename(filename)}"
                 hdul.writeto(fname, overwrite=True)
 
             hduls.append(hdul)
@@ -494,7 +494,7 @@ class OpticalTrain:
         # that is, subsequent readouts without reseting the detector inbetween.
         return copy.deepcopy(hduls)
 
-    def write_header(self, hdulist):
+    def write_header(self, hdulist, detector_array):
         """Write meaningful header to simulation product."""
         # Primary hdu
         pheader = hdulist[0].header
@@ -530,11 +530,8 @@ class OpticalTrain:
         iheader["BUNIT"] = "e", "per EXPTIME"
         iheader["PIXSCALE"] = from_currsys("!INST.pixel_scale", self.cmds), "[arcsec]"
 
-        for eff in self.optics_manager.detector_setup_effects:
-            efftype = type(eff).__name__
 
-            if efftype == "DetectorList" and eff.include:
-                iheader["DETECTOR"] = eff.meta["detector"]
+        iheader["DETECTOR"] = detector_array._detector_list.meta["detector"]
 
         for eff in self.optics_manager.detector_array_effects:
             efftype = type(eff).__name__
