@@ -24,6 +24,7 @@ from .rotation import *
 
 from .metis_wcu import *
 from .metis_ifu_simple import *
+from .illumination import *
 # from . import effects_utils
 from .selector_wheel import *
 from .sky_ter_curves import *
