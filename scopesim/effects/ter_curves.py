@@ -1077,7 +1077,7 @@ class PupilTransmission(TERCurve):
         """Set a new transmission value"""
         self.surface = SpectralSurface(wavelength=self.meta['wavelength'],
                                        transmission=[transmission, transmission],
-                                       emissivity=[0., 0.], **kwargs)
+                                       emission=[0, 0])
         self.meta.update(self.surface.meta)
 
 

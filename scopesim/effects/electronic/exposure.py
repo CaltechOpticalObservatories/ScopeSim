@@ -26,9 +26,6 @@ class AutoExposure(Effect):
 
     The effects sets the parameters `!OBS.dit` and `!OBS.ndit`.
 
-    The effect is the first detector effect, hence essentially operates on the
-    `ImagePlane`, mapped to the detector array.
-
     Examples
     --------
     The parameters `!OBS.exptime`, `!DET.full_well` and `!DET.mindit` should
@@ -48,6 +45,10 @@ class AutoExposure(Effect):
     z_order: ClassVar[tuple[int, ...]] = (902,)
 
     def __init__(self, **kwargs):
+        """
+        The effect is the first detector effect, hence essentially operates
+        on the `ImagePlane`, mapped to the detector array.
+        """
         super().__init__(**kwargs)
         self.meta.update(kwargs)
         if self.cmds is None:
@@ -222,7 +223,7 @@ class ExposureOutput(Effect):
         return obj
 
     def set_mode(self, new_mode):
-        """Set new mode for ExposureOutput (average or sum)."""
+        """Set new mode for ExposureOutput (average or sum)"""
         if new_mode in self.modes:
             self.current_mode = new_mode
             self.meta["current_mode"] = self.current_mode
@@ -232,6 +233,7 @@ class ExposureOutput(Effect):
 
 class ExposureIntegration(Effect):
     """Integrate the expected flux over ``exptime``.
+
 
     This effect multiplies the expected photon flux from the
     ``ImagePlane`` by the total exposure time, computed as

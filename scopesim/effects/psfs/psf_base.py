@@ -49,7 +49,7 @@ class PSF(Effect):
             "wave_key": "WAVE0",
             "normalise_kernel": True,
             "rounded_edges": True,
-            "rotational_blur_angle": 0*u.deg,
+            "rotational_blur_angle": 0,
         }
         self.meta.update(params)
         self.meta.update(kwargs)
@@ -74,13 +74,9 @@ class PSF(Effect):
                     (obj.hdu is not None)):
                 kernel = self.get_kernel(obj).astype(float)
 
-                # This doesn't work because of a "Delta PSF" in some mocks...
-                # if kernel.size == 1:  # only 1 pixel
-                #     raise ValueError("Cannot convolve single pixel PSF.")
-
                 # apply rotational blur for field-tracking observations
                 rot_blur_angle = self.meta["rotational_blur_angle"]
-                if abs(rot_blur_angle << u.deg) > 0*u.deg:
+                if abs(rot_blur_angle) > 0:
                     # makes a copy of kernel
                     kernel = rotational_blur(kernel, rot_blur_angle)
 
@@ -154,41 +150,35 @@ class PSF(Effect):
         return fig
 
 
-@u.quantity_input
-def rotational_blur(image, angle: u.Quantity[u.deg]):
+def rotational_blur(image, angle):
     """
     Rotate and coadd an image over a given angle to imitate a blur.
 
     Parameters
     ----------
-    image : array-like
-        Image to blur.
-    angle : u.Quantity["angle"]
-        Angle over which the image should be rotationally blurred.
-
-    .. versionchanged:: 0.11.3
-
-       Require `angle` to be a Quantity.
+    image : array
+        Image to blur
+    angle : float
+        [deg] Angle over which the image should be rotationally blurred
 
     Returns
     -------
-    image_rot : np.ndarray
+    image_rot : array
         Blurred image
 
     """
     image_rot = np.copy(image)
 
-    edge_pixel_unit_angle = np.arctan2(1, (image.shape[0] // 2)) * u.rad
-    n_steps = np.ceil(np.log2(abs(angle) / edge_pixel_unit_angle))
-    n_steps = int(min(n_steps, 8))  # avoid overrun
-
-    current_angle = angle.copy()
-    for _ in range(n_steps):
-        current_angle /= 2.
-        image_rot += rotate(image_rot, current_angle, reshape=False, order=3)
+    n_angles = 1
+    rad_to_deg = 57.29578
+    edge_pixel_unit_angle = np.arctan2(1, (image.shape[0] // 2)) * rad_to_deg
+    while abs(angle) > edge_pixel_unit_angle and n_angles < 25:
+        angle /= 2.
+        image_rot += rotate(image_rot, angle, reshape=False, order=1)
         # each time kernel is rotated and added, the frame total doubles
+        n_angles *= 2
 
-    return image_rot / image_rot.sum() * image.sum()
+    return image_rot / n_angles
 
 
 def get_bkg_level(obj, bg_w):

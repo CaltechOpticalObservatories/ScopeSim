@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from zipfile import ZipFile
 from pathlib import Path
 
-import httpxyz as httpx
+import httpx
 import bs4
 import pooch
 

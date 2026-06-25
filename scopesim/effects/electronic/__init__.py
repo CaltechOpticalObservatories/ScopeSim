@@ -9,7 +9,6 @@ Classes:
 - PoorMansHxRGReadoutNoise - simple readout noise for HAWAII detectors
 - BasicReadoutNoise - readout noise
 - ShotNoise - realisation of Poissonian photon noise
-- PixelResponseNonUniformity - per-pixel gain variation (PRNU)
 - DarkCurrent - add dark current
 - LinearityCurve - apply detector (non-)linearity and saturation
 - ReferencePixelBorder
@@ -24,7 +23,7 @@ logger = get_logger(__name__)
 
 from .electrons import LinearityCurve, ADConversion, InterPixelCapacitance
 from .noise import (Bias, PoorMansHxRGReadoutNoise, BasicReadoutNoise,
-                    ShotNoise, DarkCurrent, PixelResponseNonUniformity)
+                    ShotNoise, DarkCurrent)
 from .exposure import AutoExposure, ExposureIntegration, ExposureOutput
 from .pixels import ReferencePixelBorder, BinnedImage, UnequalBinnedImage
 from .dmps import DetectorModePropertiesSetter

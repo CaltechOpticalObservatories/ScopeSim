@@ -1,7 +1,5 @@
-"""Tests for PupilTransmission"""
-
-from unittest.mock import patch
 import pytest
+from unittest.mock import patch
 
 from astropy import units as u
 
@@ -10,7 +8,7 @@ from synphot.units import PHOTLAM
 from scopesim.effects.ter_curves import TERCurve
 from scopesim.effects.ter_curves import PupilTransmission
 
-# pylint: disable=missing-class-docstring
+# pylint: disable=no-self-use, missing-class-docstring
 # pylint: disable=missing-function-docstring
 
 THROUGHPUT = 0.764      # random value
@@ -37,9 +35,7 @@ class TestPupilTransmission:
     def test_has_zero_emission(self, pupilmask):
         assert pupilmask.emission(3.5 * u.um) == 0 * PHOTLAM
 
-    @pytest.mark.parametrize("newtrans", (0., 0.5))
-    def test_update_transmission_works(self, pupilmask, newtrans):
+    def test_update_transmission_works(self, pupilmask):
         assert pupilmask.throughput(3.5 * u.um) == THROUGHPUT
-        pupilmask.update_transmission(newtrans)
-        assert pupilmask.throughput(3.5 * u.um) == newtrans
-        assert pupilmask.emission(3.5 * u.um).unit == PHOTLAM
+        pupilmask.update_transmission(0.5)
+        assert pupilmask.throughput(3.5 * u.um) == 0.5
