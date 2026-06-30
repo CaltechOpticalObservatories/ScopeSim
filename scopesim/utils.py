@@ -511,6 +511,8 @@ def quantity_from_table(colname: str, table: Table,
     col = table[colname]
     if col.unit is not None:
         return col.quantity
+    if col.dtype.kind not in 'iufc':
+        return col
 
     unit = unit_from_table(colname, table, default_unit)
     # TODO: or rather << ?
