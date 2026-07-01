@@ -193,8 +193,10 @@ class FOVManager:
                                                 [ys_min, ys_max],
                                                 pixel_scale=pixel_scale / 3600.)
 
-            dethdr, _ = ipu.det_wcs_from_sky_wcs(
+            fov_dethdr, _ = ipu.det_wcs_from_sky_wcs(
                 WCS(skyhdr), pixel_scale, plate_scale)
+            skyhdr.update(fov_dethdr.to_header())
+            dethdr = fov_dethdr
 
             # useful for spectroscopy mode where slit dimensions is not the same
             # as detector dimensions
@@ -202,9 +204,6 @@ class FOVManager:
                 dethdr = det_eff.image_plane_header
                 # TODO: Why is this .image_plane_header and not
                 #       .detector_headers()[0] or something?
-
-            skyhdr.update(
-                dethdr.to_header() if hasattr(dethdr, "to_header") else dethdr)
 
             if not self.is_spectroscope:
                 fovcls = FieldOfView2D

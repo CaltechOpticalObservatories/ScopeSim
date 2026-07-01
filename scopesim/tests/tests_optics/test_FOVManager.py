@@ -59,9 +59,13 @@ class TestGenerateFovList:
         assert fovs[0].waverange[0] == 0.6 * u.um  # filter blue edge
 
     def test_uses_detector_scale_for_matching_image_plane(self):
-        class ImagePlaneTagger:
+        class SmallImagePlaneTagger:
             def apply_to(self, obj, **kwargs):
                 for vol in obj:
+                    vol["x_min"] = -1
+                    vol["x_max"] = 1
+                    vol["y_min"] = -1
+                    vol["y_max"] = 1
                     vol["meta"]["image_plane_id"] = 7
                 return obj
 
@@ -69,15 +73,15 @@ class TestGenerateFovList:
             pixel_size=0.01,
             x=0,
             y=0,
-            width=10,
-            height=10,
+            width=100,
+            height=100,
             units="pixel",
             image_plane_id=7,
             pixel_scale=0.25,
             plate_scale=25,
         )
         fov_man = FOVManager(
-            effects=[ImagePlaneTagger(), det],
+            effects=[SmallImagePlaneTagger(), det],
             pixel_scale=1,
             plate_scale=1,
             decouple_sky_det_hdrs=True,
@@ -88,4 +92,8 @@ class TestGenerateFovList:
         assert fov.meta["pixel_scale"] == approx(0.25)
         assert fov.meta["plate_scale"] == approx(25)
         assert fov.header["CDELT1"] * 3600 == approx(0.25)
+        assert fov.header["NAXIS1"] < fov.detector_header["NAXIS1"]
+        assert fov.header["NAXIS2"] < fov.detector_header["NAXIS2"]
+        assert fov.detector_header["NAXIS1"] == 100
+        assert fov.detector_header["NAXIS2"] == 100
         assert fov.detector_header["CDELT1D"] == approx(0.01)
