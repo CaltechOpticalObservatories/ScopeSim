@@ -582,28 +582,15 @@ class EchelleSpectralTraceList(SpectralTraceList):
         trace_ids, ap_ids, im_ids = [], [], []
         for row in trace_params.table:
             prefix = row["prefix"]
-            for i in range(row["m0"] - row["n"], row["m0"] + 1):
-                trace_ids.append(f'{prefix}_{i:d}')
-                ap_ids.append(row["aperture_id"])
-                im_ids.append(row["image_plane_id"])
-
-        hdul.append(fits.BinTableHDU(Table(
-            {'description': trace_ids,
-             'extension_id': np.arange(len(trace_ids), dtype=int)+2,
-             'aperture_id': ap_ids,
-             'image_plane_id': im_ids
-             })))
-
-        for row in trace_params.table:
-            prefix = row["prefix"]
             min_order = row['m0'] - row['n']
             max_order = row['m0']
             min_wave = row['min_wave'] * u.Unit(trace_params.meta["min_wave_unit"])
             max_wave = row['max_wave'] * u.Unit(trace_params.meta["max_wave_unit"])
             design_res = row['design_res']
             focal_len = row['focal_length'] * u.Unit(trace_params.meta["focal_length_unit"])
-            disp_npix = row['n_disp'] - 2 * row['detector_pad']
-            xdisp_npix = row['n_xdisp'] - 2 * row['detector_pad']
+            disp_npix = int(row['n_disp'])
+            xdisp_npix = int(row['n_xdisp'])
+            detector_pad = int(row['detector_pad'])
             pix_size = row['pixel_size'] * u.Unit(trace_params.meta["pixel_size_unit"])
             echelle_angle = np.deg2rad(row['echelle_blaze'])*u.rad
             xdisp_beta_center = np.deg2rad(row['xbeta_center'])*u.rad
@@ -641,33 +628,85 @@ class EchelleSpectralTraceList(SpectralTraceList):
             cang = np.cos(np.deg2rad(detector_angle))
             sang = np.sin(np.deg2rad(detector_angle))
 
-            xvals, yvals = [], []
-            for i, order in enumerate(ss.orders):
-                wave = edges[i]
-                wave = np.linspace(wave[0], wave[-1], num=max(int(disp_npix*.1), 2))
+            def raw_detector_pixels(wave, order):
                 x = ss.wavelength_to_x_pixel(wave, order)
                 y = ss.wavelength_to_y_pixel(wave)
-                pix_y = y + slit_offset_pix[:, None] + row['detector_pad']
-                xval = np.tile(x, slit_offset_pix.size)*pix_size.to('mm')
-                yval = pix_y.ravel()*pix_size.to('mm')
-                xvals.append(xval)
-                yvals.append(yval)
+                x = u.Quantity(x, copy=False).to_value(
+                    u.dimensionless_unscaled)
+                y = u.Quantity(y, copy=False).to_value(
+                    u.dimensionless_unscaled)
+                xpix = np.broadcast_to(x, (slit_offset_pix.size, wave.size))
+                ypix = y[None, :] + slit_offset_pix[:, None]
+                return xpix, ypix
 
-            # echelle above has 0,0 at detector corner, Scopesim uses 0,0 at detector center
-            xcent = (np.min(xvals) + (np.max(xvals) - np.min(xvals))/2) * u.mm
-            ycent = (np.min(yvals) + (np.max(yvals) - np.min(yvals))/2) * u.mm
+            rotated_x_min = rotated_y_min = np.inf
+            rotated_x_max = rotated_y_max = -np.inf
+            # The analytical echelle layout is relative, not yet detector
+            # placed. Rotate the footprint first, place that rotated footprint
+            # on the detector, then apply detector-frame padding below.
+            for i, order in enumerate(ss.orders):
+                wave = np.linspace(
+                    edges[i][0], edges[i][-1], num=max(disp_npix, 2))
+                xpix, ypix = raw_detector_pixels(wave, order)
+                xrot = cang * xpix - sang * ypix
+                yrot = sang * xpix + cang * ypix
+                rotated_x_min = min(rotated_x_min, float(np.nanmin(xrot)))
+                rotated_x_max = max(rotated_x_max, float(np.nanmax(xrot)))
+                rotated_y_min = min(rotated_y_min, float(np.nanmin(yrot)))
+                rotated_y_max = max(rotated_y_max, float(np.nanmax(yrot)))
+            rotated_x_center = rotated_x_min + (rotated_x_max - rotated_x_min) / 2
+            rotated_y_center = rotated_y_min + (rotated_y_max - rotated_y_min) / 2
+
+            def rotated_detector_pixels(wave, order):
+                xpix, ypix = raw_detector_pixels(wave, order)
+                xrot = cang * xpix - sang * ypix
+                yrot = sang * xpix + cang * ypix
+                return (
+                    xrot - rotated_x_center + disp_npix / 2,
+                    yrot - rotated_y_center + xdisp_npix / 2,
+                )
+
+            def on_padded_detector(wave, order):
+                xpix, ypix = rotated_detector_pixels(wave, order)
+                return (
+                    (xpix >= detector_pad)
+                    & (xpix <= disp_npix - detector_pad)
+                    & (ypix >= detector_pad)
+                    & (ypix <= xdisp_npix - detector_pad)
+                )
 
             for i, order in enumerate(ss.orders):
-                wave = edges[i]
-                wave = np.linspace(wave[0], wave[-1], num=max(int(disp_npix*.1), 2))
+                candidate_wave = np.linspace(
+                    edges[i][0], edges[i][-1], num=max(disp_npix, 2))
+                valid_wave = np.any(
+                    on_padded_detector(candidate_wave, order), axis=0)
+                valid_indices = np.flatnonzero(valid_wave)
+                if valid_indices.size == 0:
+                    logger.debug(
+                        "Skipping analytical trace %s_%d: no samples inside "
+                        "the rotated, padded detector rectangle.",
+                        prefix, order,
+                    )
+                    continue
+                wave = np.linspace(
+                    candidate_wave[valid_indices[0]],
+                    candidate_wave[valid_indices[-1]],
+                    num=max(int((disp_npix - 2 * detector_pad) * .1), 2),
+                )
+                valid_wave = np.any(on_padded_detector(wave, order), axis=0)
+                wave = wave[valid_wave]
+                if wave.size < 2:
+                    logger.debug(
+                        "Skipping analytical trace %s_%d: fewer than two "
+                        "samples after rotated detector clipping.",
+                        prefix, order,
+                    )
+                    continue
                 s = np.tile(slit_pos, wave.size).reshape(wave.size, slit_pos.size).T.ravel()
                 w = np.tile(wave, slit_offset_pix.size)
-                xval = xvals[i] - xcent   # Centering on 0,0 at detector center
-                yval = yvals[i] - ycent   # Centering on 0,0 at detector center
-                if detector_angle:
-                    x0, y0 = xval, yval
-                    xval = cang * x0 - sang * y0
-                    yval = sang * x0 + cang * y0
+                xpix, ypix = rotated_detector_pixels(wave, order)
+                xval = (xpix.ravel() - disp_npix / 2) * pix_size.to(u.mm)
+                yval = (ypix.ravel() - xdisp_npix / 2) * pix_size.to(u.mm)
 
                 order_table = Table(
                     {'wavelength': w.to(u.um), 's': s,
@@ -683,6 +722,10 @@ class EchelleSpectralTraceList(SpectralTraceList):
                     float(pix_per_res_elem), "Analytical nominal FWHM [pix]")
                 trace_hdu.header["PIXSIZE"] = (
                     pix_size.to_value(u.mm), "Detector pixel size [mm]")
+                trace_hdu.header["DETPAD"] = (
+                    detector_pad, "Detector-frame padding [pix]")
+                trace_hdu.header["DETANG"] = (
+                    detector_angle, "Detector rotation angle [deg]")
                 if "nominal_slit_width" in trace_params.table.colnames:
                     trace_hdu.header["SLITWID"] = (
                         float(row["nominal_slit_width"]),
@@ -691,6 +734,20 @@ class EchelleSpectralTraceList(SpectralTraceList):
                     trace_hdu.header["PLTSCALE"] = (
                         plate_scale.to_value(u.arcsec / u.mm),
                         "Analytical sky-to-image plate scale [arcsec/mm]")
+                trace_ids.append(f'{prefix}_{order:d}')
+                ap_ids.append(row["aperture_id"])
+                im_ids.append(row["image_plane_id"])
                 hdul.append(trace_hdu)
+
+        if not trace_ids:
+            raise ValueError(
+                "Analytical echelle trace generation produced no detector "
+                "intersecting traces.")
+        hdul.insert(1, fits.BinTableHDU(Table(
+            {'description': trace_ids,
+             'extension_id': np.arange(len(trace_ids), dtype=int)+2,
+             'aperture_id': ap_ids,
+             'image_plane_id': im_ids
+             })))
 
         return hdul

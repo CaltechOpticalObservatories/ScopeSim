@@ -102,6 +102,8 @@ class SpectralTrace:
                 ("PIXSIZE", "pixel_size"),
                 ("SLITWID", "nominal_slit_width"),
                 ("PLTSCALE", "plate_scale"),
+                ("DETPAD", "detector_pad"),
+                ("DETANG", "detector_angle"),
             ):
                 if header_key in trace_tbl.header:
                     self.meta[meta_key] = trace_tbl.header[header_key]

@@ -3,6 +3,8 @@
 import pytest
 from unittest.mock import patch
 
+import numpy as np
+from astropy import units as u
 from astropy.io import fits
 
 
@@ -104,7 +106,10 @@ class TestSpectralTraceListWheel:
         assert stw.trace_lists["foo"].meta["filename"] == "bogus_foo"
 
 
-def _write_echelle_trace_params(path):
+def _write_echelle_trace_params(path, detector_angle=None):
+    angle_unit = "# detector_angle_unit : deg\n" if detector_angle is not None else ""
+    angle_col = " detector_angle" if detector_angle is not None else ""
+    angle_value = f" {detector_angle}" if detector_angle is not None else ""
     path.write_text(
         "# min_wave_unit : nm\n"
         "# max_wave_unit : nm\n"
@@ -118,19 +123,20 @@ def _write_echelle_trace_params(path):
         "# disp_freq_unit : mm\n"
         "# xdisp_freq_unit : mm\n"
         "# slitlength_unit : arcsec\n"
+        f"{angle_unit}"
         "prefix aperture_id image_plane_id m0 n min_wave max_wave "
         "design_res echelle_blaze focal_length fwhm detector_pad "
         "pixel_size n_disp n_xdisp disp_freq xdisp_freq slitlength "
-        "dispdir xbeta_center\n"
+        f"dispdir xbeta_center{angle_col}\n"
         "b 0 0 91 0 310 420 17799 65.6 225 4.5 10 0.015 "
-        "128 128 65.0 1.0 10 x 0\n",
+        f"128 128 65.0 1.0 10 x 0{angle_value}\n",
         encoding="utf-8",
     )
 
 
 def _echelle_cmds():
     cmds = UserCommands()
-    cmds["!INST.pixel_scale"] = 0.004
+    cmds["!INST.pixel_scale"] = 0.2
     return cmds
 
 
@@ -164,3 +170,48 @@ class TestEchelleSpectralTraceList:
         )
 
         assert (tmp_path / "analytical_echelle_traces.fits").exists()
+
+    def test_detector_angle_is_clipped_after_detector_padding(self, tmp_path):
+        params_file = tmp_path / "echelle_trace_parameters.dat"
+        _write_echelle_trace_params(params_file, detector_angle=25)
+
+        spt = EchelleSpectralTraceList(
+            cmds=_echelle_cmds(),
+            filename=str(params_file),
+            wave_colname="wavelength",
+            s_colname="s",
+        )
+
+        trace = next(iter(spt.spectral_traces.values()))
+        n_wave = len(trace.table) // 3
+        xpix = (
+            u.Quantity(trace.table["x"]).to_value(u.mm) / 0.015 + 64
+        ).reshape(3, n_wave)
+        ypix = (
+            u.Quantity(trace.table["y"]).to_value(u.mm) / 0.015 + 64
+        ).reshape(3, n_wave)
+        inside = (
+            (xpix >= 10)
+            & (xpix <= 128 - 10)
+            & (ypix >= 10)
+            & (ypix <= 128 - 10)
+        )
+
+        assert np.all(np.any(inside, axis=0))
+        assert trace.meta["detector_angle"] == 25
+        assert trace.meta["detector_pad"] == 10
+
+        unrotated_file = tmp_path / "echelle_trace_parameters_unrotated.dat"
+        _write_echelle_trace_params(unrotated_file, detector_angle=0)
+        unrotated = EchelleSpectralTraceList(
+            cmds=_echelle_cmds(),
+            filename=str(unrotated_file),
+            wave_colname="wavelength",
+            s_colname="s",
+        )
+        unrotated_trace = next(iter(unrotated.spectral_traces.values()))
+
+        assert (
+            abs(trace.wave_min - unrotated_trace.wave_min) > 1e-8
+            or abs(trace.wave_max - unrotated_trace.wave_max) > 1e-8
+        )
