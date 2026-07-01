@@ -79,6 +79,7 @@ class SpectralTrace:
         "spline_order": 4,
         "pixel_size": None,
         "description": "<no description>",
+        "trace_flux_jacobian": "!SIM.spectral.trace_flux_jacobian",
     }
 
     def __init__(self, trace_tbl, cmds=None, **kwargs):
@@ -302,10 +303,8 @@ class SpectralTrace:
         image = xilam.interp(xi_fpa, lam_fpa, grid=False) * ijmask
 
         # Scale to ph / s / pixel
-        dlam_by_dx, dlam_by_dy = self.xy2lam.gradient()
-        dlam_per_pix = pixsize * np.sqrt(dlam_by_dx(ximg_fpa, yimg_fpa)**2 +
-                                         dlam_by_dy(ximg_fpa, yimg_fpa)**2)
-        image *= pixscale * dlam_per_pix        # [arcsec/pix] * [um/pix]
+        image *= self._trace_flux_scale(
+            ximg_fpa, yimg_fpa, pixsize, pixscale, det_header)
 
         detector_qe = fov.meta.get("detector_qe")
         if detector_qe is not None:
@@ -340,6 +339,37 @@ class SpectralTrace:
 
         image_hdu = fits.ImageHDU(header=img_header, data=image)
         return image_hdu
+
+    def _trace_flux_scale(self, x_mm, y_mm, pixsize, pixscale, det_header):
+        """Return the local [arcsec um] per detector pixel flux scale."""
+        try:
+            use_jacobian = bool(from_currsys(
+                self.meta["trace_flux_jacobian"], self.cmds))
+        except ValueError:
+            use_jacobian = False
+
+        if not use_jacobian:
+            dlam_by_dx, dlam_by_dy = self.xy2lam.gradient()
+            dlam_per_pix = pixsize * np.sqrt(
+                dlam_by_dx(x_mm, y_mm)**2 + dlam_by_dy(x_mm, y_mm)**2)
+            return pixscale * dlam_per_pix
+
+        dxi_by_dx, dxi_by_dy = self.xy2xi.gradient()
+        dlam_by_dx, dlam_by_dy = self.xy2lam.gradient()
+        jacobian = (dxi_by_dx(x_mm, y_mm) * dlam_by_dy(x_mm, y_mm) -
+                    dxi_by_dy(x_mm, y_mm) * dlam_by_dx(x_mm, y_mm))
+        return np.abs(jacobian) * self._detector_pixel_area(det_header)
+
+    @staticmethod
+    def _detector_pixel_area(det_header):
+        """Return detector WCS pixel area in mm2."""
+        try:
+            pixel_scale_matrix = WCS(det_header, key="D").pixel_scale_matrix
+            return np.abs(np.linalg.det(pixel_scale_matrix))
+        except Exception:  # pragma: no cover - FITS fallback for odd headers
+            cdelt1 = det_header["CDELT1D"] * u.Unit(det_header["CUNIT1D"])
+            cdelt2 = det_header["CDELT2D"] * u.Unit(det_header["CUNIT2D"])
+            return np.abs((cdelt1 * cdelt2).to_value(u.mm**2))
 
     def rectify(self, hdulist, interps=None, wcs=None, **kwargs):
         """Create 2D spectrum for a trace.

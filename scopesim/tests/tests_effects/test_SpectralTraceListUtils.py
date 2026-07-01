@@ -8,6 +8,10 @@ import pytest
 import numpy as np
 
 from astropy.io import fits
+from astropy.table import Table
+from astropy import units as u
+
+from scopesim.optics.image_plane_utils import header_from_list_of_xy
 from scopesim.effects.spectral_trace_list_utils import SpectralTrace
 from scopesim.effects.spectral_trace_list_utils import Transform2D, power_vector
 from scopesim.effects.spectral_trace_list_utils import make_image_interpolations
@@ -58,6 +62,43 @@ class TestSpectralTrace:
         large_pix = spt.dlam_per_pix(2.2)
 
         assert large_pix == pytest.approx(2 * small_pix)
+
+    def test_trace_flux_jacobian_handles_tilted_trace(self):
+        spt = SpectralTrace(_tilted_linear_trace_table())
+        det_header = header_from_list_of_xy([-1, 1], [-1, 1], 0.01, "D")
+        x_mm = np.array([[2.0]])
+        y_mm = np.array([[0.0]])
+
+        spt.meta["trace_flux_jacobian"] = False
+        projected_scale = spt._trace_flux_scale(
+            x_mm, y_mm, pixsize=0.01, pixscale=0.1, det_header=det_header)
+
+        spt.meta["trace_flux_jacobian"] = True
+        jacobian_scale = spt._trace_flux_scale(
+            x_mm, y_mm, pixsize=0.01, pixscale=0.1, det_header=det_header)
+
+        assert projected_scale[0, 0] > jacobian_scale[0, 0]
+        assert jacobian_scale[0, 0] == pytest.approx(1e-3, rel=1e-5)
+
+
+def _tilted_linear_trace_table():
+    xi_grid, wave_grid = np.meshgrid(
+        np.linspace(-1, 1, 5),
+        np.linspace(1, 3, 5),
+        indexing="ij",
+    )
+    xi = xi_grid.ravel()
+    wave = wave_grid.ravel()
+
+    return Table(
+        data=[
+            wave * u.um,
+            xi * u.arcsec,
+            (wave + 0.1 * xi) * u.mm,
+            (xi / 10) * u.mm,
+        ],
+        names=["wavelength", "s", "x", "y"],
+    )
 
 
 def test_apply_detector_qe_to_trace_image_uses_detector_position():

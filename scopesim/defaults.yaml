@@ -13,6 +13,7 @@ properties :
 
     spectral_bin_width : !!float 1E-4
     spectral_resolution: 5000
+    trace_flux_jacobian : False
     minimum_throughput : !!float 1E-6
     minimum_pixel_flux : 1
 
