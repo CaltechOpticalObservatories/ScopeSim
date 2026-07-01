@@ -530,6 +530,8 @@ class EchelleSpectralTraceList(SpectralTraceList):
     # echelle_blaze_unit : deg
     # focal_length_unit : mm
     # fwhm_unit : pixel
+    # nominal_slit_width_unit : arcsec
+    # plate_scale_unit : arcsec/mm
     # detector_pad_unit : pixel
     # pixel_size_unit : mm
     # n_disp_unit : pixel
@@ -538,10 +540,10 @@ class EchelleSpectralTraceList(SpectralTraceList):
     # xdisp_freq_unit : mm
     # slitwidth_unit : arcsec
 
-    prefix    aperture_id    image_plane_id    m0    n    min_wave    max_wave   design_res    echelle_blaze    focal_length    fwhm    detector_pad    pixel_size    n_disp    n_xdisp     disp_freq    xdisp_freq    slitwidth    dispdir
-    ub         0              2                29    11    315         515          20000        64.2             225             4.7     10              0.015         4096      4096        200          1000          10           x
-    gri        1              1                36    18    490         1020         20000        64.2             225             4.7     10              0.015         4096      4096        100          500           10           x
-    nIR        2              0                40    24    970         2500         20000        64.2             225             4.7     10              0.015         4096      4096        45           175           10           x
+    prefix    aperture_id    image_plane_id    m0    n    min_wave    max_wave   design_res    echelle_blaze    focal_length    fwhm    nominal_slit_width    plate_scale    detector_pad    pixel_size    n_disp    n_xdisp     disp_freq    xdisp_freq    slitwidth    dispdir
+    ub         0              2                29    11    315         515          20000        64.2             225             4.7     0.7                   10.0           10              0.015         4096      4096        200          1000          10           x
+    gri        1              1                36    18    490         1020         20000        64.2             225             4.7     0.7                   10.0           10              0.015         4096      4096        100          500           10           x
+    nIR        2              0                40    24    970         2500         20000        64.2             225             4.7     0.7                   10.0           10              0.015         4096      4096        45           175           10           x
     ----------------------------------------------------------------
 
     The calculated traces are stored in the same HDUList format as required by SpectralTraceList,
@@ -620,7 +622,16 @@ class EchelleSpectralTraceList(SpectralTraceList):
 
             slit_edge = (row['slitlength'] / 2) * u.Unit(trace_params.meta["slitlength_unit"])
             slit_pos = np.linspace(-slit_edge, slit_edge, num=3)
-            slit_offset_pix = slit_pos / (from_currsys('!INST.pixel_scale', self.cmds) * u.arcsec)
+            if "plate_scale" in trace_params.table.colnames:
+                plate_scale = row["plate_scale"] * u.Unit(
+                    trace_params.meta["plate_scale_unit"])
+                slit_offset_pix = (slit_pos / plate_scale / pix_size).to_value(
+                    u.dimensionless_unscaled)
+            else:
+                slit_offset_pix = (
+                    slit_pos /
+                    (from_currsys('!INST.pixel_scale', self.cmds) * u.arcsec)
+                ).to_value(u.dimensionless_unscaled)
             detector_angle = 0.0
             if "detector_angle" in trace_params.table.colnames:
                 detector_angle = u.Quantity(
@@ -666,6 +677,20 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 trace_hdu = fits.BinTableHDU(order_table)
                 trace_hdu.header['DISPDIR'] = row['dispdir']
                 trace_hdu.header["EXTNAME"] = f'{prefix}_{order:d}'
+                trace_hdu.header["DESIGNR"] = (
+                    float(design_res), "Analytical trace design resolving power")
+                trace_hdu.header["FWHMPIX"] = (
+                    float(pix_per_res_elem), "Analytical nominal FWHM [pix]")
+                trace_hdu.header["PIXSIZE"] = (
+                    pix_size.to_value(u.mm), "Detector pixel size [mm]")
+                if "nominal_slit_width" in trace_params.table.colnames:
+                    trace_hdu.header["SLITWID"] = (
+                        float(row["nominal_slit_width"]),
+                        "Analytical nominal slit width [arcsec]")
+                if "plate_scale" in trace_params.table.colnames:
+                    trace_hdu.header["PLTSCALE"] = (
+                        plate_scale.to_value(u.arcsec / u.mm),
+                        "Analytical sky-to-image plate scale [arcsec/mm]")
                 hdul.append(trace_hdu)
 
         return hdul

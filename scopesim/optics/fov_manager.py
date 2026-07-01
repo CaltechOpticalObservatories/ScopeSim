@@ -145,18 +145,47 @@ class FOVManager:
         params = {"pixel_scale": self.meta["pixel_scale"]}
 
         for effect in self.effects:
-            self.volumes_list = effect.apply_to(self.volumes_list, **params)
+            effect_params = params
+            if (isinstance(effect, DetectorList) and
+                    effect.meta.get("pixel_scale") != "!INST.pixel_scale"):
+                effect_params = {}
+            self.volumes_list = effect.apply_to(
+                self.volumes_list, **effect_params)
 
         # ..todo: add catch to split volumes larger than chunk_size
         pixel_scale = from_currsys(self.meta["pixel_scale"], self.cmds)
-        plate_scale = from_currsys(self.meta["plate_scale"], self.cmds)
 
         splits = (chain.from_iterable(split)
                   for split in zip(*self._get_splits(pixel_scale)))
 
         self.volumes_list.split(axis=["x", "y"], value=splits)
 
+        detector_effects = eu.get_all_effects(self.effects, DetectorList)
+        decouple = from_currsys(self.meta["decouple_sky_det_hdrs"], self.cmds)
+
         for vol in self.volumes_list:
+            image_plane_id = vol["meta"].get("image_plane_id")
+            det_eff = None
+            if image_plane_id is not None:
+                for candidate in detector_effects:
+                    if (from_currsys(candidate.meta["image_plane_id"], self.cmds)
+                            == image_plane_id):
+                        det_eff = candidate
+                        break
+
+            scale_meta = {
+                "pixel_scale": self.meta["pixel_scale"],
+                "plate_scale": self.meta["plate_scale"],
+            }
+            if det_eff is not None:
+                scale_meta["pixel_scale"] = det_eff.meta.get(
+                    "pixel_scale", scale_meta["pixel_scale"])
+                scale_meta["plate_scale"] = det_eff.meta.get(
+                    "plate_scale", scale_meta["plate_scale"])
+            scales = from_currsys(scale_meta, self.cmds)
+            pixel_scale = scales["pixel_scale"]
+            plate_scale = scales["plate_scale"]
+
             xs_min, xs_max = vol["x_min"] / 3600., vol["x_max"] / 3600.
             ys_min, ys_max = vol["y_min"] / 3600., vol["y_max"] / 3600.
             waverange = (vol["wave_min"], vol["wave_max"])
@@ -166,19 +195,16 @@ class FOVManager:
 
             dethdr, _ = ipu.det_wcs_from_sky_wcs(
                 WCS(skyhdr), pixel_scale, plate_scale)
-            skyhdr.update(dethdr.to_header())
 
             # useful for spectroscopy mode where slit dimensions is not the same
             # as detector dimensions
-            if from_currsys(self.meta["decouple_sky_det_hdrs"], self.cmds):
-                det_effs = eu.get_all_effects(self.effects, DetectorList)
-                for det_eff in det_effs:
-                    if det_eff.meta["image_plane_id"] == vol["meta"]["image_plane_id"]:
-                        dethdr = det_eff.image_plane_header
-                        break
-
+            if decouple and det_eff is not None:
+                dethdr = det_eff.image_plane_header
                 # TODO: Why is this .image_plane_header and not
                 #       .detector_headers()[0] or something?
+
+            skyhdr.update(
+                dethdr.to_header() if hasattr(dethdr, "to_header") else dethdr)
 
             if not self.is_spectroscope:
                 fovcls = FieldOfView2D
@@ -188,12 +214,16 @@ class FOVManager:
                 else:
                     fovcls = FieldOfView1D
 
+            fov_meta = vol["meta"].copy()
+            fov_meta["pixel_scale"] = pixel_scale
+            fov_meta["plate_scale"] = plate_scale
+
             new_fov = fovcls(
                 skyhdr,
                 waverange,
                 detector_header=dethdr,
                 cmds=self.cmds,
-                **vol["meta"],
+                **fov_meta,
             )
 
             yield new_fov

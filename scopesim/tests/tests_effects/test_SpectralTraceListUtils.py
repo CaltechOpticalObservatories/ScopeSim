@@ -8,7 +8,6 @@ import pytest
 import numpy as np
 
 from astropy.io import fits
-
 from scopesim.effects.spectral_trace_list_utils import SpectralTrace
 from scopesim.effects.spectral_trace_list_utils import Transform2D, power_vector
 from scopesim.effects.spectral_trace_list_utils import make_image_interpolations
@@ -21,6 +20,18 @@ class TestSpectralTrace:
         trace_tbl = tlo.trace_1()
         spt = SpectralTrace(trace_tbl)
         assert isinstance(spt, SpectralTrace)
+
+    def test_copies_validation_metadata_from_fits_header(self):
+        hdu = fits.BinTableHDU(tlo.trace_1())
+        hdu.header["DESIGNR"] = 18000
+        hdu.header["FWHMPIX"] = 4.2
+        hdu.header["SLITWID"] = 0.7
+
+        spt = SpectralTrace(hdu)
+
+        assert spt.meta["design_res"] == 18000
+        assert spt.meta["nominal_fwhm_pix"] == 4.2
+        assert spt.meta["nominal_slit_width"] == 0.7
 
     def test_fails_without_table(self):
         a_number = 1
@@ -36,6 +47,17 @@ class TestSpectralTrace:
         trace_tbl = tlo.trace_5()
         spt = SpectralTrace(trace_tbl)
         assert spt.dispersion_axis == 'y'
+
+    def test_set_dispersion_uses_supplied_detector_pixel_size(self):
+        trace_tbl = tlo.trace_6()
+        spt = SpectralTrace(trace_tbl)
+
+        spt._set_dispersion(2.1, 2.4, pixsize=0.01)
+        small_pix = spt.dlam_per_pix(2.2)
+        spt._set_dispersion(2.1, 2.4, pixsize=0.02)
+        large_pix = spt.dlam_per_pix(2.2)
+
+        assert large_pix == pytest.approx(2 * small_pix)
 
 
 def test_apply_detector_qe_to_trace_image_uses_detector_position():

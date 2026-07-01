@@ -95,6 +95,15 @@ class SpectralTrace:
             self.meta["trace_id"] = trace_tbl.header.get("EXTNAME",
                                                          "<unknown trace id>")
             self.dispersion_axis = trace_tbl.header.get("DISPDIR", "unknown")
+            for header_key, meta_key in (
+                ("DESIGNR", "design_res"),
+                ("FWHMPIX", "nominal_fwhm_pix"),
+                ("PIXSIZE", "pixel_size"),
+                ("SLITWID", "nominal_slit_width"),
+                ("PLTSCALE", "plate_scale"),
+            ):
+                if header_key in trace_tbl.header:
+                    self.meta[meta_key] = trace_tbl.header[header_key]
         elif isinstance(trace_tbl, Table):
             self.table = trace_tbl
             self.dispersion_axis = "unknown"
@@ -200,7 +209,7 @@ class SpectralTrace:
         det_header = fov.detector_header
 
         # WCSD from the FieldOfView - this is the full detector plane
-        pixsize = fov_header["CDELT1D"] * u.Unit(fov_header["CUNIT1D"])
+        pixsize = det_header["CDELT1D"] * u.Unit(det_header["CUNIT1D"])
         pixsize = pixsize.to_value(u.mm)
         pixscale = fov_header["CDELT1"] * u.Unit(fov_header["CUNIT1"])
         pixscale = pixscale.to_value(u.arcsec)
@@ -666,8 +675,12 @@ class SpectralTrace:
             dlam_grad = self.xy2lam.gradient()[0]  # dlam_by_dx
         else:
             dlam_grad = self.xy2lam.gradient()[1]  # dlam_by_dy
-        pixsize = (from_currsys(self.meta["pixel_scale"], self.cmds) /
-                   from_currsys(self.meta["plate_scale"], self.cmds))
+        if pixsize is None:
+            pixsize = (from_currsys(self.meta["pixel_scale"], self.cmds) /
+                       from_currsys(self.meta["plate_scale"], self.cmds))
+        elif isinstance(pixsize, u.Quantity):
+            pixsize = pixsize.to_value(u.mm)
+
         self.dlam_per_pix = interp1d(lam,
                                      dlam_grad(x_mm, y_mm) * pixsize,
                                      fill_value="extrapolate")

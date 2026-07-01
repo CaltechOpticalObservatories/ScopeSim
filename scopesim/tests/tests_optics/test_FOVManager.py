@@ -3,6 +3,7 @@ from pytest import approx
 import numpy as np
 from astropy import units as u
 
+from scopesim.effects import DetectorWindow
 from scopesim.optics.fov_manager import FOVManager
 from scopesim.tests.mocks.py_objects import effects_objects as eo
 from scopesim.utils import from_currsys
@@ -56,3 +57,35 @@ class TestGenerateFovList:
         assert len(fovs) == 4
         assert fov_skycorners.min(axis=0)[0] == approx(-1024 / 3600)  # [deg] 2k detector / pixel_scale
         assert fovs[0].waverange[0] == 0.6 * u.um  # filter blue edge
+
+    def test_uses_detector_scale_for_matching_image_plane(self):
+        class ImagePlaneTagger:
+            def apply_to(self, obj, **kwargs):
+                for vol in obj:
+                    vol["meta"]["image_plane_id"] = 7
+                return obj
+
+        det = DetectorWindow(
+            pixel_size=0.01,
+            x=0,
+            y=0,
+            width=10,
+            height=10,
+            units="pixel",
+            image_plane_id=7,
+            pixel_scale=0.25,
+            plate_scale=25,
+        )
+        fov_man = FOVManager(
+            effects=[ImagePlaneTagger(), det],
+            pixel_scale=1,
+            plate_scale=1,
+            decouple_sky_det_hdrs=True,
+        )
+
+        fov = next(fov_man.generate_fovs_list())
+
+        assert fov.meta["pixel_scale"] == approx(0.25)
+        assert fov.meta["plate_scale"] == approx(25)
+        assert fov.header["CDELT1"] * 3600 == approx(0.25)
+        assert fov.detector_header["CDELT1D"] == approx(0.01)
