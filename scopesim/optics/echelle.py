@@ -393,11 +393,11 @@ class SpectrographSetup:
                      f'\n\tOrders: {self.orders}'
                      f'\n\tFocal length: {self.focal_length}'
                      f'\n\tIncidence angle: {np.rad2deg(self.grating.alpha):.3f}'
-                     f'\n\tReflectance angle: {np.rad2deg(self.beta_central_pixel):.2f}\n'
+                     f'\n\tReflectance angle: {np.rad2deg(self.beta_central_pixel):.2f}'
                      f'\n\tGroove length: {self.grating.d:.2f}'
                      f'\n\t# of pixels: {self.detector.n_pix_x}x{self.detector.n_pix_y}'
                      f'\n\tPixel size: {self.detector.pixel_size}'
-                     f'\n\tPixels per res. element: {self.nominal_pixels_per_res_elem}')
+                     f'\n\tPixels per res. element: {self.nominal_pixels_per_res_elem}\n')
 
     def set_beta_center(self, beta, littrow: bool = False):
         """

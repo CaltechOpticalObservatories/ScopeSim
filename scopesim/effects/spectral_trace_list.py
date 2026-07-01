@@ -621,6 +621,14 @@ class EchelleSpectralTraceList(SpectralTraceList):
             slit_edge = (row['slitlength'] / 2) * u.Unit(trace_params.meta["slitlength_unit"])
             slit_pos = np.linspace(-slit_edge, slit_edge, num=3)
             slit_offset_pix = slit_pos / (from_currsys('!INST.pixel_scale', self.cmds) * u.arcsec)
+            detector_angle = 0.0
+            if "detector_angle" in trace_params.table.colnames:
+                detector_angle = u.Quantity(
+                    row["detector_angle"],
+                    u.Unit(trace_params.meta.get("detector_angle_unit", "deg")),
+                ).to_value(u.deg)
+            cang = np.cos(np.deg2rad(detector_angle))
+            sang = np.sin(np.deg2rad(detector_angle))
 
             xvals, yvals = [], []
             for i, order in enumerate(ss.orders):
@@ -645,6 +653,10 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 w = np.tile(wave, slit_offset_pix.size)
                 xval = xvals[i] - xcent   # Centering on 0,0 at detector center
                 yval = yvals[i] - ycent   # Centering on 0,0 at detector center
+                if detector_angle:
+                    x0, y0 = xval, yval
+                    xval = cang * x0 - sang * y0
+                    yval = sang * x0 + cang * y0
 
                 order_table = Table(
                     {'wavelength': w.to(u.um), 's': s,
