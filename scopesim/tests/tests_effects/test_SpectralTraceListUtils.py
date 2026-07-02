@@ -204,9 +204,50 @@ class TestTransform2D:
         zz = 1. + xx - yy
 
         matrix = np.array([[1, 1], [-1, 0]])
-        tf2d = Transform2D.fit(xx, yy, zz, degree=1)
+        tf2d = Transform2D.fit(xx, yy, zz, degree=1, normalize=False)
 
         assert tf2d.matrix == pytest.approx(matrix)
+
+    def test_fit_preserves_high_dynamic_range_coefficients(self):
+        x_grid, y_grid = np.meshgrid(
+            np.linspace(-5, 5, 3),
+            np.linspace(0.67, 0.69, 200),
+            indexing="ij",
+        )
+        x = x_grid.ravel()
+        y = y_grid.ravel()
+        z = (
+            1e8 * y**4
+            - 2e7 * y**3
+            + 3e5 * y**2
+            + 15 * x * y
+            + 0.2 * x
+        )
+
+        tf2d = Transform2D.fit(x, y, z, degree=4)
+
+        assert tf2d.matrix.dtype == np.float64
+        assert np.max(np.abs(tf2d(x, y) - z)) < 1e-5
+
+    def test_gradient_with_normalized_fit_uses_input_units(self):
+        x_grid, y_grid = np.meshgrid(
+            np.linspace(-5, 5, 5),
+            np.linspace(0.67, 0.69, 20),
+            indexing="ij",
+        )
+        x = x_grid.ravel()
+        y = y_grid.ravel()
+        z = 3 + 2 * x + 5 * y + 7 * x * y + 11 * y**2
+
+        tf2d = Transform2D.fit(x, y, z, degree=2)
+        dz_dx, dz_dy = tf2d.gradient()
+
+        assert dz_dx(x, y) == pytest.approx(2 + 7 * y, rel=1e-10, abs=1e-10)
+        assert dz_dy(x, y) == pytest.approx(
+            5 + 7 * x + 22 * y,
+            rel=1e-10,
+            abs=1e-10,
+        )
 
     def test_grid_false_shape_is_preserved(self, tf2d):
         n_x, n_y = 4, 2

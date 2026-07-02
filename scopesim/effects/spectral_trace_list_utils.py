@@ -865,12 +865,15 @@ class Transform2D():
     """
 
     def __init__(self, matrix, pretransform_x=None,
-                 pretransform_y=None, posttransform=None):
+                 pretransform_y=None, posttransform=None,
+                 dpretransform_x=1.0, dpretransform_y=1.0):
         self.matrix = np.asarray(matrix)
         self.ny, self.nx = self.matrix.shape
         self.pretransform_x = self._repackage(pretransform_x)
         self.pretransform_y = self._repackage(pretransform_y)
         self.posttransform = self._repackage(posttransform)
+        self.dpretransform_x = dpretransform_x
+        self.dpretransform_y = dpretransform_y
 
     def _repackage(self, trafo):
         """Make sure `trafo` is a tuple."""
@@ -904,12 +907,15 @@ class Transform2D():
         in x and y. When grid=False, a vector. In this case, x and y must
         have the same length.
         """
+        pretransform_x = self.pretransform_x
+        pretransform_y = self.pretransform_y
+        posttransform = self.posttransform
         if "pretransform_x" in kwargs:
-            self.pretransform_x = self._repackage(kwargs["pretransform_x"])
+            pretransform_x = self._repackage(kwargs["pretransform_x"])
         if "pretransform_y" in kwargs:
-            self.pretransform_y = self._repackage(kwargs["pretransform_y"])
+            pretransform_y = self._repackage(kwargs["pretransform_y"])
         if "posttransform" in kwargs:
-            self.posttransform = self._repackage(kwargs["posttransform"])
+            posttransform = self._repackage(kwargs["posttransform"])
 
         x = np.array(x)
         y = np.array(y)
@@ -920,10 +926,10 @@ class Transform2D():
                              "is False")
 
         # Apply pre transforms
-        if self.pretransform_x is not None:
-            x = self.pretransform_x[0](x, **self.pretransform_x[1])
-        if self.pretransform_y is not None:
-            y = self.pretransform_y[0](y, **self.pretransform_y[1])
+        if pretransform_x is not None:
+            x = pretransform_x[0](x, **pretransform_x[1])
+        if pretransform_y is not None:
+            y = pretransform_y[0](y, **pretransform_y[1])
 
         xvec = power_vector(x.flatten(), self.nx - 1)
         yvec = power_vector(y.flatten(), self.ny - 1)
@@ -938,32 +944,92 @@ class Transform2D():
             # expression in the "grid" branch.
             result = (yvec * temp).sum(axis=0)
             if not orig_shape:
-                result = np.float32(result)
+                result = result.item()
             else:
                 result = result.reshape(orig_shape)
 
         # Apply posttransform
-        if self.posttransform is not None:
-            result = self.posttransform[0](result, **self.posttransform[1])
+        if posttransform is not None:
+            result = posttransform[0](result, **posttransform[1])
 
         return result
 
     @classmethod
-    def fit(cls, xin, yin, xout, degree=4):
+    def fit(cls, xin, yin, xout, degree=4, normalize=True):
         """Determine polynomial fits."""
+        xin = np.asarray(xin, dtype=float)
+        yin = np.asarray(yin, dtype=float)
+        xout = np.asarray(xout, dtype=float)
+        pretransform_x = pretransform_y = None
+        dpretransform_x = dpretransform_y = 1.0
+        if normalize:
+            x_offset, x_scale = _fit_normalization(xin)
+            y_offset, y_scale = _fit_normalization(yin)
+            xin_fit = _linear_rescale(xin, x_offset, x_scale)
+            yin_fit = _linear_rescale(yin, y_offset, y_scale)
+            pretransform_x = (
+                _linear_rescale,
+                {"offset": x_offset, "scale": x_scale},
+            )
+            pretransform_y = (
+                _linear_rescale,
+                {"offset": y_offset, "scale": y_scale},
+            )
+            dpretransform_x = 1.0 / x_scale
+            dpretransform_y = 1.0 / y_scale
+        else:
+            xin_fit = xin
+            yin_fit = yin
         pinit = Polynomial2D(degree=degree)
         fitter = fitting.LinearLSQFitter()
-        fit = fitter(pinit, xin, yin, xout)
-        return Transform2D(fit2matrix(fit))
+        fit = fitter(pinit, xin_fit, yin_fit, xout)
+        return Transform2D(
+            fit2matrix(fit),
+            pretransform_x=pretransform_x,
+            pretransform_y=pretransform_y,
+            dpretransform_x=dpretransform_x,
+            dpretransform_y=dpretransform_y,
+        )
 
     def gradient(self):
         """Compute the gradient of a 2d polynomial transformation."""
         mat = self.matrix
 
-        dmat_x = (mat * np.arange(self.nx))[:, 1:]
-        dmat_y = (mat.T * np.arange(self.ny)).T[1:, :]
+        dmat_x = (mat * np.arange(self.nx))[:, 1:] * self.dpretransform_x
+        dmat_y = (mat.T * np.arange(self.ny)).T[1:, :] * self.dpretransform_y
 
-        return Transform2D(dmat_x), Transform2D(dmat_y)
+        return (
+            Transform2D(
+                dmat_x,
+                pretransform_x=self.pretransform_x,
+                pretransform_y=self.pretransform_y,
+            ),
+            Transform2D(
+                dmat_y,
+                pretransform_x=self.pretransform_x,
+                pretransform_y=self.pretransform_y,
+            ),
+        )
+
+
+def _fit_normalization(values):
+    """Return a stable offset and scale for polynomial fitting."""
+    values = np.asarray(values, dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return 0.0, 1.0
+    minimum = float(np.nanmin(finite))
+    maximum = float(np.nanmax(finite))
+    offset = minimum + (maximum - minimum) / 2
+    scale = (maximum - minimum) / 2
+    if not np.isfinite(scale) or scale == 0:
+        scale = 1.0
+    return offset, scale
+
+
+def _linear_rescale(values, offset=0.0, scale=1.0):
+    """Linearly rescale values for polynomial fitting/evaluation."""
+    return (np.asarray(values, dtype=float) - offset) / scale
 
 
 def fit2matrix(fit):
@@ -976,7 +1042,7 @@ def fit2matrix(fit):
     """
     coeffs = dict(zip(fit.param_names, fit.parameters))
     deg = fit.degree
-    mat = np.zeros((deg + 1, deg + 1), dtype=np.float32)
+    mat = np.zeros((deg + 1, deg + 1), dtype=float)
     for i in range(deg + 1):
         for j in range(deg + 1):
             try:
