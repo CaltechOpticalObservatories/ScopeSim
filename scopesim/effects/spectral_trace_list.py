@@ -608,8 +608,6 @@ class EchelleSpectralTraceList(SpectralTraceList):
                                               pix_size, xdisp_groove_length=xdisp_groove_length,
                                               xdisp_beta_center=xdisp_beta_center)
 
-            edges = ss.edge_wave(fsr=False)
-
             slit_edge = (row['slitlength'] / 2) * u.Unit(trace_params.meta["slitlength_unit"])
             slit_pos = np.linspace(-slit_edge, slit_edge, num=3)
             if "plate_scale" in trace_params.table.colnames:
@@ -630,6 +628,20 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 ).to_value(u.deg)
             cang = np.cos(np.deg2rad(detector_angle))
             sang = np.sin(np.deg2rad(detector_angle))
+            detector_x_padding = max(
+                0.0,
+                (
+                    disp_npix * abs(cang)
+                    + xdisp_npix * abs(sang)
+                    - disp_npix
+                ) / 2,
+            )
+            slit_x_padding = (
+                abs(np.tan(np.deg2rad(detector_angle)))
+                * float(np.nanmax(np.abs(slit_offset_pix)))
+            )
+            raw_x_min = 0.5 - detector_x_padding - slit_x_padding
+            raw_x_max = disp_npix - 0.5 + detector_x_padding + slit_x_padding
 
             def raw_detector_pixels(wave, order):
                 x = ss.wavelength_to_x_pixel(wave, order)
@@ -650,8 +662,9 @@ class EchelleSpectralTraceList(SpectralTraceList):
             # optical trace geometry; downstream detector/FOV code is
             # responsible for clipping padded display or extraction regions.
             for i, order in enumerate(ss.orders):
-                wave = np.linspace(
-                    edges[i][0], edges[i][-1], num=max(disp_npix, 2))
+                raw_x = np.linspace(
+                    raw_x_min, raw_x_max, num=max(disp_npix, 2))
+                wave = ss.x_pixel_to_wavelength(raw_x, order)
                 xpix, ypix = raw_detector_pixels(wave, order)
                 xrot = cang * xpix - sang * ypix
                 yrot = sang * xpix + cang * ypix
@@ -681,8 +694,9 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 )
 
             for i, order in enumerate(ss.orders):
-                candidate_wave = np.linspace(
-                    edges[i][0], edges[i][-1], num=max(disp_npix, 2))
+                candidate_raw_x = np.linspace(
+                    raw_x_min, raw_x_max, num=max(disp_npix, 2))
+                candidate_wave = ss.x_pixel_to_wavelength(candidate_raw_x, order)
                 valid_wave = np.any(
                     on_detector(candidate_wave, order), axis=0)
                 valid_indices = np.flatnonzero(valid_wave)
@@ -693,11 +707,12 @@ class EchelleSpectralTraceList(SpectralTraceList):
                         prefix, order,
                     )
                     continue
-                wave = np.linspace(
-                    candidate_wave[valid_indices[0]],
-                    candidate_wave[valid_indices[-1]],
+                raw_x = np.linspace(
+                    candidate_raw_x[valid_indices[0]],
+                    candidate_raw_x[valid_indices[-1]],
                     num=max(int(disp_npix * .1), 2),
                 )
+                wave = ss.x_pixel_to_wavelength(raw_x, order)
                 valid_wave = np.any(on_detector(wave, order), axis=0)
                 wave = wave[valid_wave]
                 if wave.size < 2:
