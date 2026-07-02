@@ -590,7 +590,10 @@ class EchelleSpectralTraceList(SpectralTraceList):
             focal_len = row['focal_length'] * u.Unit(trace_params.meta["focal_length_unit"])
             disp_npix = int(row['n_disp'])
             xdisp_npix = int(row['n_xdisp'])
-            detector_pad = int(row['detector_pad'])
+            detector_pad = (
+                int(row['detector_pad'])
+                if 'detector_pad' in trace_params.table.colnames else 0
+            )
             pix_size = row['pixel_size'] * u.Unit(trace_params.meta["pixel_size_unit"])
             echelle_angle = np.deg2rad(row['echelle_blaze'])*u.rad
             xdisp_beta_center = np.deg2rad(row['xbeta_center'])*u.rad
@@ -642,8 +645,10 @@ class EchelleSpectralTraceList(SpectralTraceList):
             rotated_x_min = rotated_y_min = np.inf
             rotated_x_max = rotated_y_max = -np.inf
             # The analytical echelle layout is relative, not yet detector
-            # placed. Rotate the footprint first, place that rotated footprint
-            # on the detector, then apply detector-frame padding below.
+            # placed. Rotate the footprint first, then place that rotated
+            # footprint on the detector. Detector padding is not part of the
+            # optical trace geometry; downstream detector/FOV code is
+            # responsible for clipping padded display or extraction regions.
             for i, order in enumerate(ss.orders):
                 wave = np.linspace(
                     edges[i][0], edges[i][-1], num=max(disp_npix, 2))
@@ -666,39 +671,39 @@ class EchelleSpectralTraceList(SpectralTraceList):
                     yrot - rotated_y_center + xdisp_npix / 2,
                 )
 
-            def on_padded_detector(wave, order):
+            def on_detector(wave, order):
                 xpix, ypix = rotated_detector_pixels(wave, order)
                 return (
-                    (xpix >= detector_pad)
-                    & (xpix <= disp_npix - detector_pad)
-                    & (ypix >= detector_pad)
-                    & (ypix <= xdisp_npix - detector_pad)
+                    (xpix >= 0)
+                    & (xpix <= disp_npix)
+                    & (ypix >= 0)
+                    & (ypix <= xdisp_npix)
                 )
 
             for i, order in enumerate(ss.orders):
                 candidate_wave = np.linspace(
                     edges[i][0], edges[i][-1], num=max(disp_npix, 2))
                 valid_wave = np.any(
-                    on_padded_detector(candidate_wave, order), axis=0)
+                    on_detector(candidate_wave, order), axis=0)
                 valid_indices = np.flatnonzero(valid_wave)
                 if valid_indices.size == 0:
                     logger.debug(
                         "Skipping analytical trace %s_%d: no samples inside "
-                        "the rotated, padded detector rectangle.",
+                        "the rotated detector rectangle.",
                         prefix, order,
                     )
                     continue
                 wave = np.linspace(
                     candidate_wave[valid_indices[0]],
                     candidate_wave[valid_indices[-1]],
-                    num=max(int((disp_npix - 2 * detector_pad) * .1), 2),
+                    num=max(int(disp_npix * .1), 2),
                 )
-                valid_wave = np.any(on_padded_detector(wave, order), axis=0)
+                valid_wave = np.any(on_detector(wave, order), axis=0)
                 wave = wave[valid_wave]
                 if wave.size < 2:
                     logger.debug(
                         "Skipping analytical trace %s_%d: fewer than two "
-                        "samples after rotated detector clipping.",
+                        "samples after rotated detector-edge clipping.",
                         prefix, order,
                     )
                     continue
@@ -723,7 +728,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 trace_hdu.header["PIXSIZE"] = (
                     pix_size.to_value(u.mm), "Detector pixel size [mm]")
                 trace_hdu.header["DETPAD"] = (
-                    detector_pad, "Detector-frame padding [pix]")
+                    detector_pad, "Legacy detector padding [pix]; not applied")
                 trace_hdu.header["DETANG"] = (
                     detector_angle, "Detector rotation angle [deg]")
                 if "nominal_slit_width" in trace_params.table.colnames:

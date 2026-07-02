@@ -106,7 +106,7 @@ class TestSpectralTraceListWheel:
         assert stw.trace_lists["foo"].meta["filename"] == "bogus_foo"
 
 
-def _write_echelle_trace_params(path, detector_angle=None):
+def _write_echelle_trace_params(path, detector_angle=None, detector_pad=10):
     angle_unit = "# detector_angle_unit : deg\n" if detector_angle is not None else ""
     angle_col = " detector_angle" if detector_angle is not None else ""
     angle_value = f" {detector_angle}" if detector_angle is not None else ""
@@ -128,7 +128,7 @@ def _write_echelle_trace_params(path, detector_angle=None):
         "design_res echelle_blaze focal_length fwhm detector_pad "
         "pixel_size n_disp n_xdisp disp_freq xdisp_freq slitlength "
         f"dispdir xbeta_center{angle_col}\n"
-        "b 0 0 91 0 310 420 17799 65.6 225 4.5 10 0.015 "
+        f"b 0 0 91 0 310 420 17799 65.6 225 4.5 {detector_pad} 0.015 "
         f"128 128 65.0 1.0 10 x 0{angle_value}\n",
         encoding="utf-8",
     )
@@ -171,7 +171,7 @@ class TestEchelleSpectralTraceList:
 
         assert (tmp_path / "analytical_echelle_traces.fits").exists()
 
-    def test_detector_angle_is_clipped_after_detector_padding(self, tmp_path):
+    def test_detector_angle_clips_to_detector_not_padding(self, tmp_path):
         params_file = tmp_path / "echelle_trace_parameters.dat"
         _write_echelle_trace_params(params_file, detector_angle=25)
 
@@ -191,15 +191,32 @@ class TestEchelleSpectralTraceList:
             u.Quantity(trace.table["y"]).to_value(u.mm) / 0.015 + 64
         ).reshape(3, n_wave)
         inside = (
-            (xpix >= 10)
-            & (xpix <= 128 - 10)
-            & (ypix >= 10)
-            & (ypix <= 128 - 10)
+            (xpix >= 0)
+            & (xpix <= 128)
+            & (ypix >= 0)
+            & (ypix <= 128)
         )
 
         assert np.all(np.any(inside, axis=0))
         assert trace.meta["detector_angle"] == 25
         assert trace.meta["detector_pad"] == 10
+
+        padded_file = tmp_path / "echelle_trace_parameters_more_padding.dat"
+        _write_echelle_trace_params(
+            padded_file,
+            detector_angle=25,
+            detector_pad=30,
+        )
+        padded = EchelleSpectralTraceList(
+            cmds=_echelle_cmds(),
+            filename=str(padded_file),
+            wave_colname="wavelength",
+            s_colname="s",
+        )
+        padded_trace = next(iter(padded.spectral_traces.values()))
+
+        assert trace.wave_min == pytest.approx(padded_trace.wave_min)
+        assert trace.wave_max == pytest.approx(padded_trace.wave_max)
 
         unrotated_file = tmp_path / "echelle_trace_parameters_unrotated.dat"
         _write_echelle_trace_params(unrotated_file, detector_angle=0)
@@ -211,7 +228,7 @@ class TestEchelleSpectralTraceList:
         )
         unrotated_trace = next(iter(unrotated.spectral_traces.values()))
 
-        assert (
-            abs(trace.wave_min - unrotated_trace.wave_min) > 1e-8
-            or abs(trace.wave_max - unrotated_trace.wave_max) > 1e-8
-        )
+        assert trace.wave_min == pytest.approx(unrotated_trace.wave_min)
+        assert trace.wave_max == pytest.approx(unrotated_trace.wave_max)
+        assert not np.allclose(trace.table["x"], unrotated_trace.table["x"])
+        assert not np.allclose(trace.table["y"], unrotated_trace.table["y"])
