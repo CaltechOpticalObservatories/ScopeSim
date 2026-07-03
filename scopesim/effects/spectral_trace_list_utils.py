@@ -32,6 +32,23 @@ from ..utils import (power_vector, quantify, from_currsys, close_loop,
 logger = get_logger(__name__)
 
 
+def _clip_tiny_negative_trace_pixels(image: np.ndarray) -> int:
+    """Set floating-point roundoff-scale negative trace pixels to zero."""
+    if image is None or not np.issubdtype(image.dtype, np.floating):
+        return 0
+
+    negative = image < 0
+    if not np.any(negative):
+        return 0
+
+    finite = np.isfinite(image)
+    image_scale = np.nanmax(np.abs(image[finite])) if np.any(finite) else 0
+    tolerance = 128 * np.finfo(float).eps * max(float(image_scale), 1.0)
+    tiny_negative = negative & (image >= -tolerance)
+    image[tiny_negative] = 0
+    return int(np.sum(tiny_negative))
+
+
 def apply_detector_qe_to_trace_image(
     image: np.ndarray,
     detector_qe,
@@ -336,6 +353,7 @@ class SpectralTrace:
         img_header["YMAX"] = ymax
         img_header["BUNIT"] = "ph s-1"
 
+        _clip_tiny_negative_trace_pixels(image)
         if np.any(image < 0):
             logger.warning("map_spectra_to_focal_plane: %d negative pixels",
                            np.sum(image < 0))

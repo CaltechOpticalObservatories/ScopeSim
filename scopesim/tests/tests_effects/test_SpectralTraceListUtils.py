@@ -16,6 +16,7 @@ from scopesim.effects.spectral_trace_list_utils import SpectralTrace
 from scopesim.effects.spectral_trace_list_utils import Transform2D, power_vector
 from scopesim.effects.spectral_trace_list_utils import make_image_interpolations
 from scopesim.effects.spectral_trace_list_utils import apply_detector_qe_to_trace_image
+from scopesim.effects.spectral_trace_list_utils import _clip_tiny_negative_trace_pixels
 from scopesim.tests.mocks.py_objects import trace_list_objects as tlo
 
 class TestSpectralTrace:
@@ -115,6 +116,17 @@ def test_apply_detector_qe_to_trace_image_uses_detector_position():
         image, PositionAwareQE(), wave, detector_x, detector_y)
 
     np.testing.assert_allclose(result, [[0.5, 0.6], [0.7, 0.8]])
+
+
+def test_clip_tiny_negative_trace_pixels_only_clips_roundoff():
+    image = np.array([[1.0, -1e-15], [0.0, -1e-10]], dtype=float)
+
+    clipped = _clip_tiny_negative_trace_pixels(image)
+
+    assert clipped == 1
+    assert image[0, 1] == 0
+    assert image[1, 1] < 0
+
 
 class TestPowerVec:
     """Test function power_vector()"""
