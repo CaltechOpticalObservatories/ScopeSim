@@ -517,6 +517,47 @@ class SpectralTraceListWheel(Effect):
         return trace_list_eff
 
 
+def _warn_if_echelle_design_res_inconsistent(
+        prefix,
+        design_res,
+        echelle_angle,
+        pix_per_res_elem,
+        pix_size,
+        dispersion_focal_len,
+        tolerance=0.05):
+    """Warn if analytical order-center R is inconsistent with design_res."""
+    try:
+        design_res = float(design_res)
+        pix_per_res_elem = float(pix_per_res_elem)
+        pix_size = u.Quantity(pix_size).to(u.mm)
+        dispersion_focal_len = u.Quantity(dispersion_focal_len).to(u.mm)
+        echelle_angle_rad = u.Quantity(echelle_angle).to_value(u.rad)
+    except (TypeError, ValueError, u.UnitConversionError):
+        return
+    if (
+            not np.isfinite(design_res) or design_res <= 0
+            or not np.isfinite(pix_per_res_elem) or pix_per_res_elem <= 0
+            or dispersion_focal_len <= 0 * u.mm
+            or pix_size <= 0 * u.mm):
+        return
+
+    implied_res = (
+        2.0 * np.tan(echelle_angle_rad)
+        * (dispersion_focal_len / pix_size).to_value(u.dimensionless_unscaled)
+        / pix_per_res_elem
+    )
+    relative_delta = abs(implied_res - design_res) / design_res
+    if relative_delta > tolerance:
+        logger.warning(
+            "Analytical echelle row %s design_res %.0f differs from "
+            "order-center R %.0f implied by echelle angle, pixel size, "
+            "FWHM, and dispersion focal length.",
+            prefix,
+            design_res,
+            implied_res,
+        )
+
+
 class EchelleSpectralTraceList(SpectralTraceList):
     """
     SpectralTraceList effect for echelle spectrographs. Unlike SpectralTraceList, it generates the trace definitions
@@ -529,6 +570,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
     # max_wave_unit : nm
     # echelle_blaze_unit : deg
     # focal_length_unit : mm
+    # dispersion_focal_length_unit : mm
     # fwhm_unit : pixel
     # nominal_slit_width_unit : arcsec
     # plate_scale_unit : arcsec/mm
@@ -540,10 +582,10 @@ class EchelleSpectralTraceList(SpectralTraceList):
     # xdisp_freq_unit : mm
     # slitwidth_unit : arcsec
 
-    prefix    aperture_id    image_plane_id    m0    n    min_wave    max_wave   design_res    echelle_blaze    focal_length    fwhm    nominal_slit_width    plate_scale    detector_pad    pixel_size    n_disp    n_xdisp     disp_freq    xdisp_freq    slitwidth    dispdir
-    ub         0              2                29    11    315         515          20000        64.2             225             4.7     0.7                   10.0           10              0.015         4096      4096        200          1000          10           x
-    gri        1              1                36    18    490         1020         20000        64.2             225             4.7     0.7                   10.0           10              0.015         4096      4096        100          500           10           x
-    nIR        2              0                40    24    970         2500         20000        64.2             225             4.7     0.7                   10.0           10              0.015         4096      4096        45           175           10           x
+    prefix    aperture_id    image_plane_id    m0    n    min_wave    max_wave   design_res    echelle_blaze    focal_length    dispersion_focal_length    fwhm    nominal_slit_width    plate_scale    detector_pad    pixel_size    n_disp    n_xdisp     disp_freq    xdisp_freq    slitwidth    dispdir
+    ub         0              2                29    11    315         515          20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        200          1000          10           x
+    gri        1              1                36    18    490         1020         20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        100          500           10           x
+    nIR        2              0                40    24    970         2500         20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        45           175           10           x
     ----------------------------------------------------------------
 
     The calculated traces are stored in the same HDUList format as required by SpectralTraceList,
@@ -588,6 +630,13 @@ class EchelleSpectralTraceList(SpectralTraceList):
             max_wave = row['max_wave'] * u.Unit(trace_params.meta["max_wave_unit"])
             design_res = row['design_res']
             focal_len = row['focal_length'] * u.Unit(trace_params.meta["focal_length_unit"])
+            dispersion_focal_len = None
+            if "dispersion_focal_length" in trace_params.table.colnames:
+                dispersion_focal_len = row["dispersion_focal_length"] * u.Unit(
+                    trace_params.meta.get(
+                        "dispersion_focal_length_unit",
+                        trace_params.meta["focal_length_unit"],
+                    ))
             disp_npix = int(row['n_disp'])
             xdisp_npix = int(row['n_xdisp'])
             detector_pad = (
@@ -606,7 +655,16 @@ class EchelleSpectralTraceList(SpectralTraceList):
                                               design_res, echelle_angle, min_order, max_order,
                                               echelle_groove_length, pix_per_res_elem, disp_npix, xdisp_npix,
                                               pix_size, xdisp_groove_length=xdisp_groove_length,
-                                              xdisp_beta_center=xdisp_beta_center)
+                                              xdisp_beta_center=xdisp_beta_center,
+                                              dispersion_focal_len=dispersion_focal_len)
+            _warn_if_echelle_design_res_inconsistent(
+                prefix,
+                design_res,
+                echelle_angle,
+                pix_per_res_elem,
+                pix_size,
+                ss.dispersion_focal_length,
+            )
 
             slit_edge = (row['slitlength'] / 2) * u.Unit(trace_params.meta["slitlength_unit"])
             slit_pos = np.linspace(-slit_edge, slit_edge, num=3)
@@ -742,6 +800,9 @@ class EchelleSpectralTraceList(SpectralTraceList):
                     float(pix_per_res_elem), "Analytical nominal FWHM [pix]")
                 trace_hdu.header["PIXSIZE"] = (
                     pix_size.to_value(u.mm), "Detector pixel size [mm]")
+                trace_hdu.header["DISPFLEN"] = (
+                    ss.dispersion_focal_length.to_value(u.mm),
+                    "Effective echelle dispersion focal length [mm]")
                 trace_hdu.header["DETPAD"] = (
                     detector_pad, "Legacy detector padding [pix]; not applied")
                 trace_hdu.header["DETANG"] = (

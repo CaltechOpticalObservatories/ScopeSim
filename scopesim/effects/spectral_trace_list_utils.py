@@ -100,6 +100,7 @@ class SpectralTrace:
                 ("DESIGNR", "design_res"),
                 ("FWHMPIX", "nominal_fwhm_pix"),
                 ("PIXSIZE", "pixel_size"),
+                ("DISPFLEN", "dispersion_focal_length"),
                 ("SLITWID", "nominal_slit_width"),
                 ("PLTSCALE", "plate_scale"),
                 ("DETPAD", "detector_pad"),
