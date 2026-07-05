@@ -158,6 +158,15 @@ class OpticalTrain:
         #       Nevertheless, I'm a bit reluctant to removing this code just
         #       yet. So it is commented out.
         # rc.__currsys__ = user_commands
+
+        # Guard against all-empty cmds to avoid cryptical error downstream.
+        if all(len(m) == 0 for m in self.cmds.maps):
+            raise ValueError("Empty cmds, cannot construct OpticalTrain.")
+
+        # Guard against empty yamls to avoid cryptical error downstream.
+        if not self.cmds.yaml_dicts:
+            raise ValueError("No YAMLS found, cannot construct OpticalTrain.")
+
         self.yaml_dicts = self.cmds.yaml_dicts
         self.optics_manager = OpticsManager(self.yaml_dicts, self.cmds)
         self.update()
@@ -358,6 +367,7 @@ class OpticalTrain:
                 # ..todo: lower needed because "DEG" is not understood, this is ugly
                 pixarea = (header["CDELT1"] * u.Unit(header["CUNIT1"].lower()) *
                            header["CDELT2"] * u.Unit(header["CUNIT2"].lower())).to(u.arcsec**2)
+                pixarea = np.abs(pixarea)     # CDELTi can be negative, pixarea cannot
                 data = data / pixarea.value    # cube is per arcsec2
 
             data = (data * factor).value

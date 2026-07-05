@@ -2,6 +2,7 @@
 """Any kinds of electronic or photonic noise."""
 
 from typing import ClassVar
+from numbers import Real
 
 import numpy as np
 from astropy.io import fits
@@ -83,11 +84,13 @@ class PoorMansHxRGReadoutNoise(Effect):
         return det
 
     def plot(self, det, **kwargs):
+        """Plot effect image."""
         dtcr = self.apply_to(det)
         fig, ax = figure_factory()
         ax.imshow(dtcr.data, origin="lower")
 
     def plot_hist(self, det, **kwargs):
+        """Plot effect histogram."""
         dtcr = self.apply_to(det)
         fig, ax = figure_factory()
         ax.hist(dtcr.data.flatten())
@@ -124,18 +127,52 @@ class BasicReadoutNoise(Effect):
         return det
 
     def plot(self, det):
+        """Plot effect image."""
         dtcr = self.apply_to(det)
         fig, ax = figure_factory()
         ax.imshow(dtcr.data)
 
     def plot_hist(self, det, **kwargs):
+        """Plot effect histogram."""
         dtcr = self.apply_to(det)
         fig, ax = figure_factory()
         ax.hist(dtcr.data.flatten())
 
 
+# TODO: Is this really a "noise" effect? Sounds more like "electrons" tbh.
 class PixelResponseNonUniformity(Effect):
-    """Pixel response non-uniformity as a fixed multiplicative gain map."""
+    """Pixel Response Non-Uniformity (PRNU).
+
+    Models the fixed pattern of per-pixel gain variations across the detector
+    arising from manufacturing differences in quantum efficiency. Each pixel is
+    multiplied by a gain factor drawn from N(1, ``prnu_std``) keyed by detector
+    ID. The gain map is generated once per detector on first use and reused
+    identically across all subsequent exposures.
+
+    .. versionadded:: 0.11.3
+
+    Parameters
+    ----------
+    prnu_std : float or dict
+        Standard deviation of the per-pixel gain distribution.
+
+    prnu_seed : int, fixed
+
+    include:  "!DET.include_prnu"
+
+    Example
+    -------
+    ::
+
+       - name: prnu
+         description: Pixel response non-uniformity
+         class: PixelResponseNonUniformity
+         kwargs:
+           prnu_std: 0.001
+           prnu_seed: 42
+           include: "!DET.include_prnu"
+
+    """
 
     required_keys: ClassVar[set] = set()
     z_order: ClassVar[tuple[int, ...]] = (805,)
@@ -143,7 +180,7 @@ class PixelResponseNonUniformity(Effect):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.meta.update(kwargs)
-        self._gain_maps = {}
+        self._gain_maps = {}  # keyed by dtcr_id
 
     def apply_to(self, obj, **kwargs):
         if not isinstance(obj, Detector):
@@ -156,7 +193,7 @@ class PixelResponseNonUniformity(Effect):
         prnu_std_meta = from_currsys(self.meta["prnu_std"], self.cmds)
         if isinstance(prnu_std_meta, dict):
             prnu_std = float(from_currsys(prnu_std_meta[dtcr_id], self.cmds))
-        elif isinstance(prnu_std_meta, (int, float)):
+        elif isinstance(prnu_std_meta, Real):
             prnu_std = float(prnu_std_meta)
         else:
             raise TypeError(
@@ -253,11 +290,13 @@ class ShotNoise(Effect):
         return det
 
     def plot(self, det):
+        """Plot effect image."""
         dtcr = self.apply_to(det)
         fig, ax = figure_factory()
         ax.imshow(dtcr.data)
 
     def plot_hist(self, det, **kwargs):
+        """Plot effect histogram."""
         dtcr = self.apply_to(det)
         fig, ax = figure_factory()
         ax.hist(dtcr.data.flatten())
@@ -282,8 +321,8 @@ class DarkCurrent(Effect):
         if isinstance(from_currsys(self.meta["value"], self.cmds), dict):
             dtcr_id = obj.meta[real_colname("id", obj.meta)]
             dark = from_currsys(self.meta["value"][dtcr_id], self.cmds)
-        elif isinstance(from_currsys(self.meta["value"], self.cmds), float):
-            dark = from_currsys(self.meta["value"], self.cmds)
+        elif isinstance(from_currsys(self.meta["value"], self.cmds), Real):
+            dark = float(from_currsys(self.meta["value"], self.cmds))
         else:
             raise ValueError("<DarkCurrent>.meta['value'] must be either "
                              f"dict or float, but is {self.meta['value']}")
@@ -297,6 +336,7 @@ class DarkCurrent(Effect):
         return obj
 
     def plot(self, det, **kwargs):
+        """Plot effect."""
         dit = from_currsys(self.meta["dit"], self.cmds)
         ndit = from_currsys(self.meta["ndit"], self.cmds)
         total_time = dit * ndit

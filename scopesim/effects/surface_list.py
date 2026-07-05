@@ -11,7 +11,7 @@ from astropy import units as u
 
 from .ter_curves import TERCurve
 from ..optics.surface import PoorMansSurface, SpectralSurface
-from ..utils import quantify, from_currsys, figure_factory, real_colname
+from ..utils import quantify, from_currsys, figure_factory, real_colname, quantity_from_table
 
 
 class SurfaceList(TERCurve):
@@ -32,9 +32,13 @@ class SurfaceList(TERCurve):
         self.surfaces = OrderedDict({})
 
         if self.table is not None:
-            for row in self.table:
+            for i in range(len(self.table)):
                 surf_kwargs = deepcopy(self.table.meta)
-                surf_kwargs.update(dict(row))
+                rowdict = {
+                    colname: _row_quantity_or_value(self.table, colname, i)
+                    for colname in self.table.colnames
+                }
+                surf_kwargs.update(rowdict)
                 surf_kwargs["cmds"] = self.cmds
                 surf_kwargs["filename"] = from_currsys(surf_kwargs["filename"], self.cmds)
                 self.surfaces[surf_kwargs["name"]] = SpectralSurface(**surf_kwargs)
@@ -249,3 +253,11 @@ class SurfaceList(TERCurve):
         fig.legend()
 
         return fig
+
+
+def _row_quantity_or_value(table, colname, index):
+    col = table[colname]
+    value = col[index]
+    if col.unit is not None or f"{colname}_unit" in table.meta:
+        return quantity_from_table(colname, table)[index]
+    return value.item() if hasattr(value, "item") else value

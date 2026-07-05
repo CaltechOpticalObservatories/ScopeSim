@@ -9,6 +9,7 @@ Classes:
 - PoorMansHxRGReadoutNoise - simple readout noise for HAWAII detectors
 - BasicReadoutNoise - readout noise
 - ShotNoise - realisation of Poissonian photon noise
+- PixelResponseNonUniformity - per-pixel gain variation (PRNU)
 - DarkCurrent - add dark current
 - LinearityCurve - apply detector (non-)linearity and saturation
 - ReferencePixelBorder

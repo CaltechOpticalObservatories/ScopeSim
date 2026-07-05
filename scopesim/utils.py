@@ -32,6 +32,9 @@ from . import rc
 logger = get_logger(__name__)
 bug_logger = get_logger("bug_report")
 
+class ScopesimPendingDeprecationWarning(PendingDeprecationWarning):
+    """A scopesim-specific subclass of PendingDeprecationWarning"""
+
 
 def parallactic_angle(ha, de, lat=-24.589167):
     r"""
@@ -508,6 +511,8 @@ def quantity_from_table(colname: str, table: Table,
     col = table[colname]
     if col.unit is not None:
         return col.quantity
+    if col.dtype.kind not in 'iufc':
+        return col
 
     unit = unit_from_table(colname, table, default_unit)
     # TODO: or rather << ?
