@@ -806,7 +806,9 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 order_table = Table(
                     {'wavelength': w.to(u.um), 's': s,
                      'x': xval,
-                     'y': yval})
+                     'y': yval,
+                     'x_pix': xpix.ravel() * u.pixel,
+                     'y_pix': ypix.ravel() * u.pixel})
 
                 trace_hdu = fits.BinTableHDU(order_table)
                 trace_hdu.header['DISPDIR'] = row['dispdir']
