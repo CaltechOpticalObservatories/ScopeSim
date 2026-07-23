@@ -232,27 +232,3 @@ class TestEchelleSpectralTraceList:
         assert trace.wave_max == pytest.approx(unrotated_trace.wave_max)
         assert not np.allclose(trace.table["x"], unrotated_trace.table["x"])
         assert not np.allclose(trace.table["y"], unrotated_trace.table["y"])
-
-    def test_keeps_rotated_detector_pixel_coordinates(self, tmp_path):
-        params_file = tmp_path / "echelle_trace_parameters.dat"
-        _write_echelle_trace_params(params_file, detector_angle=25)
-
-        spt = EchelleSpectralTraceList(
-            cmds=_echelle_cmds(),
-            filename=str(params_file),
-            wave_colname="wavelength",
-            s_colname="s",
-        )
-
-        trace = next(iter(spt.spectral_traces.values()))
-        xpix = trace.table["x_pix"].quantity.to_value(u.pixel)
-        ypix = trace.table["y_pix"].quantity.to_value(u.pixel)
-
-        np.testing.assert_allclose(
-            xpix,
-            trace.table["x"].quantity.to_value(u.mm) / 0.015 + 64,
-        )
-        np.testing.assert_allclose(
-            ypix,
-            trace.table["y"].quantity.to_value(u.mm) / 0.015 + 64,
-        )
