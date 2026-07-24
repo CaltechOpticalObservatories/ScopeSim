@@ -214,6 +214,15 @@ class TestTraceDetectorCoordinates:
         assert coordinates["wavelength"].unit == u.um
         assert coordinates["detector_x"].unit == u.pixel
 
+    def test_accepts_unit_roundoff_at_configured_wavelength_boundary(self):
+        train, _ = spectral_geometry_train()
+        boundary = np.nextafter(1.0, 0.0) * u.um
+
+        coordinates = train.trace_detector_coordinates(
+            wavelengths={"linear": [boundary]})
+
+        assert coordinates["wavelength"][0] == boundary
+
     def test_uses_changed_live_trace_transform(self):
         train, trace_list = spectral_geometry_train()
         before = train.trace_detector_coordinates(

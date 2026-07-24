@@ -346,22 +346,30 @@ class OpticalTrain:
                         trace.table[trace.meta["wave_colname"]]
                     ).to_value(u.um)
                 )
-                configured = np.zeros(wave_um.shape, dtype=bool)
-                for wave_min, wave_max in fov_ranges:
-                    configured |= (
-                        (wave_um >= wave_min) & (wave_um <= wave_max))
-                wave_um = wave_um[configured]
             else:
                 wave_um = np.atleast_1d(
                     u.Quantity(wavelengths[trace_id]).to_value(u.um))
-                configured = np.zeros(wave_um.shape, dtype=bool)
-                for wave_min, wave_max in fov_ranges:
-                    configured |= (
-                        (wave_um >= wave_min) & (wave_um <= wave_max))
-                if not np.all(configured):
-                    raise ValueError(
-                        f"Requested wavelengths for trace {trace_name!r} "
-                        "extend outside its configured FOV range.")
+
+            configured = np.zeros(wave_um.shape, dtype=bool)
+            for wave_min, wave_max in fov_ranges:
+                configured |= (
+                    (
+                        (wave_um >= wave_min)
+                        | np.isclose(
+                            wave_um, wave_min, rtol=1e-12, atol=0)
+                    )
+                    & (
+                        (wave_um <= wave_max)
+                        | np.isclose(
+                            wave_um, wave_max, rtol=1e-12, atol=0)
+                    )
+                )
+            if wavelengths is None:
+                wave_um = wave_um[configured]
+            elif not np.all(configured):
+                raise ValueError(
+                    f"Requested wavelengths for trace {trace_name!r} "
+                    "extend outside its configured FOV range.")
 
             wave_grid, xi_grid = np.meshgrid(wave_um, xi_arcsec)
             x_mm = trace.xilam2x(
