@@ -139,19 +139,24 @@ def spectral_geometry_train(detector_count=1):
     train = OpticalTrain()
     train.optics_manager = SimpleNamespace(
         get_all=lambda effect_class: [trace_list],
+        image_plane_effects=[],
+        detector_array_effects=[],
         detector_effects=[],
     )
+    train.image_planes = [ImagePlane(detector_list.image_plane_header)]
     train.fov_manager = SimpleNamespace(fovs=[
         SimpleNamespace(
             trace_id="linear",
+            detector_header=train.image_planes[0].header,
             meta={
                 "image_plane_id": 0,
                 "wave_min": 1 * u.um,
                 "wave_max": 2 * u.um,
+                "xi_min": -1 * u.arcsec,
+                "xi_max": 1 * u.arcsec,
             },
         ),
     ])
-    train.image_planes = [ImagePlane(detector_list.image_plane_header)]
     train.detector_managers = [DetectorManager(detector_list)]
     return train, trace_list
 
@@ -200,8 +205,21 @@ class TestTraceDetectorCoordinates:
 
         assert coordinates["trace_id"][0] == "linear"
         assert coordinates["readout_index"][0] == 0
-        assert coordinates["detector_x"][0].to_value(u.pixel) == approx(49.5)
-        assert coordinates["detector_y"][0].to_value(u.pixel) == approx(39.5)
+        assert coordinates["detector_x"][0].to_value(u.pixel) == approx(49)
+        assert coordinates["detector_y"][0].to_value(u.pixel) == approx(39)
+
+    def test_includes_renderer_endpoint_sampling(self):
+        train, _ = spectral_geometry_train()
+
+        coordinates = train.trace_detector_coordinates(
+            wavelengths={"linear": [1.25] * u.um})
+
+        # The rendered subimage samples -0.65..0.65 mm at 13 inclusive
+        # positions. The trace's -0.25 mm point therefore lands here, rather
+        # than at the ideal detector-WCS coordinate x=47.
+        expected_x = 43 + (-0.25 + 0.65) / (0.65 + 0.65) * 12
+        assert coordinates["detector_x"][0].to_value(u.pixel) == approx(
+            expected_x)
 
     def test_returns_all_trace_wavelengths_and_requested_slit_positions(self):
         train, _ = spectral_geometry_train()

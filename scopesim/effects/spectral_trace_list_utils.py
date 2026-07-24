@@ -207,19 +207,8 @@ class SpectralTrace:
             logger.info(
                 "Dispersion axis determined to be %s", self.dispersion_axis)
 
-    def map_spectra_to_focal_plane(self, fov):
-        """
-        Apply the spectral trace mapping to a spectral cube.
-
-        The cube is contained in a FieldOfView object, which also has
-        world coordinate systems for the Source (sky coordinates and
-        wavelengths) and for the focal plane.
-        The method returns a section of the fov image along with info on
-        where this image lies in the focal plane.
-        """
-        logger.debug("Mapping %s", fov.trace_id)
-        # Initialise the image based on the footprint of the spectral
-        # trace and the focal plane WCS
+    def _focal_plane_grid(self, fov):
+        """Return the exact focal-plane grid used to rasterize this FOV."""
         wave_min = fov.meta["wave_min"].value       # [um]
         wave_max = fov.meta["wave_max"].value       # [um]
         xi_min = fov.meta["xi_min"].value           # [arcsec]
@@ -231,15 +220,7 @@ class SpectralTrace:
             logger.warning("xlim_mm is None")
             return None
 
-        fov_header = fov.header
         det_header = fov.detector_header
-
-        # WCSD from the FieldOfView - this is the full detector plane
-        pixsize = det_header["CDELT1D"] * u.Unit(det_header["CUNIT1D"])
-        pixsize = pixsize.to_value(u.mm)
-        pixscale = fov_header["CDELT1"] * u.Unit(fov_header["CUNIT1"])
-        pixscale = pixscale.to_value(u.arcsec)
-
         fpa_wcsd = WCS(det_header, key="D")
         naxis1d, naxis2d = det_header["NAXIS1"], det_header["NAXIS2"]
         xlim_px, ylim_px = fpa_wcsd.all_world2pix(xlim_mm, ylim_mm, 0)
@@ -260,22 +241,49 @@ class SpectralTrace:
         ymin = max(ymin, 0)
         ymax = min(ymax, naxis2d)
 
-        # Create header for the subimage - I think this only needs the DET one,
-        # but we'll do both. The WCSs are initialised from the full fpa WCS and
-        # then shifted accordingly.
         det_wcs = WCS(det_header, key="D")
         det_wcs.wcs.crpix -= np.array([xmin, ymin])
 
         sub_naxis1 = xmax - xmin
         sub_naxis2 = ymax - ymin
-
-        # initialise the subimage
-        image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float32)
-
-        # Adjust the limits of the subimage in millimeters in the focal plane
-        # This takes the adjustment to integer pixels into account
         xmin_mm, ymin_mm = fpa_wcsd.all_pix2world(xmin, ymin, 0)
         xmax_mm, ymax_mm = fpa_wcsd.all_pix2world(xmax, ymax, 0)
+
+        x_mm = np.linspace(xmin_mm, xmax_mm, sub_naxis1, dtype=np.float32)
+        y_mm = np.linspace(ymin_mm, ymax_mm, sub_naxis2, dtype=np.float32)
+        return xmin, ymin, x_mm, y_mm, det_wcs
+
+    def map_spectra_to_focal_plane(self, fov):
+        """
+        Apply the spectral trace mapping to a spectral cube.
+
+        The cube is contained in a FieldOfView object, which also has
+        world coordinate systems for the Source (sky coordinates and
+        wavelengths) and for the focal plane.
+        The method returns a section of the fov image along with info on
+        where this image lies in the focal plane.
+        """
+        logger.debug("Mapping %s", fov.trace_id)
+        wave_min = fov.meta["wave_min"].value       # [um]
+        wave_max = fov.meta["wave_max"].value       # [um]
+        xi_min = fov.meta["xi_min"].value           # [arcsec]
+        xi_max = fov.meta["xi_max"].value           # [arcsec]
+        fov_header = fov.header
+        det_header = fov.detector_header
+        pixsize = det_header["CDELT1D"] * u.Unit(det_header["CUNIT1D"])
+        pixsize = pixsize.to_value(u.mm)
+        pixscale = fov_header["CDELT1"] * u.Unit(fov_header["CUNIT1"])
+        pixscale = pixscale.to_value(u.arcsec)
+
+        focal_plane_grid = self._focal_plane_grid(fov)
+        if focal_plane_grid is None:
+            return None
+        xmin, ymin, x_mm, y_mm, det_wcs = focal_plane_grid
+        sub_naxis1 = len(x_mm)
+        sub_naxis2 = len(y_mm)
+        xmax = xmin + sub_naxis1
+        ymax = ymin + sub_naxis2
+        image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float32)
 
         self._set_dispersion(wave_min, wave_max, pixsize=pixsize)
         try:
@@ -288,12 +296,7 @@ class SpectralTrace:
         xilam_wcs = xilam.wcs
 
         # focal-plane coordinate images
-        ximg_fpa, yimg_fpa = np.meshgrid(np.linspace(xmin_mm, xmax_mm,
-                                                     sub_naxis1,
-                                                     dtype=np.float32),
-                                         np.linspace(ymin_mm, ymax_mm,
-                                                     sub_naxis2,
-                                                     dtype=np.float32))
+        ximg_fpa, yimg_fpa = np.meshgrid(x_mm, y_mm)
 
         # Image mapping (xi, lambda) on the focal plane
         xi_fpa = self.xy2xi(ximg_fpa, yimg_fpa).astype(np.float32)

@@ -216,7 +216,9 @@ class OpticalTrain:
         sampled at the wavelengths carried by its trace table. A mapping of
         ``trace_id: wavelength`` arrays can instead request exact wavelengths.
         The returned detector coordinates are continuous, zero-origin pixel
-        coordinates. No observation or image data are used.
+        coordinates after the trace subimage rasterization, image-plane
+        placement, and detector extraction conventions. No observation or
+        image data are used.
 
         This deliberately supports one spectral-trace list and one detector
         per image plane. More complicated detector arrangements need an
@@ -237,6 +239,15 @@ class OpticalTrain:
                 "SpectralTraceList.")
         trace_list = trace_lists[0]
 
+        if self.optics_manager.image_plane_effects:
+            raise NotImplementedError(
+                "Trace detector coordinates do not yet support image-plane "
+                "effects.")
+        if self.optics_manager.detector_array_effects:
+            raise NotImplementedError(
+                "Trace detector coordinates do not yet support detector-array "
+                "effects.")
+
         fovs_by_trace = {}
         for fov in self.fov_manager.fovs:
             fovs_by_trace.setdefault(str(fov.trace_id), []).append(fov)
@@ -248,6 +259,17 @@ class OpticalTrain:
 
         xi_arcsec = np.atleast_1d(
             u.Quantity(xi, u.arcsec).to_value(u.arcsec))
+
+        def image_origin_on_canvas(shape_xy, image_wcs, canvas_wcs):
+            """Mirror add_imagehdu_to_imagehdu and overlay_image placement."""
+            image_center = (shape_xy - 1) / 2
+            world_center = image_wcs.all_pix2world([image_center], 0)
+            canvas_center = canvas_wcs.all_world2pix(world_center, 0)[0]
+            return (
+                np.ceil(np.round(canvas_center, 10)).astype(int)
+                - shape_xy // 2
+            )
+
         columns = {
             "readout_index": [],
             "image_plane_id": [],
@@ -288,6 +310,7 @@ class OpticalTrain:
                     "image plane and detector manager.")
 
             readout_index, detector_manager = detector_managers[0]
+            image_plane = image_planes[0]
             if len(detector_manager) != 1:
                 raise NotImplementedError(
                     "Trace detector coordinates do not yet support multiple "
@@ -297,7 +320,7 @@ class OpticalTrain:
 
             for effect in self.optics_manager.detector_effects:
                 selected_effect = (
-                    effect.get_effect(detector_id)
+                    effect.wheel_effects.get(detector_id)
                     if isinstance(effect, SelectorWheel)
                     else effect
                 )
@@ -328,56 +351,122 @@ class OpticalTrain:
                             "post-extraction detector rotation.")
 
             detector_wcs = WCS(detector.header, key="D")
-            if not np.allclose(detector_wcs.wcs.pc, np.eye(2)):
+            image_plane_wcs = image_plane._det_wcs
+            if (
+                not np.allclose(image_plane_wcs.wcs.pc, np.eye(2))
+                or not np.allclose(detector_wcs.wcs.pc, np.eye(2))
+            ):
                 raise NotImplementedError(
-                    "Trace detector coordinates do not yet support a rotated "
-                    "or sheared detector D-WCS.")
+                    "Trace detector coordinates do not yet support rotated "
+                    "or sheared image-plane or detector D-WCSs.")
+            if not np.allclose(
+                np.abs(image_plane_wcs.wcs.cdelt[:2]),
+                np.abs(detector_wcs.wcs.cdelt[:2]),
+            ):
+                raise NotImplementedError(
+                    "Trace detector coordinates do not yet support rescaling "
+                    "between image-plane and detector pixels.")
 
-            fov_ranges = [
-                (
-                    fov.meta["wave_min"].to_value(u.um),
-                    fov.meta["wave_max"].to_value(u.um),
-                )
-                for fov in trace_fovs
-            ]
+            image_plane_shape = np.array([
+                image_plane.header["NAXIS1"],
+                image_plane.header["NAXIS2"],
+            ])
+            detector_origin = image_origin_on_canvas(
+                image_plane_shape, image_plane_wcs, detector_wcs)
+
             if wavelengths is None:
                 wave_um = np.unique(
                     u.Quantity(
                         trace.table[trace.meta["wave_colname"]]
                     ).to_value(u.um)
                 )
+                configured = np.zeros(wave_um.shape, dtype=bool)
+                for fov in trace_fovs:
+                    wave_min = fov.meta["wave_min"].to_value(u.um)
+                    wave_max = fov.meta["wave_max"].to_value(u.um)
+                    configured |= (
+                        (wave_um >= wave_min) & (wave_um <= wave_max))
+                wave_um = wave_um[configured]
             else:
                 wave_um = np.atleast_1d(
                     u.Quantity(wavelengths[trace_id]).to_value(u.um))
 
-            configured = np.zeros(wave_um.shape, dtype=bool)
-            for wave_min, wave_max in fov_ranges:
-                configured |= (
+            wave_grid, xi_grid = np.meshgrid(wave_um, xi_arcsec)
+            wave_flat = wave_grid.ravel()
+            xi_flat = xi_grid.ravel()
+            x_pix = np.empty(wave_flat.shape)
+            y_pix = np.empty(wave_flat.shape)
+            mapped_points = np.zeros(wave_flat.shape, dtype=bool)
+
+            for fov in trace_fovs:
+                wave_min = fov.meta["wave_min"].to_value(u.um)
+                wave_max = fov.meta["wave_max"].to_value(u.um)
+                in_fov = (
                     (
-                        (wave_um >= wave_min)
+                        (wave_flat >= wave_min)
                         | np.isclose(
-                            wave_um, wave_min, rtol=1e-12, atol=0)
+                            wave_flat, wave_min, rtol=1e-12, atol=0)
                     )
                     & (
-                        (wave_um <= wave_max)
+                        (wave_flat <= wave_max)
                         | np.isclose(
-                            wave_um, wave_max, rtol=1e-12, atol=0)
+                            wave_flat, wave_max, rtol=1e-12, atol=0)
                     )
                 )
-            if wavelengths is None:
-                wave_um = wave_um[configured]
-            elif not np.all(configured):
+                if not np.any(in_fov):
+                    continue
+                if np.any(mapped_points & in_fov):
+                    raise NotImplementedError(
+                        f"Trace {trace_name!r} has overlapping FOV wavelength "
+                        "ranges.")
+
+                (
+                    _,
+                    _,
+                    x_grid_mm,
+                    y_grid_mm,
+                    subimage_wcs,
+                ) = trace._focal_plane_grid(fov)
+                if (
+                    not np.allclose(subimage_wcs.wcs.pc, np.eye(2))
+                    or not np.allclose(
+                        np.abs(subimage_wcs.wcs.cdelt[:2]),
+                        np.abs(image_plane_wcs.wcs.cdelt[:2]),
+                    )
+                ):
+                    raise NotImplementedError(
+                        "Trace detector coordinates do not yet support "
+                        "rescaling or reorientation during image-plane "
+                        "placement.")
+
+                x_mm = trace.xilam2x(xi_flat[in_fov], wave_flat[in_fov])
+                y_mm = trace.xilam2y(xi_flat[in_fov], wave_flat[in_fov])
+                subimage_x = (
+                    (x_mm - x_grid_mm[0])
+                    / (x_grid_mm[-1] - x_grid_mm[0])
+                    * (len(x_grid_mm) - 1)
+                )
+                subimage_y = (
+                    (y_mm - y_grid_mm[0])
+                    / (y_grid_mm[-1] - y_grid_mm[0])
+                    * (len(y_grid_mm) - 1)
+                )
+
+                subimage_shape = np.array(
+                    [len(x_grid_mm), len(y_grid_mm)])
+                image_plane_origin = image_origin_on_canvas(
+                    subimage_shape, subimage_wcs, image_plane_wcs)
+                image_plane_x = image_plane_origin[0] + subimage_x
+                image_plane_y = image_plane_origin[1] + subimage_y
+
+                x_pix[in_fov] = detector_origin[0] + image_plane_x
+                y_pix[in_fov] = detector_origin[1] + image_plane_y
+                mapped_points |= in_fov
+
+            if not np.all(mapped_points):
                 raise ValueError(
                     f"Requested wavelengths for trace {trace_name!r} "
-                    "extend outside its configured FOV range.")
-
-            wave_grid, xi_grid = np.meshgrid(wave_um, xi_arcsec)
-            x_mm = trace.xilam2x(
-                xi_grid.ravel(), wave_grid.ravel())
-            y_mm = trace.xilam2y(
-                xi_grid.ravel(), wave_grid.ravel())
-            x_pix, y_pix = detector_wcs.all_world2pix(
-                x_mm, y_mm, 0)
+                    "do not map through a configured FOV.")
 
             point_count = wave_grid.size
             columns["readout_index"].extend(
