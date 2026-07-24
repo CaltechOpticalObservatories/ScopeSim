@@ -2,11 +2,13 @@
 
 import copy
 import os
+from collections.abc import Mapping
 from datetime import datetime
 
 import numpy as np
 from scipy.interpolate import interp1d
 from astropy import units as u
+from astropy.table import QTable
 from astropy.wcs import WCS
 
 from tqdm.auto import tqdm
@@ -204,6 +206,195 @@ class OpticalTrain:
         # TODO: or is it??
         self.cmds.maps[1].dic = recursive_update(self.cmds.maps[1].dic, self.cmds.maps[0].dic)
         self.cmds.maps[0].dic.clear()
+
+    def trace_detector_coordinates(self, *, xi=0 * u.arcsec,
+                                   wavelengths: Mapping | None = None) -> QTable:
+        """
+        Return slit coordinates mapped to the configured detector pixels.
+
+        With no wavelength argument, every configured spectral trace is
+        sampled at the wavelengths carried by its trace table. A mapping of
+        ``trace_id: wavelength`` arrays can instead request exact wavelengths.
+        The returned detector coordinates are continuous, zero-origin pixel
+        coordinates. No observation or image data are used.
+
+        This deliberately supports one spectral-trace list and one detector
+        per image plane. More complicated detector arrangements need an
+        explicit definition of which output image owns each trace coordinate.
+        """
+        from ..effects import (
+            BinnedImage,
+            Rotate90CCD,
+            SelectorWheel,
+            SpectralTraceList,
+            UnequalBinnedImage,
+        )
+
+        trace_lists = self.optics_manager.get_all(SpectralTraceList)
+        if len(trace_lists) != 1:
+            raise NotImplementedError(
+                "Trace detector coordinates require exactly one active "
+                "SpectralTraceList.")
+        trace_list = trace_lists[0]
+
+        fovs_by_trace = {}
+        for fov in self.fov_manager.fovs:
+            fovs_by_trace.setdefault(str(fov.trace_id), []).append(fov)
+
+        if wavelengths is None:
+            trace_ids = list(trace_list.spectral_traces)
+        else:
+            trace_ids = list(wavelengths)
+
+        xi_arcsec = np.atleast_1d(
+            u.Quantity(xi, u.arcsec).to_value(u.arcsec))
+        columns = {
+            "readout_index": [],
+            "image_plane_id": [],
+            "detector_id": [],
+            "trace_id": [],
+            "wavelength": [],
+            "xi": [],
+            "detector_x": [],
+            "detector_y": [],
+        }
+
+        for trace_id in trace_ids:
+            trace = trace_list.spectral_traces[trace_id]
+            trace_name = str(trace_id)
+            trace_fovs = fovs_by_trace[trace_name]
+            image_plane_id = int(trace.meta["image_plane_id"])
+
+            if any(int(fov.meta["image_plane_id"]) != image_plane_id
+                   for fov in trace_fovs):
+                raise NotImplementedError(
+                    f"Trace {trace_name!r} has conflicting image-plane "
+                    "assignments.")
+
+            image_planes = [
+                image_plane for image_plane in self.image_planes
+                if image_plane.id == image_plane_id
+            ]
+            detector_managers = [
+                (index, manager)
+                for index, manager in enumerate(self.detector_managers)
+                if int(from_currsys(
+                    manager._detector_list.image_plane_id, self.cmds
+                )) == image_plane_id
+            ]
+            if len(image_planes) != 1 or len(detector_managers) != 1:
+                raise NotImplementedError(
+                    f"Trace {trace_name!r} does not resolve to exactly one "
+                    "image plane and detector manager.")
+
+            readout_index, detector_manager = detector_managers[0]
+            if len(detector_manager) != 1:
+                raise NotImplementedError(
+                    "Trace detector coordinates do not yet support multiple "
+                    "detectors on one image plane.")
+            detector = detector_manager[0]
+            detector_id = detector.header["ID"]
+
+            for effect in self.optics_manager.detector_effects:
+                selected_effect = (
+                    effect.get_effect(detector_id)
+                    if isinstance(effect, SelectorWheel)
+                    else effect
+                )
+                if selected_effect is None:
+                    continue
+                if isinstance(selected_effect, BinnedImage):
+                    bin_size = from_currsys(
+                        selected_effect.meta["bin_size"], self.cmds)
+                    if bin_size != 1:
+                        raise NotImplementedError(
+                            "Trace detector coordinates do not yet support "
+                            "post-extraction detector binning.")
+                if isinstance(selected_effect, UnequalBinnedImage):
+                    binx = from_currsys(
+                        selected_effect.meta["binx"], self.cmds)
+                    biny = from_currsys(
+                        selected_effect.meta["biny"], self.cmds)
+                    if binx != 1 or biny != 1:
+                        raise NotImplementedError(
+                            "Trace detector coordinates do not yet support "
+                            "post-extraction detector binning.")
+                if isinstance(selected_effect, Rotate90CCD):
+                    rotations = from_currsys(
+                        selected_effect.meta["rotations"], self.cmds)
+                    if rotations % 4:
+                        raise NotImplementedError(
+                            "Trace detector coordinates do not yet support "
+                            "post-extraction detector rotation.")
+
+            detector_wcs = WCS(detector.header, key="D")
+            if not np.allclose(detector_wcs.wcs.pc, np.eye(2)):
+                raise NotImplementedError(
+                    "Trace detector coordinates do not yet support a rotated "
+                    "or sheared detector D-WCS.")
+
+            fov_ranges = [
+                (
+                    fov.meta["wave_min"].to_value(u.um),
+                    fov.meta["wave_max"].to_value(u.um),
+                )
+                for fov in trace_fovs
+            ]
+            if wavelengths is None:
+                wave_um = np.unique(
+                    u.Quantity(
+                        trace.table[trace.meta["wave_colname"]]
+                    ).to_value(u.um)
+                )
+                configured = np.zeros(wave_um.shape, dtype=bool)
+                for wave_min, wave_max in fov_ranges:
+                    configured |= (
+                        (wave_um >= wave_min) & (wave_um <= wave_max))
+                wave_um = wave_um[configured]
+            else:
+                wave_um = np.atleast_1d(
+                    u.Quantity(wavelengths[trace_id]).to_value(u.um))
+                configured = np.zeros(wave_um.shape, dtype=bool)
+                for wave_min, wave_max in fov_ranges:
+                    configured |= (
+                        (wave_um >= wave_min) & (wave_um <= wave_max))
+                if not np.all(configured):
+                    raise ValueError(
+                        f"Requested wavelengths for trace {trace_name!r} "
+                        "extend outside its configured FOV range.")
+
+            wave_grid, xi_grid = np.meshgrid(wave_um, xi_arcsec)
+            x_mm = trace.xilam2x(
+                xi_grid.ravel(), wave_grid.ravel())
+            y_mm = trace.xilam2y(
+                xi_grid.ravel(), wave_grid.ravel())
+            x_pix, y_pix = detector_wcs.all_world2pix(
+                x_mm, y_mm, 0)
+
+            point_count = wave_grid.size
+            columns["readout_index"].extend(
+                np.full(point_count, readout_index))
+            columns["image_plane_id"].extend(
+                np.full(point_count, image_plane_id))
+            columns["detector_id"].extend(
+                np.full(point_count, detector_id))
+            columns["trace_id"].extend(
+                np.full(point_count, trace_name))
+            columns["wavelength"].extend(wave_grid.ravel())
+            columns["xi"].extend(xi_grid.ravel())
+            columns["detector_x"].extend(x_pix)
+            columns["detector_y"].extend(y_pix)
+
+        table = QTable()
+        table["readout_index"] = columns["readout_index"]
+        table["image_plane_id"] = columns["image_plane_id"]
+        table["detector_id"] = columns["detector_id"]
+        table["trace_id"] = columns["trace_id"]
+        table["wavelength"] = columns["wavelength"] * u.um
+        table["xi"] = columns["xi"] * u.arcsec
+        table["detector_x"] = columns["detector_x"] * u.pixel
+        table["detector_y"] = columns["detector_y"] * u.pixel
+        return table
 
     @top_level_catch
     def observe(self, orig_source=None, update=True, **kwargs):
