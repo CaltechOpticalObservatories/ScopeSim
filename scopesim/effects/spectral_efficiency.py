@@ -157,11 +157,9 @@ class EchelleSpectralEfficiency(Effect):
             focal_len = row['focal_length'] * u.Unit(trace_params.meta["focal_length_unit"])
             dispersion_focal_len = None
             if "dispersion_focal_length" in trace_params.colnames:
-                dispersion_focal_len = row["dispersion_focal_length"] * u.Unit(
-                    trace_params.meta.get(
-                        "dispersion_focal_length_unit",
-                        trace_params.meta["focal_length_unit"],
-                    ))
+                dispersion_focal_len = (row["dispersion_focal_length"] *
+                                        u.Unit(trace_params.meta.get("dispersion_focal_length_unit",
+                                                                     trace_params.meta["focal_length_unit"])))
             disp_npix = row['n_disp'] - 2 * row['detector_pad']
             xdisp_npix = row['n_xdisp']- 2 * row['detector_pad']
             pix_size = row['pixel_size'] * u.Unit(trace_params.meta["pixel_size_unit"])
