@@ -135,6 +135,7 @@ class EchelleSpectralEfficiency(Effect):
     """
     Spectral efficiency list from analytical calculations of the blaze function for ZShooter gratings.
     Requires same input trace parameter table as EchelleSpectralTraceList, supply as kwarg "filename"
+    ``m0`` is the highest order number and ``n`` is the number of orders.
     """
     z_order: ClassVar[tuple[int, ...]] = (630,)
 
@@ -149,7 +150,7 @@ class EchelleSpectralEfficiency(Effect):
         spectrographs = {}
         for row in trace_params:
             prefix = row["prefix"]  # note trance ids are assumed to be prefix_{order}
-            min_order = row['m0'] - row['n']
+            min_order = row['m0'] - row['n'] + 1
             max_order = row['m0']
             min_wave = row['min_wave'] * u.Unit(trace_params.meta["min_wave_unit"])
             max_wave = row['max_wave'] * u.Unit(trace_params.meta["max_wave_unit"])

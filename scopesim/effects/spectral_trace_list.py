@@ -580,6 +580,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
     SpectralTraceList effect for echelle spectrographs. Unlike SpectralTraceList, it generates the trace definitions
     instead of loading them from FITS file. The arguments required to define the echelle traces are supplied through
     a txt file containing a table of parameters using the filename kwarg.
+    ``m0`` is the highest order number and ``n`` is the number of orders.
 
     Below is an example of how to define the echelle trace parameters (see irdb/ZShooter_v1/traces/echelle_trace_parameters.txt):
     ----------------------------------------------------------------
@@ -641,7 +642,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
         trace_ids, ap_ids, im_ids = [], [], []
         for row in trace_params.table:
             prefix = row["prefix"]
-            min_order = row['m0'] - row['n']
+            min_order = row['m0'] - row['n'] + 1
             max_order = row['m0']
             min_wave = row['min_wave'] * u.Unit(trace_params.meta["min_wave_unit"])
             max_wave = row['max_wave'] * u.Unit(trace_params.meta["max_wave_unit"])
