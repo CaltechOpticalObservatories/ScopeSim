@@ -269,7 +269,7 @@ class MoffatPSF(AnalyticalPSF):
             fwhm = self.meta["fwhm"]
             if check_keys(fwhm, {"seeing", "seeing_unit", "pivot_wave", "pivot_wave_unit"}, action="warn"):
                 logger.info("seeing and pivot supplied, using natural scale seeing law")
-                target, location, time = get_observation_info_from_cmds(self.cmds)
+                target, location, time, _ = get_observation_info_from_cmds(self.cmds)
                 zenith_angle = get_zenith_angle(target, location, time)
 
                 return partial(self.natural_scale, seeing=fwhm["seeing"]*u.Unit(fwhm["seeing_unit"]),

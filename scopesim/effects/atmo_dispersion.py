@@ -218,7 +218,7 @@ class ADShift(ShiftFoV3D):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
+        self.target, self.location, self.time, _ = get_observation_info_from_cmds(self.cmds)
 
         self.zenith_angle = get_zenith_angle(self.target, self.location, self.time) * u.deg
 
@@ -298,7 +298,7 @@ class ADCShift(ShiftFoV3D):
         if 'filename' not in kwargs and 'zenith_angle_error' not in kwargs:
             raise ValueError("Residuals must be supplied through either filename or zenith_angle_error.")
 
-        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
+        self.target, self.location, self.time, _ = get_observation_info_from_cmds(self.cmds)
 
         self.zenith_angle = get_zenith_angle(self.target, self.location, self.time) * u.deg
         self._ad_shift_cache_key = None

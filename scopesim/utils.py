@@ -1046,7 +1046,7 @@ def get_observation_info_from_cmds(cmds):
     :param cmds: output dict from UserCommands
     :return: (target: SkyCoord, location: EarthLocation, time: Time)
     """
-    location, time, target = None, None, None
+    location, time, brightness, target = None, None, None, None
 
     if check_keys(cmds, {"!ATMO.longitude", "!ATMO.latitude", "!ATMO.altitude"}, action="error"):
         location = get_location(lon=from_currsys("!ATMO.longitude", cmds),
@@ -1059,6 +1059,7 @@ def get_observation_info_from_cmds(cmds):
             logger.info(f'Using !OBS.mjdobs {time_str} for observation time')
         else:
             time_str = from_currsys("!OBS.brightness", cmds)
+            brightness = time_str
             logger.info(f'Using !OBS.brightness {time_str} for observation time')
         time = resolve_time(time_str, location=location)
 
@@ -1068,12 +1069,12 @@ def get_observation_info_from_cmds(cmds):
         try:
             target_kwargs[k] = from_currsys(v, cmds)
         except:
-            logger.warning(f'Target coord {v} not set in !OBS config.')
+            logger.debug(f'Target coord {v} not set in !OBS config.')
             target_kwargs[k] = None
     target_kwargs["obstime"] = time
     target_kwargs["location"] = location
     target = get_target(**target_kwargs)
-    return target, location, time
+    return target, location, time, brightness
 
 def get_target(alt: float = None,
                az: float = 0,
@@ -1154,8 +1155,12 @@ def is_night(obstime: Time, location: EarthLocation, return_midnight: bool = Tru
             return False
     return True
 
+def get_local_time(time: Time, location: EarthLocation) -> Time:
+    utcoffset = (location.lon.deg / 15.) * u.hour
+    return time + utcoffset
 
-def resolve_time(time_str, location: EarthLocation | None = None):
+def resolve_time(time_str: int | float | Literal['bright', 'gray', 'grey', 'dark'] | str,
+                 location: EarthLocation | None = None):
     """
     Parses the time input.
     Checks if the time is in MJD, or ISOT format, or indicates sky brightness ["bright", "gray", "dark"].
@@ -1185,7 +1190,7 @@ def resolve_time(time_str, location: EarthLocation | None = None):
 
     if t is None:
         kw = {"bright":"full", "gray":"half", "dark":"new"}
-        t = Time(get_next_moon(kw[time_str]), format="isot", location=location)
+        t = Time(get_next_moon(kw[time_str], location), format="isot", location=location)
 
     # check if t is at night
     if location is not None:
@@ -1210,7 +1215,7 @@ def get_moon_phase(time: Time, get_elongation=False):
         else:
             return np.arctan2(sun.distance * np.sin(elongation), moon.distance - sun.distance * np.cos(elongation))
     else:
-        raise ValueError(f"Invalid time type: {type(time)}, should be astropy Time object.")
+        raise ValueError(f"Invalid input, should be astropy Time object, got {type(time)} instead.")
 
 def get_moon_fli(phase_angle: u.Quantity):
     """
@@ -1222,33 +1227,42 @@ def get_moon_fli(phase_angle: u.Quantity):
     else:
         raise ValueError(f"Invalid phase angle type: {type(phase_angle)}, should be astropy Quantity object with angle units.")
 
-def get_next_moon(moontype="full"):
+def get_next_moon(moontype="full", location: EarthLocation = None):
     """
     Get time of the next closest moon phase of given moon type (full, half or new).
     """
+    geodetic = location.to_geodetic()
+    location_key = (float(geodetic.lon.to_value(u.deg)), float(geodetic.lat.to_value(u.deg)),
+                    float(geodetic.height.to_value(u.m)))
     today = Time.now().isot.split("T")[0]
-    return _get_next_moon_cached(moontype, today)
-
+    return _get_next_moon_cached(moontype, today, location_key)
 
 @functools.lru_cache(maxsize=32)
-def _get_next_moon_cached(moontype="full", today=None):
+def _get_next_moon_cached(moontype="full", today=None, location_key=None):
+    if location_key is None:
+        raise ValueError("location_key must be provided.")
+    lon_deg, lat_deg, height_m = location_key
+    location = EarthLocation.from_geodetic(lon=lon_deg * u.deg, lat=lat_deg * u.deg, height=height_m * u.m)
+
     now = Time.now()
-    times = now + np.linspace(0, 30, 1000)*u.day
-    phases = get_moon_phase(times)
-    flis = get_moon_fli(phases)
-    next_full = times[np.argmax(flis)]
-    next_new = times[np.argmin(flis)]
-    prev_full = next_full - 29.53*u.day
-    prev_new = next_new - 29.53*u.day
-    if min(next_new, next_full) - now > now - max(prev_new, prev_full):
-        next_half = min(next_new, next_full) - 7.38*u.day
-    else:
-        next_half = min(next_new, next_full) + 7.38*u.day
+    utctimes = now + np.linspace(0, 28, 1000) * u.day
+    sunalts = np.array([get_sun(utctime).transform_to(AltAz(obstime=utctime, location=location)).alt.deg
+                        for utctime in utctimes])
+
+    times = utctimes[sunalts < 0.0]  # sun down
+    flis = get_moon_fli(get_moon_phase(times))  # fractional lunar illum
+    moonalts = np.array([get_body("moon", utctime).transform_to(AltAz(obstime=utctime, location=location)).alt.deg
+                         for utctime in times])
+
     if moontype == "full":
-        return next_full.isot.split('T')[0]+"T00:00:00"
+        mask = (flis > 0.95) & (moonalts > 0.0)  # few days around full moon, moon is up
+        nextm = (times[mask])[np.argmax(moonalts[mask])]  # when moon is at peak altitude during full moon
     elif moontype == "new":
-        return next_new.isot.split('T')[0]+"T00:00:00"
+        mask = (flis < 0.05) & (moonalts < 0.0)  # few days around new moon, moon is down
+        nextm = times[mask][np.argmin(flis[mask])]
     elif moontype == "half":
-        return next_half.isot.split('T')[0]+"T00:00:00"
+        mask = (moonalts > 0.0) & (flis > 0.4) & (flis < 0.6)  # few days around half moon, moon is up
+        nextm = times[mask][np.argmax(moonalts[mask])]
     else:
         raise ValueError(f"Invalid moon type: {moontype}, should be 'full', 'new' or 'half'.")
+    return nextm

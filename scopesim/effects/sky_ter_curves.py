@@ -5,9 +5,10 @@ import astropy.units as u
 from astropy.table import Table
 
 from palace import palace
+import skycalc_ipy
 
 from ..utils import (get_logger, from_currsys, from_rc_config, find_file,
-                    zendist2airmass, get_zenith_angle, get_moon_phase, get_observation_info_from_cmds)
+                     zendist2airmass, get_zenith_angle, get_moon_phase, get_observation_info_from_cmds, get_local_time)
 from .. import rc
 from ..effects import Effect, SkycalcTERCurve, TERCurve
 
@@ -72,7 +73,7 @@ class PalaceAirglowEmission(Effect):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
+        self.target, self.location, self.time, self.brightness = get_observation_info_from_cmds(self.cmds)
 
         self.parlist = self.get_palace_inputs(**kwargs)
 
@@ -108,7 +109,7 @@ class PalaceAirglowEmission(Effect):
         return obj
 
     def get_palace_inputs(self, **kwargs):
-        package_name = getattr(self.cmds, "package_name", "palace")
+        package_name = getattr(self.cmds, "package_name", None)
         default_outdir = f"{from_rc_config('!SIM.file.local_packages_path')}/{package_name}"
         parlist = {"species": kwargs.get("species", "all"),
                         "srf": kwargs.get("srf", 130.0),
@@ -155,7 +156,7 @@ class PalaceAirglowEmission(Effect):
         parlist["dlam"] = dlam
 
         ## month and time
-        mbin, tbin = self.get_mbin_tbin(self.time)
+        mbin, tbin = self.get_mbin_tbin()
         parlist["mbin"] = mbin
         parlist["tbin"] = tbin
 
@@ -164,15 +165,18 @@ class PalaceAirglowEmission(Effect):
 
         return parlist
 
-    @staticmethod
-    def get_mbin_tbin(obstime):
-        mbin = obstime.datetime.month
-        tbin = (obstime.datetime.hour
-                + obstime.datetime.minute / 60
-                + obstime.datetime.second / 3600)
-        if not ((0 <= tbin < 6) or (18 <= tbin < 24)):
-            logger.warning("Local time is outside of the range covered by the PALACE model (18-6h). Defaulting to tbin=0 (all times).")
-            tbin = 0
+    def get_mbin_tbin(self):
+        localtime = get_local_time(self.time, self.location)
+        mbin = localtime.datetime.month
+        if self.brightness is None:
+            tbin = (localtime.datetime.hour
+                    + localtime.datetime.minute / 60.
+                    + localtime.datetime.second / 3600.)
+            if not ((0 <= tbin < 6) or (18 <= tbin < 24)):
+                logger.warning("Local time is outside of the range covered by the PALACE model (18-6h). Defaulting to tbin=0 (all times).")
+                tbin = 0
+        else:
+            tbin = int(1) if self.brightness == 'bright' else int(6) if self.brightness == 'dark' else int(3)
         return mbin, tbin
 
     def run_palace(self):
@@ -224,6 +228,7 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
 
     * disable_transmission: True by default
     * disable_airglow: True by default
+    * skycalc_query_timeout: 2 (in seconds) by default
 
     The following SkyCalc input parameters can be supplied in kwargs:
 
@@ -268,6 +273,7 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
           kwargs:
             disable_transmission: True
             disable_airglow: True
+            skycalc_query_timeout: "!ATMO.skycalc_timeout"
             pwv: "!ATMO.pwv"
             wmin: "!SIM.spectral.wave_min"
             wmax: "!SIM.spectral.wave_max"
@@ -282,10 +288,13 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
     def __init__(self, **kwargs):
         self.cmds = kwargs.get("cmds")
 
-        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
+        self.target, self.location, self.time, self.brightness = get_observation_info_from_cmds(self.cmds)
 
         skycalc_params = self.get_skycalc_inputs(**kwargs)
         kwargs.update(skycalc_params)
+
+        skycalc_ipy.core.SkyModel.REQUEST_TIMEOUT = from_currsys(kwargs.get("skycalc_query_timeout", 2),
+                                                                 self.cmds)
         super().__init__(**kwargs)
 
         if self.meta.get("disable_transmission", True):
@@ -354,13 +363,19 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
                 params["pwv_mode"] = 'pwv'
             else:
                 params["pwv_mode"] = 'season'
-                params["season"] = self.time.datetime.month//2 + 1 if self.time.datetime.month != 12 else 1
-                if 18 <= self.time.datetime.hour <= 24:
-                    params["time"] = 1
-                elif 0 <= self.time.datetime.hour < 6:
-                    params["time"] = 2
-                else:
-                    params["time"] = 3
+        params["season"] = self.time.datetime.month//2 + 1 if self.time.datetime.month != 12 else 1
+        if self.brightness is None:
+            localtime = get_local_time(self.time, self.location)
+            if 18 <= localtime.datetime.hour < 22:
+                params["time"] = 1
+            elif 23 <= localtime.datetime.hour < 24 or 0 <= localtime.datetime.hour < 2:
+                params["time"] = 2
+            elif 2 <= localtime.datetime.hour < 6:
+                params["time"] = 3
+            else:
+                params["time"] = 0
+        else:
+            params["time"] = 1 if self.brightness == "bright" else 2 if self.brightness == "dark" else 0
         return params
 
 
