@@ -540,22 +540,15 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
             "downstream_throughput_filename": downstream_throughput_filename,
             "downstream_throughput_filenames": downstream_throughput_filenames,
         })
-        self._surface_list = (
-            surface_list if surface_list is not None
-            else SurfaceList(filename=filename, cmds=self.cmds)
-        )
-        self._detector_qe = _detector_qe_from_spec(
-            detector_qe, filename=detector_qe_filename, cmds=self.cmds,
-        )
+        self._surface_list = surface_list if surface_list is not None else SurfaceList(filename=filename, cmds=self.cmds)
+        self._detector_qe = _detector_qe_from_spec(detector_qe, filename=detector_qe_filename, cmds=self.cmds)
         downstream_specs = []
         downstream_specs.extend(_as_effect_specs(downstream_throughputs))
         downstream_specs.extend(_as_effect_specs(downstream_throughput))
         downstream_specs.extend(_as_effect_specs(downstream_throughput_filenames))
         downstream_specs.extend(_as_effect_specs(downstream_throughput_filename))
         self._downstream_throughput_specs = downstream_specs
-        self._downstream_throughputs = [
-            _effect_from_spec(spec, cmds=self.cmds) for spec in downstream_specs
-        ]
+        self._downstream_throughputs = [_effect_from_spec(spec, cmds=self.cmds) for spec in downstream_specs]
         self._positional_qe = positional_qe
         self._last_value = None
 
@@ -579,9 +572,7 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
     def background_value(self, image_plane: ImagePlane) -> float:
         """Return the scalar background in ``ph s-1 pixel-1``."""
         rate_per_arcsec2 = self._background_rate_per_arcsec2(image_plane)
-        pixel_area = image_plane_pixel_area(
-            image_plane.header, self.cmds,
-        ).to_value(u.arcsec**2)
+        pixel_area = image_plane_pixel_area(image_plane.header, self.cmds).to_value(u.arcsec**2)
         return rate_per_arcsec2 * pixel_area
 
     def _background_rate_per_arcsec2(self, image_plane: ImagePlane) -> float:
@@ -603,8 +594,10 @@ class PostDisperserDiffuseBackground(ImagePlaneBackground):
             qe_values=qe_values,
             emission_phase=self.meta["emission_phase"],
         )
+
         if spectrum is not None:
             spectrum = spectrum * self._downstream_throughput_values(wave)
+
         area = quantify(from_currsys(self.meta["area"], self.cmds), u.m**2)
         rate = integrate_spectral_background(
             spectrum,

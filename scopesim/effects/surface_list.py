@@ -34,10 +34,7 @@ class SurfaceList(TERCurve):
         if self.table is not None:
             for i in range(len(self.table)):
                 surf_kwargs = deepcopy(self.table.meta)
-                rowdict = {
-                    colname: _row_quantity_or_value(self.table, colname, i)
-                    for colname in self.table.colnames
-                }
+                rowdict = { colname: _row_quantity_or_value(self.table, colname, i) for colname in self.table.colnames}
                 surf_kwargs.update(rowdict)
                 surf_kwargs["cmds"] = self.cmds
                 surf_kwargs["filename"] = from_currsys(surf_kwargs["filename"], self.cmds)

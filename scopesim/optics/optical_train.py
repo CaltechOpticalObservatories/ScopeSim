@@ -593,8 +593,7 @@ class OpticalTrain:
         # [2D - Vibration, flat fielding, chopping+nodding]
         impeffs = self.optics_manager.image_plane_effects
         nobar = len(impeffs) <= 1
-        for effect in tqdm(impeffs, disable=nobar,
-                           desc=" Image Plane effects"):
+        for effect in tqdm(impeffs, disable=nobar, desc=" Image Plane effects"):
             for ii, image_plane in enumerate(self.image_planes):
                 self.image_planes[ii] = effect.apply_to(image_plane)
 
