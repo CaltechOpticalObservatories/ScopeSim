@@ -321,10 +321,12 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
             params[k] = params[k] * scale_factor
         params["wunit"] = "nm"
         if params["wmin"] < 300.:
-            logger.warning(f"wmin {params['wmin']} is below the minimum wavelength covered by SkyCalc. Setting to 300 nm.")
+            if not np.allclose(params["wmin"], 300):
+                logger.warning(f"wmin {params['wmin']} is below the minimum wavelength covered by SkyCalc. Setting to 300 nm.")
             params["wmin"] = 300.
         if params["wmax"] > 30000.:
-            logger.warning(f"wmax {params['wmax']} is above the maximum wavelength covered by SkyCalc. Setting to 30000 nm.")
+            if not np.allclose(params["wmax"], 30000):
+                logger.warning(f"wmax {params['wmax']} is above the maximum wavelength covered by SkyCalc. Setting to 30000 nm.")
             params["wmax"] = 30000.
 
         if kwargs.get("disable_airglow", True):
