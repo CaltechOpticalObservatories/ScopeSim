@@ -341,32 +341,26 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
         params["ecl_lon"] = target_ecl.lon.wrap_at(180*u.deg).deg
         params["ecl_lat"] = target_ecl.lat.wrap_at(90*u.deg).deg
 
-        moon = get_body("moon", self.time)
-        alt_moon = moon.transform_to(AltAz(obstime=self.time, location=self.location)).alt.deg
-        z_moon = 90 - alt_moon
         z_target = get_zenith_angle(self.target, self.location, self.time)
-        moon_target_sep = moon.separation(self.target).deg
-        if (abs(z_target - z_moon) < moon_target_sep) and (moon_target_sep < abs(z_target + z_moon)):
-            params.update({
-                "airmass": zendist2airmass(z_target),
-                "incl_moon": "Y",
-                "moon_sun_sep": get_moon_phase(self.time, get_elongation=True).deg,
-                "moon_target_sep": moon_target_sep,
-                "moon_alt": alt_moon,
-                "moon_earth_dist": max(0.91, min(moon.distance.km / 384400.0, 1.08))
-            })
-        else:
-            params["incl_moon"] = "N"
-            params["airmass"] = zendist2airmass(z_target)
-
-        if params["pwv_mode"] == 'season':
-            if from_currsys("!ATMO.location", self.cmds) not in ["Paranal", "Armazones"]:
-                logger.warning("Seasonal PWV mode is only calibrated for Paranal/Armazones. Defaulting to pwv_mode='pwv'.")
-                params["pwv_mode"] = 'pwv'
-            else:
-                params["pwv_mode"] = 'season'
-        params["season"] = self.time.datetime.month//2 + 1 if self.time.datetime.month != 12 else 1
         if self.brightness is None:
+            moon = get_body("moon", self.time)
+            alt_moon = moon.transform_to(AltAz(obstime=self.time, location=self.location)).alt.deg
+            z_moon = 90 - alt_moon
+            moon_target_sep = moon.separation(self.target).deg
+            if (abs(z_target - z_moon) < moon_target_sep) and (moon_target_sep < abs(z_target + z_moon)):
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "Y",
+                    "moon_sun_sep": get_moon_phase(self.time, get_elongation=True).deg,
+                    "moon_target_sep": moon_target_sep,
+                    "moon_alt": alt_moon,
+                    "moon_earth_dist": max(0.91, min(moon.distance.km / 384400.0, 1.08))
+                })
+            else:
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "N"})
+
             localtime = get_local_time(self.time, self.location)
             if 18 <= localtime.datetime.hour < 22:
                 params["time"] = 1
@@ -377,7 +371,32 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
             else:
                 params["time"] = 0
         else:
-            params["time"] = 1 if self.brightness == "bright" else 2 if self.brightness == "dark" else 0
+            params["time"] = 0
+            if self.brightness == 'bright':
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "Y",
+                    "moon_sun_sep": 180.0, "moon_target_sep": 60.0, "moon_alt": 45.0, "moon_earth_dist": 1.0})
+            elif self.brightness == 'grey' or self.brightness == 'gray':
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "Y",
+                    "moon_sun_sep": 90.0, "moon_target_sep": 60.0, "moon_alt": 45.0, "moon_earth_dist": 1.0})
+            elif self.brightness == 'dark':
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "N"})
+            else:
+                raise ValueError(f"Invalid brightness value: {self.brightness}. Must be one of 'bright', 'grey', 'gray', or 'dark'.")
+
+        if params["pwv_mode"] == 'season':
+            if from_currsys("!ATMO.location", self.cmds) not in ["Paranal", "Armazones"]:
+                logger.warning("Seasonal PWV mode is only calibrated for Paranal/Armazones. Defaulting to pwv_mode='pwv'.")
+                params["pwv_mode"] = 'pwv'
+            else:
+                params["pwv_mode"] = 'season'
+        params["season"] = self.time.datetime.month//2 + 1 if self.time.datetime.month != 12 else 1
+
         return params
 
 

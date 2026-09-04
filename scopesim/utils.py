@@ -1054,14 +1054,11 @@ def get_observation_info_from_cmds(cmds):
                                 alt=from_currsys("!ATMO.altitude", cmds))
 
     if check_keys(cmds, {"!OBS.mjdobs", "!OBS.brightness"}, action="error", all_any="any"):
-        if "!OBS.mjdobs" in cmds:
-            time_str = from_currsys("!OBS.mjdobs", cmds)
-            logger.info(f'Using !OBS.mjdobs {time_str} for observation time')
-        else:
-            time_str = from_currsys("!OBS.brightness", cmds)
-            brightness = time_str
-            logger.info(f'Using !OBS.brightness {time_str} for observation time')
+        timekey = "!OBS.mjdobs" if "!OBS.mjdobs" in cmds else "!OBS.brightness"
+        time_str = from_currsys(timekey, cmds)
         time = resolve_time(time_str, location=location)
+        if timekey == "!OBS.brightness":
+            brightness = time_str
 
     target_kwargs: dict[str, Any] = {'alt': '!OBS.alt', 'az': '!OBS.az', 'ra': '!OBS.ra', 'dec': '!OBS.dec',
                      'airmass': '!OBS.airmass'}
@@ -1160,37 +1157,34 @@ def get_local_time(time: Time, location: EarthLocation) -> Time:
     return time + utcoffset
 
 def resolve_time(time_str: int | float | Literal['bright', 'gray', 'grey', 'dark'] | str,
-                 location: EarthLocation | None = None):
+                 location: EarthLocation | None = None) -> Time | None:
     """
     Parses the time input.
     Checks if the time is in MJD, or ISOT format, or indicates sky brightness ["bright", "gray", "dark"].
     If it is supplied as a sky brightness string, the next corresponding moon phase time is calculated and used.
     If the parsed time is not after sunset, the corresponding midnight time of that date is returned.
     """
-    t = None
-    if isinstance(time_str, int) or isinstance(time_str, float): ## if time_str is a numeric MJD value
+    if isinstance(time_str, int) or isinstance(time_str, float):  ## if time_str is a numeric MJD value
         logger.info(f"Resolving time: {time_str} assuming MJD format and UTC scale")
-        try:
-            t = Time(time_str, format="mjd", location=location)
-        except Exception as e:
-            logger.warning(f"Failed to parse time from {time_str}: {e}. Defaulting to 'dark'.")
-            time_str = "dark"
+        t = Time(time_str, format="mjd", location=location)
+
     elif isinstance(time_str, str):
-        if ('T' in time_str) and (':' in time_str): ## ISOT format
+        if ('T' in time_str) and (':' in time_str):  ## ISOT format
             logger.info(f"Resolving time: {time_str} assuming ISOT format and UTC scale")
             t = Time(time_str, format="isot", location=location)
-        elif time_str == "grey":
-            time_str = "gray"
-        elif time_str not in ["bright", "gray", "dark"]:
-            logger.warning(f"Unrecognized time string input: {time_str}. Defaulting to 'dark'.")
-            time_str = "dark"
+        elif time_str in ["bright", "gray", "grey", "dark"]:
+            logger.info(f"Brightness level supplied instead of time, {time_str}")
+            t = Time.now(location=location)
+        else:
+            logger.error(f"Unrecognized string input for time: {time_str}.")
+            raise ValueError(f"Unrecognized string input for time: {time_str}.")
     else:
-        logger.warning(f"Invalid time input type: {type(time_str)}, should be a string or numeric MJD value. Defaulting to 'dark'.")
-        time_str = "dark"
+        logger.error(f"Invalid time input type: {type(time_str)}, should be a string or numeric MJD value.")
+        raise ValueError(f"Invalid time input type: {type(time_str)}, should be a string or numeric MJD value.")
 
-    if t is None:
-        kw = {"bright":"full", "gray":"half", "dark":"new"}
-        t = Time(get_next_moon(kw[time_str], location), format="isot", location=location)
+    # if t is None:
+    #     kw = {"bright":"full", "gray":"half", "dark":"new"}
+    #     t = Time(get_next_moon(kw[time_str], location), format="isot", location=location)
 
     # check if t is at night
     if location is not None:
