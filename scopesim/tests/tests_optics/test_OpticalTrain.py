@@ -1,21 +1,29 @@
 
 from copy import deepcopy
+from types import SimpleNamespace
 import pytest
 from pytest import approx
 from unittest.mock import patch
 
 import numpy as np
 from astropy import units as u
+from astropy.io import fits
 from astropy.table import Table
 
 import scopesim as sim
+from scopesim.detector import DetectorManager
 from scopesim.optics.fov_manager import FOVManager
 from scopesim.optics.image_plane import ImagePlane
 from scopesim.optics.optical_train import OpticalTrain
 from scopesim.optics.optics_manager import OpticsManager
 from scopesim.optics.optical_element import OpticalElement
 from scopesim.commands.user_commands import UserCommands
-from scopesim.effects import Effect, DetectorList
+from scopesim.effects import (
+    DetectorList,
+    Effect,
+    SpectralTraceList,
+    UnequalBinnedImage,
+)
 from scopesim.utils import find_file
 
 from scopesim.tests.mocks.py_objects import source_objects as src_objs
@@ -77,6 +85,82 @@ def simplecado_opt(mock_path_yamls):
     return sim.OpticalTrain(cmd)
 
 
+def spectral_geometry_train(detector_count=1):
+    """Return a small configured train that needs no observation."""
+    xi_grid, wave_grid = np.meshgrid(
+        np.linspace(-1, 1, 5),
+        np.linspace(1, 2, 6),
+        indexing="ij",
+    )
+    trace_table = Table({
+        "wavelength": wave_grid.ravel() * u.um,
+        "s": xi_grid.ravel() * u.arcsec,
+        "x": (wave_grid.ravel() - 1.5 + 0.1 * xi_grid.ravel()) * u.mm,
+        "y": (0.2 * xi_grid.ravel()) * u.mm,
+    })
+    trace_hdu = fits.BinTableHDU(trace_table, name="linear")
+    catalog = fits.BinTableHDU(Table({
+        "description": ["linear"],
+        "extension_id": [2],
+        "aperture_id": [0],
+        "image_plane_id": [0],
+    }))
+    primary = fits.PrimaryHDU()
+    primary.header["ECAT"] = 1
+    primary.header["EDATA"] = 2
+    trace_list = SpectralTraceList(
+        hdulist=fits.HDUList([primary, catalog, trace_hdu]),
+        wave_colname="wavelength",
+        s_colname="s",
+    )
+
+    detector_list = DetectorList(
+        image_plane_id=0,
+        array_dict={
+            "id": list(range(detector_count)),
+            "x_cen": np.linspace(
+                0, 12 * (detector_count - 1), detector_count),
+            "y_cen": np.zeros(detector_count),
+            "x_size": np.full(detector_count, 100),
+            "y_size": np.full(detector_count, 80),
+            "pixel_size": np.full(detector_count, 0.1),
+            "angle": np.zeros(detector_count),
+            "gain": np.ones(detector_count),
+        },
+        x_cen_unit="mm",
+        y_cen_unit="mm",
+        x_size_unit="pixel",
+        y_size_unit="pixel",
+        pixel_size_unit="mm",
+        angle_unit="deg",
+        gain_unit="electron/adu",
+    )
+
+    train = OpticalTrain()
+    train.optics_manager = SimpleNamespace(
+        get_all=lambda effect_class: [trace_list],
+        image_plane_effects=[],
+        detector_array_effects=[],
+        detector_effects=[],
+    )
+    train.image_planes = [ImagePlane(detector_list.image_plane_header)]
+    train.fov_manager = SimpleNamespace(fovs=[
+        SimpleNamespace(
+            trace_id="linear",
+            detector_header=train.image_planes[0].header,
+            meta={
+                "image_plane_id": 0,
+                "wave_min": 1 * u.um,
+                "wave_max": 2 * u.um,
+                "xi_min": -1 * u.arcsec,
+                "xi_max": 1 * u.arcsec,
+            },
+        ),
+    ])
+    train.detector_managers = [DetectorManager(detector_list)]
+    return train, trace_list
+
+
 @pytest.mark.usefixtures("patch_mock_path")
 class TestInit:
     def test_initialises_with_nothing(self):
@@ -110,6 +194,81 @@ class TestInit:
     def test_ignore_effects_works(self, cmds_with_ignore):
         opt = OpticalTrain(cmds=cmds_with_ignore)
         assert opt["detector QE curve"].include is False
+
+
+class TestTraceDetectorCoordinates:
+    def test_maps_live_trace_to_zero_origin_detector_pixels(self):
+        train, _ = spectral_geometry_train()
+
+        coordinates = train.trace_detector_coordinates(
+            wavelengths={"linear": [1.5] * u.um})
+
+        assert coordinates["trace_id"][0] == "linear"
+        assert coordinates["readout_index"][0] == 0
+        assert coordinates["detector_x"][0].to_value(u.pixel) == approx(49)
+        assert coordinates["detector_y"][0].to_value(u.pixel) == approx(39)
+
+    def test_includes_renderer_endpoint_sampling(self):
+        train, _ = spectral_geometry_train()
+
+        coordinates = train.trace_detector_coordinates(
+            wavelengths={"linear": [1.25] * u.um})
+
+        # The rendered subimage samples -0.65..0.65 mm at 13 inclusive
+        # positions. The trace's -0.25 mm point therefore lands here, rather
+        # than at the ideal detector-WCS coordinate x=47.
+        expected_x = 43 + (-0.25 + 0.65) / (0.65 + 0.65) * 12
+        assert coordinates["detector_x"][0].to_value(u.pixel) == approx(
+            expected_x)
+
+    def test_returns_all_trace_wavelengths_and_requested_slit_positions(self):
+        train, _ = spectral_geometry_train()
+
+        coordinates = train.trace_detector_coordinates(
+            xi=[-0.5, 0.5] * u.arcsec)
+
+        assert len(coordinates) == 12
+        assert set(coordinates["xi"].to_value(u.arcsec)) == {-0.5, 0.5}
+        assert coordinates["wavelength"].unit == u.um
+        assert coordinates["detector_x"].unit == u.pixel
+
+    def test_accepts_unit_roundoff_at_configured_wavelength_boundary(self):
+        train, _ = spectral_geometry_train()
+        boundary = np.nextafter(1.0, 0.0) * u.um
+
+        coordinates = train.trace_detector_coordinates(
+            wavelengths={"linear": [boundary]})
+
+        assert coordinates["wavelength"][0] == boundary
+
+    def test_uses_changed_live_trace_transform(self):
+        train, trace_list = spectral_geometry_train()
+        before = train.trace_detector_coordinates(
+            wavelengths={"linear": [1.5] * u.um})
+
+        trace = trace_list.spectral_traces["linear"]
+        trace.meta["offset_y"] = 0.1
+        trace.compute_interpolation_functions()
+        after = train.trace_detector_coordinates(
+            wavelengths={"linear": [1.5] * u.um})
+
+        shift = after["detector_y"][0] - before["detector_y"][0]
+        assert shift.to_value(u.pixel) == approx(1)
+
+    def test_rejects_multiple_detectors_on_one_image_plane(self):
+        train, _ = spectral_geometry_train(detector_count=2)
+
+        with pytest.raises(NotImplementedError, match="multiple detectors"):
+            train.trace_detector_coordinates()
+
+    def test_rejects_post_extraction_binning(self):
+        train, _ = spectral_geometry_train()
+        train.optics_manager.detector_effects = [
+            UnequalBinnedImage(binx=2, biny=1),
+        ]
+
+        with pytest.raises(NotImplementedError, match="binning"):
+            train.trace_detector_coordinates()
 
 
 @pytest.mark.slow

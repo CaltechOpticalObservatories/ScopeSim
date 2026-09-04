@@ -215,7 +215,7 @@ class PixelResponseNonUniformity(Effect):
         return obj
 
     def plot(self, det_id=None):
-        """Plot effect."""
+        """Plot the cached gain map."""
         if not self._gain_maps:
             raise RuntimeError("No gain map yet - run a simulation first.")
         key = det_id if det_id in self._gain_maps else next(iter(self._gain_maps))

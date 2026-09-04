@@ -218,7 +218,7 @@ class ADShift(ShiftFoV3D):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
+        self.target, self.location, self.time, _ = get_observation_info_from_cmds(self.cmds)
 
         self.zenith_angle = get_zenith_angle(self.target, self.location, self.time) * u.deg
 
@@ -298,9 +298,12 @@ class ADCShift(ShiftFoV3D):
         if 'filename' not in kwargs and 'zenith_angle_error' not in kwargs:
             raise ValueError("Residuals must be supplied through either filename or zenith_angle_error.")
 
-        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
+        self.target, self.location, self.time, _ = get_observation_info_from_cmds(self.cmds)
 
         self.zenith_angle = get_zenith_angle(self.target, self.location, self.time) * u.deg
+        self._ad_shift_cache_key = None
+        self._ad_shift_cache = None
+        self._residual_interpolator_cache = None
 
     def get_shifts(self, obj: FieldOfView3D):
         """
@@ -313,19 +316,7 @@ class ADCShift(ShiftFoV3D):
 
         if self.data is not None and isinstance(self.data, Table):
             logger.info(f'Residuals supplied by {self.meta["filename"]}')
-            Z = self.data.colnames
-            Z.remove("wavelength")
-            lam_um = quantity_from_table("wavelength", self.data, "um").value
-            R = np.array([np.array(self.data[z]).astype(float) for z in Z])
-            R_unit = u.Unit(self.data.meta.get("shifts_unit", "arcsec"))
-            Z = np.array(Z).astype(float)
-            adc_opt_resid = RegularGridInterpolator((Z, lam_um), R, method="linear", bounds_error=False,
-                                                fill_value=None)
-
-            adc_nir_resid = lambda xy: adc_opt_resid((xy[0], (xy[1] - 1) / 1.5 * (1.1 - .31) + .31))  # scale to nIR
-            # 300-500 & 500-1000
-            adc_ub_resid = lambda xy: adc_opt_resid((xy[0], (xy[1] - .3) / .2 * (1.1 - .31) + .31)) / 2  # scale
-            adc_gri_resid = lambda xy: adc_opt_resid((xy[0], (xy[1] - .5) / .5 * (1.1 - .31) + .31)) / 2  # scale to nIR
+            R_unit, adc_opt_resid = self._get_residual_interpolator()
 
             if self.meta.get("use_broadband", False):
                 use = wave < 1.0 * u.um
@@ -333,15 +324,16 @@ class ADCShift(ShiftFoV3D):
                     (self.zenith_angle.to_value(u.deg), wave[use].to_value(u.um))) * R_unit).to(u.arcsec)
             else:
                 use = wave < 0.5 * u.um
-                res1 = (adc_ub_resid(
+                res1 = (self._adc_ub_resid(adc_opt_resid,
                     (self.zenith_angle.to_value(u.deg), wave[use].to_value(u.um))) * R_unit).to(u.arcsec)
                 shifts[use] += res1
                 use = ~use & (wave < 1.0 * u.um)
-                res2 = (adc_gri_resid(
+                res2 = (self._adc_gri_resid(adc_opt_resid,
                     (self.zenith_angle.to_value(u.deg), wave[use].to_value(u.um))) * R_unit).to(u.arcsec)
                 shifts[use] += res2
             use = wave >= 1.0 * u.um
-            res3 = (adc_nir_resid((self.zenith_angle.to_value(u.deg), wave[use].to_value(u.um))) * R_unit).to(u.arcsec)
+            res3 = (self._adc_nir_resid(adc_opt_resid,
+                    (self.zenith_angle.to_value(u.deg), wave[use].to_value(u.um))) * R_unit).to(u.arcsec)
             shifts[use] += res3
 
         if self.meta.get('zenith_angle_error', 0.0) != 0.0:
@@ -354,11 +346,13 @@ class ADCShift(ShiftFoV3D):
                     ad_kwargs[k] = v
                 else:
                     ad_kwargs[k] = self.meta[k]
-            ad = ADShift(**ad_kwargs, cmds=self.cmds)
+            ad = self._get_ad_shift(ad_kwargs)
+            ad.zenith_angle = self.zenith_angle
             ad_shift = ad._get_shifts_arcsec(obj)  # get shift at zenith angle
             ad.zenith_angle = ad.zenith_angle + self.meta.get('zenith_angle_error', 0.0) * u.deg # update zenith angle
             ad_shift -= ad._get_shifts_arcsec(obj)  # subtract shift at (zenith angle + error) to get residual
             shifts += ad_shift
+            ad.zenith_angle = self.zenith_angle
 
         pos_angle_y = field_rotation_pa_y(obj.hdu.header)
         par_angle = get_parallactic_angle(self.target, self.location, self.time)
@@ -367,6 +361,43 @@ class ADCShift(ShiftFoV3D):
         dy = shifts * np.cos(theta)
         dx = -1 * shifts * np.sin(theta)
         return dx, dy
+
+    def _get_residual_interpolator(self):
+        if self._residual_interpolator_cache is None:
+            Z = list(self.data.colnames)
+            Z.remove("wavelength")
+            lam_um = quantity_from_table("wavelength", self.data, "um").value
+            R = np.array([np.array(self.data[z]).astype(float) for z in Z])
+            R_unit = u.Unit(self.data.meta.get("shifts_unit", "arcsec"))
+            Z = np.array(Z).astype(float)
+            adc_opt_resid = RegularGridInterpolator(
+                (Z, lam_um), R, method="linear", bounds_error=False,
+                fill_value=None,
+            )
+            self._residual_interpolator_cache = (R_unit, adc_opt_resid)
+        return self._residual_interpolator_cache
+
+    @staticmethod
+    def _adc_nir_resid(adc_opt_resid, xy):
+        return adc_opt_resid((xy[0], (xy[1] - 1) / 1.5 * (1.1 - .31) + .31))
+
+    @staticmethod
+    def _adc_ub_resid(adc_opt_resid, xy):
+        return adc_opt_resid((xy[0], (xy[1] - .3) / .2 * (1.1 - .31) + .31)) / 2
+
+    @staticmethod
+    def _adc_gri_resid(adc_opt_resid, xy):
+        return adc_opt_resid((xy[0], (xy[1] - .5) / .5 * (1.1 - .31) + .31)) / 2
+
+    def _get_ad_shift(self, ad_kwargs):
+        cache_key = tuple(
+            (key, str(from_currsys(value, self.cmds)))
+            for key, value in sorted(ad_kwargs.items())
+        )
+        if self._ad_shift_cache is None or cache_key != self._ad_shift_cache_key:
+            self._ad_shift_cache = ADShift(**ad_kwargs, cmds=self.cmds)
+            self._ad_shift_cache_key = cache_key
+        return self._ad_shift_cache
 
 
 ########################### AD utils ###############################

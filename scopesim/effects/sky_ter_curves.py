@@ -5,9 +5,10 @@ import astropy.units as u
 from astropy.table import Table
 
 from palace import palace
+import skycalc_ipy
 
 from ..utils import (get_logger, from_currsys, from_rc_config, find_file,
-                    zendist2airmass, get_zenith_angle, get_moon_phase, get_observation_info_from_cmds)
+                     zendist2airmass, get_zenith_angle, get_moon_phase, get_observation_info_from_cmds, get_local_time)
 from .. import rc
 from ..effects import Effect, SkycalcTERCurve, TERCurve
 
@@ -72,7 +73,7 @@ class PalaceAirglowEmission(Effect):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
+        self.target, self.location, self.time, self.brightness = get_observation_info_from_cmds(self.cmds)
 
         self.parlist = self.get_palace_inputs(**kwargs)
 
@@ -108,11 +109,14 @@ class PalaceAirglowEmission(Effect):
         return obj
 
     def get_palace_inputs(self, **kwargs):
+        package_name = getattr(self.cmds, "package_name", None)
+        default_outdir = f"{from_rc_config('!SIM.file.local_packages_path')}/{package_name}"
         parlist = {"species": kwargs.get("species", "all"),
                         "srf": kwargs.get("srf", 130.0),
                         "isair": kwargs.get("isair", True),
                         "isatm": kwargs.get("isatm", True),
                         "pwv": from_currsys(kwargs.get("pwv", 2.5), self.cmds),
+                        "outdir": kwargs.get("outdir", default_outdir),
                         "outname": kwargs.get("outname", "palace"),
                         "specsuffix": "dat",
                         "showplot": False}
@@ -131,7 +135,7 @@ class PalaceAirglowEmission(Effect):
                 atmo_name = [dt.name for dt in self.cmds.yaml_dicts if dt.alias == "!ATMO"][0]
                 parlist["outdir"] = [pth for pth in rc.__search_path__ if atmo_name in pth][0]
             except:
-                parlist["outdir"] = f"{from_rc_config("!SIM.file.local_packages_path")}/{self.cmds.package_name}"
+                parlist["outdir"] = default_outdir
 
         ## Set PALACE model spectral resolution input from simulation settings if provided.
         resol = 2 * from_currsys("!SIM.spectral.spectral_resolution", self.cmds) if (
@@ -152,7 +156,7 @@ class PalaceAirglowEmission(Effect):
         parlist["dlam"] = dlam
 
         ## month and time
-        mbin, tbin = self.get_mbin_tbin(self.time)
+        mbin, tbin = self.get_mbin_tbin()
         parlist["mbin"] = mbin
         parlist["tbin"] = tbin
 
@@ -161,17 +165,32 @@ class PalaceAirglowEmission(Effect):
 
         return parlist
 
-    @staticmethod
-    def get_mbin_tbin(obstime):
-        mbin = obstime.datetime.month
-        tbin = obstime.datetime.hour
-        if not ((0 <= tbin <= 6) or (18 <= tbin <= 24)):
-            logger.warning("Local time is outside of the range covered by the PALACE model (18-6h). Defaulting to tbin=0 (all times).")
-            tbin = 0
+    def get_mbin_tbin(self):
+        localtime = get_local_time(self.time, self.location)
+        mbin = localtime.datetime.month
+        if self.brightness is None:
+            tbin = (localtime.datetime.hour
+                    + localtime.datetime.minute / 60.
+                    + localtime.datetime.second / 3600.)
+            if not ((0 <= tbin < 6) or (18 <= tbin < 24)):
+                logger.warning("Local time is outside of the range covered by the PALACE model (18-6h). Defaulting to tbin=0 (all times).")
+                tbin = 0
+        else:
+            tbin = int(1) if self.brightness == 'bright' else int(6) if self.brightness == 'dark' else int(3)
         return mbin, tbin
 
     def run_palace(self):
         _, spec_cont, spec_line = palace.model(**self.parlist)
+
+        for label, spectrum in (("continuum", spec_cont), ("line", spec_line)):
+            if not isinstance(spectrum, Table):
+                raise RuntimeError(f"PALACE {label} spectrum has type {type(spectrum).__name__}; expected astropy Table.")
+
+            missing_columns = {"lam", "flux"} - set(spectrum.colnames)
+            if missing_columns:
+                raise RuntimeError(f"PALACE {label} spectrum is missing required columns: "
+                                   f"{', '.join(sorted(missing_columns))}.")
+
         if len(spec_cont) == 0:
             logger.warning("PALACE model returned empty continuum spectrum.")
             ## Try loading cont emission from saved model output if available
@@ -194,7 +213,7 @@ class PalaceAirglowEmission(Effect):
             if len(spec_line) > 0:
                 self.parlist["outname"] = self.parlist["outname"].replace("_cont", "_line")
                 palace.output(spec_line, **self.parlist)
-            logger.info(f"Saved PALACE models in {self.parlist["outdir"]}")
+            logger.info(f"Saved PALACE models in {self.parlist['outdir']}")
 
         return spec_cont, spec_line
 
@@ -209,6 +228,7 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
 
     * disable_transmission: True by default
     * disable_airglow: True by default
+    * skycalc_query_timeout: 2 (in seconds) by default
 
     The following SkyCalc input parameters can be supplied in kwargs:
 
@@ -253,6 +273,7 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
           kwargs:
             disable_transmission: True
             disable_airglow: True
+            skycalc_query_timeout: "!ATMO.skycalc_timeout"
             pwv: "!ATMO.pwv"
             wmin: "!SIM.spectral.wave_min"
             wmax: "!SIM.spectral.wave_max"
@@ -267,10 +288,13 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
     def __init__(self, **kwargs):
         self.cmds = kwargs.get("cmds")
 
-        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
+        self.target, self.location, self.time, self.brightness = get_observation_info_from_cmds(self.cmds)
 
         skycalc_params = self.get_skycalc_inputs(**kwargs)
         kwargs.update(skycalc_params)
+
+        skycalc_ipy.core.SkyModel.REQUEST_TIMEOUT = from_currsys(kwargs.get("skycalc_query_timeout", 2),
+                                                                 self.cmds)
         super().__init__(**kwargs)
 
         if self.meta.get("disable_transmission", True):
@@ -297,10 +321,12 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
             params[k] = params[k] * scale_factor
         params["wunit"] = "nm"
         if params["wmin"] < 300.:
-            logger.warning(f"wmin {params['wmin']} is below the minimum wavelength covered by SkyCalc. Setting to 300 nm.")
+            if not np.allclose(params["wmin"], 300):
+                logger.warning(f"wmin {params['wmin']} is below the minimum wavelength covered by SkyCalc. Setting to 300 nm.")
             params["wmin"] = 300.
         if params["wmax"] > 30000.:
-            logger.warning(f"wmax {params['wmax']} is above the maximum wavelength covered by SkyCalc. Setting to 30000 nm.")
+            if not np.allclose(params["wmax"], 30000):
+                logger.warning(f"wmax {params['wmax']} is above the maximum wavelength covered by SkyCalc. Setting to 30000 nm.")
             params["wmax"] = 30000.
 
         if kwargs.get("disable_airglow", True):
@@ -315,23 +341,53 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
         params["ecl_lon"] = target_ecl.lon.wrap_at(180*u.deg).deg
         params["ecl_lat"] = target_ecl.lat.wrap_at(90*u.deg).deg
 
-        moon = get_body("moon", self.time)
-        alt_moon = moon.transform_to(AltAz(obstime=self.time, location=self.location)).alt.deg
-        z_moon = 90 - alt_moon
         z_target = get_zenith_angle(self.target, self.location, self.time)
-        moon_target_sep = moon.separation(self.target).deg
-        if (abs(z_target - z_moon) < moon_target_sep) and (moon_target_sep < abs(z_target + z_moon)):
-            params.update({
-                "airmass": zendist2airmass(z_target),
-                "incl_moon": "Y",
-                "moon_sun_sep": get_moon_phase(self.time, get_elongation=True).deg,
-                "moon_target_sep": moon_target_sep,
-                "moon_alt": alt_moon,
-                "moon_earth_dist": max(0.91, min(moon.distance.km / 384400.0, 1.08))
-            })
+        if self.brightness is None:
+            moon = get_body("moon", self.time)
+            alt_moon = moon.transform_to(AltAz(obstime=self.time, location=self.location)).alt.deg
+            z_moon = 90 - alt_moon
+            moon_target_sep = moon.separation(self.target).deg
+            if (abs(z_target - z_moon) < moon_target_sep) and (moon_target_sep < abs(z_target + z_moon)):
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "Y",
+                    "moon_sun_sep": get_moon_phase(self.time, get_elongation=True).deg,
+                    "moon_target_sep": moon_target_sep,
+                    "moon_alt": alt_moon,
+                    "moon_earth_dist": max(0.91, min(moon.distance.km / 384400.0, 1.08))
+                })
+            else:
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "N"})
+
+            localtime = get_local_time(self.time, self.location)
+            if 18 <= localtime.datetime.hour < 22:
+                params["time"] = 1
+            elif 23 <= localtime.datetime.hour < 24 or 0 <= localtime.datetime.hour < 2:
+                params["time"] = 2
+            elif 2 <= localtime.datetime.hour < 6:
+                params["time"] = 3
+            else:
+                params["time"] = 0
         else:
-            params["incl_moon"] = "N"
-            params["airmass"] = zendist2airmass(z_target)
+            params["time"] = 0
+            if self.brightness == 'bright':
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "Y",
+                    "moon_sun_sep": 180.0, "moon_target_sep": 60.0, "moon_alt": 45.0, "moon_earth_dist": 1.0})
+            elif self.brightness == 'grey' or self.brightness == 'gray':
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "Y",
+                    "moon_sun_sep": 90.0, "moon_target_sep": 60.0, "moon_alt": 45.0, "moon_earth_dist": 1.0})
+            elif self.brightness == 'dark':
+                params.update({
+                    "airmass": zendist2airmass(z_target),
+                    "incl_moon": "N"})
+            else:
+                raise ValueError(f"Invalid brightness value: {self.brightness}. Must be one of 'bright', 'grey', 'gray', or 'dark'.")
 
         if params["pwv_mode"] == 'season':
             if from_currsys("!ATMO.location", self.cmds) not in ["Paranal", "Armazones"]:
@@ -339,14 +395,8 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
                 params["pwv_mode"] = 'pwv'
             else:
                 params["pwv_mode"] = 'season'
-                params["season"] = self.time.datetime.month//2 + 1 if self.time.datetime.month != 12 else 1
-                if 18 <= self.time.datetime.hour <= 24:
-                    params["time"] = 1
-                elif 0 <= self.time.datetime.hour < 6:
-                    params["time"] = 2
-                else:
-                    params["time"] = 3
-        return params
+        params["season"] = self.time.datetime.month//2 + 1 if self.time.datetime.month != 12 else 1
 
+        return params
 
 

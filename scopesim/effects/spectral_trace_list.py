@@ -6,6 +6,7 @@ The Effect is called `SpectralTraceList`, it applies a list of
 `spectral_trace_list_utils.SpectralTrace` objects to a `FieldOfView`.
 """
 from itertools import cycle
+from pathlib import Path
 from typing import ClassVar
 
 from tqdm.auto import tqdm
@@ -14,7 +15,6 @@ import numpy as np
 from astropy.io import fits
 from astropy.table import Table
 import astropy.units as u
-import os
 
 from .effects import Effect
 from .ter_curves import FilterCurve
@@ -22,7 +22,7 @@ from .spectral_trace_list_utils import SpectralTrace, make_image_interpolations
 from ..optics.image_plane_utils import header_from_list_of_xy
 from ..optics.fov import FieldOfView
 from ..optics.fov_volume_list import FovVolumeList
-from ..utils import from_currsys, check_keys, figure_factory, get_logger, from_rc_config
+from ..utils import from_currsys, check_keys, figure_factory, get_logger
 from .data_container import DataContainer
 from ..optics import echelle
 
@@ -534,11 +534,53 @@ class SpectralTraceListWheel(Effect):
         return trace_list_eff
 
 
+def _warn_if_echelle_design_res_inconsistent(
+        prefix,
+        design_res,
+        echelle_angle,
+        pix_per_res_elem,
+        pix_size,
+        dispersion_focal_len,
+        tolerance=0.05):
+    """Warn if analytical order-center R is inconsistent with design_res."""
+    try:
+        design_res = float(design_res)
+        pix_per_res_elem = float(pix_per_res_elem)
+        pix_size = u.Quantity(pix_size).to(u.mm)
+        dispersion_focal_len = u.Quantity(dispersion_focal_len).to(u.mm)
+        echelle_angle_rad = u.Quantity(echelle_angle).to_value(u.rad)
+    except (TypeError, ValueError, u.UnitConversionError):
+        return
+    if (
+            not np.isfinite(design_res) or design_res <= 0
+            or not np.isfinite(pix_per_res_elem) or pix_per_res_elem <= 0
+            or dispersion_focal_len <= 0 * u.mm
+            or pix_size <= 0 * u.mm):
+        return
+
+    implied_res = (
+        2.0 * np.tan(echelle_angle_rad)
+        * (dispersion_focal_len / pix_size).to_value(u.dimensionless_unscaled)
+        / pix_per_res_elem
+    )
+    relative_delta = abs(implied_res - design_res) / design_res
+    if relative_delta > tolerance:
+        logger.warning(
+            "Analytical echelle row %s design_res %.0f differs from "
+            "order-center R %.0f implied by echelle angle, pixel size, "
+            "FWHM, and dispersion focal length.",
+            prefix,
+            design_res,
+            implied_res,
+        )
+
+
 class EchelleSpectralTraceList(SpectralTraceList):
     """
     SpectralTraceList effect for echelle spectrographs. Unlike SpectralTraceList, it generates the trace definitions
     instead of loading them from FITS file. The arguments required to define the echelle traces are supplied through
     a txt file containing a table of parameters using the filename kwarg.
+    ``m0`` is the highest order number and ``n`` is the number of orders.
 
     Below is an example of how to define the echelle trace parameters (see irdb/ZShooter_v1/traces/echelle_trace_parameters.txt):
     ----------------------------------------------------------------
@@ -546,7 +588,10 @@ class EchelleSpectralTraceList(SpectralTraceList):
     # max_wave_unit : nm
     # echelle_blaze_unit : deg
     # focal_length_unit : mm
+    # dispersion_focal_length_unit : mm
     # fwhm_unit : pixel
+    # nominal_slit_width_unit : arcsec
+    # plate_scale_unit : arcsec/mm
     # detector_pad_unit : pixel
     # pixel_size_unit : mm
     # n_disp_unit : pixel
@@ -555,10 +600,10 @@ class EchelleSpectralTraceList(SpectralTraceList):
     # xdisp_freq_unit : mm
     # slitwidth_unit : arcsec
 
-    prefix    aperture_id    image_plane_id    m0    n    min_wave    max_wave   design_res    echelle_blaze    focal_length    fwhm    detector_pad    pixel_size    n_disp    n_xdisp     disp_freq    xdisp_freq    slitwidth    dispdir
-    ub         0              2                29    11    315         515          20000        64.2             225             4.7     10              0.015         4096      4096        200          1000          10           x
-    gri        1              1                36    18    490         1020         20000        64.2             225             4.7     10              0.015         4096      4096        100          500           10           x
-    nIR        2              0                40    24    970         2500         20000        64.2             225             4.7     10              0.015         4096      4096        45           175           10           x
+    prefix    aperture_id    image_plane_id    m0    n    min_wave    max_wave   design_res    echelle_blaze    focal_length    dispersion_focal_length    fwhm    nominal_slit_width    plate_scale    detector_pad    pixel_size    n_disp    n_xdisp     disp_freq    xdisp_freq    slitwidth    dispdir
+    ub         0              2                29    11    315         515          20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        200          1000          10           x
+    gri        1              1                36    18    490         1020         20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        100          500           10           x
+    nIR        2              0                40    24    970         2500         20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        45           175           10           x
     ----------------------------------------------------------------
 
     The calculated traces are stored in the same HDUList format as required by SpectralTraceList,
@@ -573,12 +618,17 @@ class EchelleSpectralTraceList(SpectralTraceList):
         self.cmds = cmds
 
         trace_param_filename = kwargs.pop("filename")
+        save_generated_hdulist = kwargs.pop("save_generated_hdulist", False)
+        generated_hdulist_filename = kwargs.pop(
+            "generated_hdulist_filename", "analytical_echelle_traces.fits")
         trace_params = DataContainer(filename=trace_param_filename)
         hdulist = self._generate_trace_hdulist(trace_params)
-        hdulist.writeto(f"{from_rc_config('!SIM.file.local_packages_path')}/"
-                        f"{self.cmds.package_name}/"
-                        f"{os.path.dirname(trace_param_filename)}/"
-                        f"analytical_echelle_traces.fits", overwrite=True)
+        if save_generated_hdulist:
+            output_path = Path(generated_hdulist_filename).expanduser()
+            if not output_path.is_absolute():
+                output_path = Path.cwd() / output_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            hdulist.writeto(output_path, overwrite=True)
         kwargs["hdulist"] = hdulist
         super().__init__(cmds=cmds, **kwargs)
 
@@ -592,28 +642,25 @@ class EchelleSpectralTraceList(SpectralTraceList):
         trace_ids, ap_ids, im_ids = [], [], []
         for row in trace_params.table:
             prefix = row["prefix"]
-            for i in range(row["m0"] - row["n"], row["m0"] + 1):
-                trace_ids.append(f'{prefix}_{i:d}')
-                ap_ids.append(row["aperture_id"])
-                im_ids.append(row["image_plane_id"])
-
-        hdul.append(fits.BinTableHDU(Table(
-            {'description': trace_ids,
-             'extension_id': np.arange(len(trace_ids), dtype=int)+2,
-             'aperture_id': ap_ids,
-             'image_plane_id': im_ids
-             })))
-
-        for row in trace_params.table:
-            prefix = row["prefix"]
-            min_order = row['m0'] - row['n']
+            min_order = row['m0'] - row['n'] + 1
             max_order = row['m0']
             min_wave = row['min_wave'] * u.Unit(trace_params.meta["min_wave_unit"])
             max_wave = row['max_wave'] * u.Unit(trace_params.meta["max_wave_unit"])
             design_res = row['design_res']
             focal_len = row['focal_length'] * u.Unit(trace_params.meta["focal_length_unit"])
-            disp_npix = row['n_disp'] - 2 * row['detector_pad']
-            xdisp_npix = row['n_xdisp'] - 2 * row['detector_pad']
+            dispersion_focal_len = None
+            if "dispersion_focal_length" in trace_params.table.colnames:
+                dispersion_focal_len = row["dispersion_focal_length"] * u.Unit(
+                    trace_params.meta.get(
+                        "dispersion_focal_length_unit",
+                        trace_params.meta["focal_length_unit"],
+                    ))
+            disp_npix = int(row['n_disp'])
+            xdisp_npix = int(row['n_xdisp'])
+            detector_pad = (
+                int(row['detector_pad'])
+                if 'detector_pad' in trace_params.table.colnames else 0
+            )
             pix_size = row['pixel_size'] * u.Unit(trace_params.meta["pixel_size_unit"])
             echelle_angle = np.deg2rad(row['echelle_blaze'])*u.rad
             xdisp_beta_center = np.deg2rad(row['xbeta_center'])*u.rad
@@ -626,37 +673,136 @@ class EchelleSpectralTraceList(SpectralTraceList):
                                               design_res, echelle_angle, min_order, max_order,
                                               echelle_groove_length, pix_per_res_elem, disp_npix, xdisp_npix,
                                               pix_size, xdisp_groove_length=xdisp_groove_length,
-                                              xdisp_beta_center=xdisp_beta_center)
-
-            edges = ss.edge_wave(fsr=False)
+                                              xdisp_beta_center=xdisp_beta_center,
+                                              dispersion_focal_len=dispersion_focal_len)
+            _warn_if_echelle_design_res_inconsistent(
+                prefix,
+                design_res,
+                echelle_angle,
+                pix_per_res_elem,
+                pix_size,
+                ss.dispersion_focal_length,
+            )
 
             slit_edge = (row['slitlength'] / 2) * u.Unit(trace_params.meta["slitlength_unit"])
             slit_pos = np.linspace(-slit_edge, slit_edge, num=3)
-            slit_offset_pix = slit_pos / (from_currsys('!INST.pixel_scale', self.cmds) * u.arcsec)
+            if "plate_scale" in trace_params.table.colnames:
+                plate_scale = row["plate_scale"] * u.Unit(
+                    trace_params.meta["plate_scale_unit"])
+                slit_offset_pix = (slit_pos / plate_scale / pix_size).to_value(
+                    u.dimensionless_unscaled)
+            else:
+                slit_offset_pix = (
+                    slit_pos /
+                    (from_currsys('!INST.pixel_scale', self.cmds) * u.arcsec)
+                ).to_value(u.dimensionless_unscaled)
+            detector_angle = 0.0
+            if "detector_angle" in trace_params.table.colnames:
+                detector_angle = u.Quantity(
+                    row["detector_angle"],
+                    u.Unit(trace_params.meta.get("detector_angle_unit", "deg")),
+                ).to_value(u.deg)
+            cang = np.cos(np.deg2rad(detector_angle))
+            sang = np.sin(np.deg2rad(detector_angle))
+            detector_x_padding = max(
+                0.0,
+                (
+                    disp_npix * abs(cang)
+                    + xdisp_npix * abs(sang)
+                    - disp_npix
+                ) / 2,
+            )
+            slit_x_padding = (
+                abs(np.tan(np.deg2rad(detector_angle)))
+                * float(np.nanmax(np.abs(slit_offset_pix)))
+            )
+            raw_x_min = 0.5 - detector_x_padding - slit_x_padding
+            raw_x_max = disp_npix - 0.5 + detector_x_padding + slit_x_padding
 
-            xvals, yvals = [], []
-            for i, order in enumerate(ss.orders):
-                wave = edges[i]
-                wave = np.linspace(wave[0], wave[-1], num=max(int(disp_npix*.1), 2))
+            def raw_detector_pixels(wave, order):
                 x = ss.wavelength_to_x_pixel(wave, order)
                 y = ss.wavelength_to_y_pixel(wave)
-                pix_y = y + slit_offset_pix[:, None] + row['detector_pad']
-                xval = np.tile(x, slit_offset_pix.size)*pix_size.to('mm')
-                yval = pix_y.ravel()*pix_size.to('mm')
-                xvals.append(xval)
-                yvals.append(yval)
+                x = u.Quantity(x, copy=False).to_value(
+                    u.dimensionless_unscaled)
+                y = u.Quantity(y, copy=False).to_value(
+                    u.dimensionless_unscaled)
+                xpix = np.broadcast_to(x, (slit_offset_pix.size, wave.size))
+                ypix = y[None, :] + slit_offset_pix[:, None]
+                return xpix, ypix
 
-            # echelle above has 0,0 at detector corner, Scopesim uses 0,0 at detector center
-            xcent = (np.min(xvals) + (np.max(xvals) - np.min(xvals))/2) * u.mm
-            ycent = (np.min(yvals) + (np.max(yvals) - np.min(yvals))/2) * u.mm
+            rotated_x_min = rotated_y_min = np.inf
+            rotated_x_max = rotated_y_max = -np.inf
+            # The analytical echelle layout is relative, not yet detector
+            # placed. Rotate the footprint first, then place that rotated
+            # footprint on the detector. Detector padding is not part of the
+            # optical trace geometry; downstream detector/FOV code is
+            # responsible for clipping padded display or extraction regions.
+            for i, order in enumerate(ss.orders):
+                raw_x = np.linspace(
+                    raw_x_min, raw_x_max, num=max(disp_npix, 2))
+                wave = ss.x_pixel_to_wavelength(raw_x, order)
+                xpix, ypix = raw_detector_pixels(wave, order)
+                xrot = cang * xpix - sang * ypix
+                yrot = sang * xpix + cang * ypix
+                rotated_x_min = min(rotated_x_min, float(np.nanmin(xrot)))
+                rotated_x_max = max(rotated_x_max, float(np.nanmax(xrot)))
+                rotated_y_min = min(rotated_y_min, float(np.nanmin(yrot)))
+                rotated_y_max = max(rotated_y_max, float(np.nanmax(yrot)))
+            rotated_x_center = rotated_x_min + (rotated_x_max - rotated_x_min) / 2
+            rotated_y_center = rotated_y_min + (rotated_y_max - rotated_y_min) / 2
+
+            def rotated_detector_pixels(wave, order):
+                xpix, ypix = raw_detector_pixels(wave, order)
+                xrot = cang * xpix - sang * ypix
+                yrot = sang * xpix + cang * ypix
+                return (
+                    xrot - rotated_x_center + disp_npix / 2,
+                    yrot - rotated_y_center + xdisp_npix / 2,
+                )
+
+            def on_detector(wave, order):
+                xpix, ypix = rotated_detector_pixels(wave, order)
+                return (
+                    (xpix >= 0)
+                    & (xpix <= disp_npix)
+                    & (ypix >= 0)
+                    & (ypix <= xdisp_npix)
+                )
 
             for i, order in enumerate(ss.orders):
-                wave = edges[i]
-                wave = np.linspace(wave[0], wave[-1], num=max(int(disp_npix*.1), 2))
+                candidate_raw_x = np.linspace(
+                    raw_x_min, raw_x_max, num=max(disp_npix, 2))
+                candidate_wave = ss.x_pixel_to_wavelength(candidate_raw_x, order)
+                valid_wave = np.any(
+                    on_detector(candidate_wave, order), axis=0)
+                valid_indices = np.flatnonzero(valid_wave)
+                if valid_indices.size == 0:
+                    logger.debug(
+                        "Skipping analytical trace %s_%d: no samples inside "
+                        "the rotated detector rectangle.",
+                        prefix, order,
+                    )
+                    continue
+                raw_x = np.linspace(
+                    candidate_raw_x[valid_indices[0]],
+                    candidate_raw_x[valid_indices[-1]],
+                    num=max(int(disp_npix * .1), 2),
+                )
+                wave = ss.x_pixel_to_wavelength(raw_x, order)
+                valid_wave = np.any(on_detector(wave, order), axis=0)
+                wave = wave[valid_wave]
+                if wave.size < 2:
+                    logger.debug(
+                        "Skipping analytical trace %s_%d: fewer than two "
+                        "samples after rotated detector-edge clipping.",
+                        prefix, order,
+                    )
+                    continue
                 s = np.tile(slit_pos, wave.size).reshape(wave.size, slit_pos.size).T.ravel()
                 w = np.tile(wave, slit_offset_pix.size)
-                xval = xvals[i] - xcent   # Centering on 0,0 at detector center
-                yval = yvals[i] - ycent   # Centering on 0,0 at detector center
+                xpix, ypix = rotated_detector_pixels(wave, order)
+                xval = (xpix.ravel() - disp_npix / 2) * pix_size.to(u.mm)
+                yval = (ypix.ravel() - xdisp_npix / 2) * pix_size.to(u.mm)
 
                 order_table = Table(
                     {'wavelength': w.to(u.um), 's': s,
@@ -666,6 +812,41 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 trace_hdu = fits.BinTableHDU(order_table)
                 trace_hdu.header['DISPDIR'] = row['dispdir']
                 trace_hdu.header["EXTNAME"] = f'{prefix}_{order:d}'
+                trace_hdu.header["DESIGNR"] = (
+                    float(design_res), "Analytical trace design resolving power")
+                trace_hdu.header["FWHMPIX"] = (
+                    float(pix_per_res_elem), "Analytical nominal FWHM [pix]")
+                trace_hdu.header["PIXSIZE"] = (
+                    pix_size.to_value(u.mm), "Detector pixel size [mm]")
+                trace_hdu.header["DISPFLEN"] = (
+                    ss.dispersion_focal_length.to_value(u.mm),
+                    "Effective echelle dispersion focal length [mm]")
+                trace_hdu.header["DETPAD"] = (
+                    detector_pad, "Legacy detector padding [pix]; not applied")
+                trace_hdu.header["DETANG"] = (
+                    detector_angle, "Detector rotation angle [deg]")
+                if "nominal_slit_width" in trace_params.table.colnames:
+                    trace_hdu.header["SLITWID"] = (
+                        float(row["nominal_slit_width"]),
+                        "Analytical nominal slit width [arcsec]")
+                if "plate_scale" in trace_params.table.colnames:
+                    trace_hdu.header["PLTSCALE"] = (
+                        plate_scale.to_value(u.arcsec / u.mm),
+                        "Analytical sky-to-image plate scale [arcsec/mm]")
+                trace_ids.append(f'{prefix}_{order:d}')
+                ap_ids.append(row["aperture_id"])
+                im_ids.append(row["image_plane_id"])
                 hdul.append(trace_hdu)
+
+        if not trace_ids:
+            raise ValueError(
+                "Analytical echelle trace generation produced no detector "
+                "intersecting traces.")
+        hdul.insert(1, fits.BinTableHDU(Table(
+            {'description': trace_ids,
+             'extension_id': np.arange(len(trace_ids), dtype=int)+2,
+             'aperture_id': ap_ids,
+             'image_plane_id': im_ids
+             })))
 
         return hdul

@@ -218,7 +218,14 @@ class MoffatPSF(AnalyticalPSF):
 
     Optional kwargs:
 
-    - kernel_size: Size of kernel in multiples of FWHM (int)
+    - kernel_size: Minimum size of kernel in multiples of FWHM (int)
+    - kernel_enclosed_energy: Target enclosed kernel flux. Defaults to
+      ``1 - flux_accuracy``.
+    - max_kernel_size: Maximum kernel width in pixels. Defaults to 501.
+    - max_kernel_wavelength_samples: Maximum number of wavelengths used to
+      choose the kernel size. Defaults to 16.
+    - renormalize_clipped_kernel: If True, restore the historical behaviour of
+      normalizing the clipped finite kernel to unity. Defaults to False.
 
     Examples
     --------
@@ -248,39 +255,58 @@ class MoffatPSF(AnalyticalPSF):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._fwhm_interp = None
 
-        self.target, self.location, self.time = get_observation_info_from_cmds(self.cmds)
-        self.alpha = self.meta["alpha"]
-        self.fwhm = self.get_fwhm_interp()
+    def fwhm(self, wavelengths):
+        fwhm = self.meta["fwhm"]
+        if isinstance(fwhm, dict) and {"pivot_wave", "pivot_wave_unit"}.issubset(fwhm):
+            target, location, time, _ = get_observation_info_from_cmds(self.cmds)
+            key = tuple(fwhm.items()), target, location, time
+        elif isinstance(fwhm, dict):
+            key = tuple(fwhm.items())
+        else:
+            key = fwhm
+
+        if self._fwhm_interp is None or self._fwhm_interp[1] != key:
+            self._fwhm_interp = self.get_fwhm_interp(), key
+
+        return self._fwhm_interp[0](wavelengths)
+
+    @property
+    def alpha(self):
+        return self.meta["alpha"]
 
     def get_fwhm_interp(self):
         """
         Parses supplied FWHM input kwarg and returns a function that takes wavelength as input and returns FWHM.
         Overwrite this function for subclassing if FWHM input options change.
         """
-        if isinstance(self.meta["fwhm"], dict):
+        fwhm = self.meta["fwhm"]
+        if isinstance(fwhm, dict):
             logger.info("dict supplied for FWHM")
-            fwhm = self.meta["fwhm"]
             if check_keys(fwhm, {"seeing", "seeing_unit", "pivot_wave", "pivot_wave_unit"}, action="warn"):
                 logger.info("seeing and pivot supplied, using natural scale seeing law")
-                zenith_angle = get_zenith_angle(self.target, self.location, self.time)
+                target, location, time, _ = get_observation_info_from_cmds(self.cmds)
+                zenith_angle = get_zenith_angle(target, location, time)
+                seeing = (fwhm["seeing"] * u.Unit(fwhm["seeing_unit"])).to(u.arcsec)
+                pivot = (fwhm["pivot_wave"] * u.Unit(fwhm["pivot_wave_unit"])).to(u.um)
 
-                return partial(self.natural_scale, seeing=fwhm["seeing"]*u.Unit(fwhm["seeing_unit"]),
-                                pivot=fwhm["pivot_wave"]*u.Unit(fwhm["pivot_wave_unit"]),
-                                zenith_angle=zenith_angle*u.deg)
+                return partial(self.natural_scale, seeing=seeing, pivot=pivot, zenith_angle=zenith_angle*u.deg)
 
             elif check_keys(fwhm, {"seeing", "seeing_unit"}, action="error"):
                 logger.info("only seeing supplied, FWHM is wavelength independent")
-                return lambda wavelengths: fwhm["seeing"] * u.Unit(fwhm["seeing_unit"])
+                seeing = (fwhm["seeing"] * u.Unit(fwhm["seeing_unit"])).to_value(u.arcsec)
+                return lambda wavelengths: np.full(wavelengths.shape, seeing, dtype=float) * u.arcsec
 
-        if isinstance(self.meta["fwhm"], (int, float)):
+        if isinstance(fwhm, (int, float)):
             logger.info("float value supplied, assuming arcsec")
-            return lambda wavelengths: self.meta["fwhm"] * u.arcsec
+            return lambda wavelengths: np.full(wavelengths.shape, fwhm, dtype=float) * u.arcsec
 
-        if isinstance(self.meta["fwhm"], str):
+        if isinstance(fwhm, str):
             logger.info("filename supplied for FWHM")
-            self.table = DataContainer(filename=find_file(from_currsys(self.meta["fwhm"], self.cmds))).table
-            return self.fwhm_from_table(self.table)
+            self.table = DataContainer(filename=find_file(from_currsys(fwhm, self.cmds))).table
+            interp = self.fwhm_from_table(self.table)
+            return lambda wavelengths: interp(wavelengths) * u.arcsec
 
         raise TypeError("fwhm kwarg must be of type dict or float or str")
 
@@ -288,29 +314,114 @@ class MoffatPSF(AnalyticalPSF):
         pixel_scale = fov.header["CDELT1"] * u.deg.to(u.arcsec)
         pixel_scale = quantify(pixel_scale, u.arcsec)
 
-        # for each wavelength in waveset, get the corresponding FWHM, convert to gamma, and create a Moffat kernel
-        npts = (fov.meta["wave_max"] - fov.meta["wave_min"]) / (from_currsys("!SIM.spectral.spectral_bin_width", self.cmds) * u.um)
-        ##sample only npts from len(fov.waveset)
-        wavelengths = fov.waveset[::max(1, int(len(fov.waveset) / npts))]
-        ## get fwhm and gamma for the sampled wave pts
-        fwhms = self.fwhm(wavelengths).to(u.arcsec) / pixel_scale
-        gammas = self.fwhm2gamma(fwhms, self.alpha).value
+        # Sample the wavelength-dependent seeing law with a bounded number of
+        # representative points. Kernel sizing is driven by the broadest PSF
+        # over the FOV, not by every spectral sample in the cube.
+        wavelengths = self._sample_kernel_wavelengths(fov.waveset)
+        fwhms = self.fwhm(wavelengths) / pixel_scale
+        alpha = self.alpha
+        gammas = np.asarray(self.fwhm2gamma(fwhms, alpha), dtype=float)
 
-        kx = self.meta.get("kernel_size", 4.0)
-        ksize = int(kx * np.max(fwhms).value)
-        ksize = ksize + 1 if ksize % 2 == 0 else ksize
+        target = self._target_enclosed_energy()
+        max_ksize = self._max_kernel_size()
+        ksize = self._minimum_kernel_size(np.max(fwhms))
+        if max_ksize is not None:
+            ksize = min(ksize, max_ksize)
 
-        amplitude = (self.alpha - 1)/(np.pi * gammas**2)
-        x, y = np.meshgrid(np.arange(ksize)-ksize//2, np.arange(ksize)-ksize//2)
-        cube = Moffat2D.evaluate(x=x[None, ...], y=y[None, ...],
-                                 amplitude=amplitude[:, None, None], x_0=0, y_0=0,
-                                 gamma=gammas[:, None, None], alpha=self.alpha)
-        kernel = np.mean(cube, axis=0) # average over wavelength axis
-        norm = np.sum(kernel)
-        if norm < 0.98:
-            logger.warning(f"Kernel size too small, kernel sums to {norm}")
-        kernel /= norm
+        kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize)
+        while norm < target and (max_ksize is None or ksize < max_ksize):
+            ksize = self._next_kernel_size(ksize, max_ksize)
+            kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize)
+
+        if norm < target:
+            logger.warning(
+                "%s Moffat PSF kernel encloses %.6f of the analytic flux; "
+                "target is %.6f. wave_range=(%.6g, %.6g) um, "
+                "pixel_scale=%.6g arcsec, max_fwhm=%.6g pix, "
+                "kernel_size=%d pix, max_kernel_size=%s.",
+                self.display_name,
+                norm,
+                target,
+                wavelengths[0].to_value(u.um),
+                wavelengths[-1].to_value(u.um),
+                pixel_scale.to_value(u.arcsec),
+                np.max(fwhms),
+                ksize,
+                max_ksize,
+            )
+
+        if self._renormalize_clipped_kernel() and norm > 0:
+            kernel /= norm
         return kernel
+
+    def _sample_kernel_wavelengths(self, waveset: u.Quantity) -> u.Quantity:
+        max_samples = max(2, int(from_currsys(
+            self.meta.get("max_kernel_wavelength_samples", 16), self.cmds)))
+        waveset = quantify(waveset, u.um)
+        if waveset.size <= max_samples:
+            return waveset
+
+        indices = np.unique(np.linspace(0, waveset.size - 1, max_samples).round().astype(int))
+        return waveset[indices]
+
+    def _target_enclosed_energy(self) -> float:
+        target = self.meta.get("kernel_enclosed_energy")
+        if target is None:
+            flux_accuracy = float(from_currsys(
+                self.meta.get("flux_accuracy", 1e-3), self.cmds))
+            target = 1.0 - flux_accuracy
+        else:
+            target = float(from_currsys(target, self.cmds))
+        if not 0 < target <= 1:
+            raise ValueError("kernel_enclosed_energy must be in the range (0, 1].")
+        return target
+
+    def _max_kernel_size(self) -> int | None:
+        max_ksize = self.meta.get("max_kernel_size", 501)
+        max_ksize = from_currsys(max_ksize, self.cmds)
+        if max_ksize in (None, "None"):
+            return None
+        return self._ensure_odd_int(max_ksize)
+
+    def _minimum_kernel_size(self, max_fwhm_pix: float) -> int:
+        kx = float(from_currsys(self.meta.get("kernel_size", 4.0), self.cmds))
+        return self._ensure_odd_int(kx * max_fwhm_pix)
+
+    def _make_moffat_kernel(self, gammas: np.ndarray, alpha:float, ksize: int) -> tuple[np.ndarray, float]:
+        amplitude = (alpha - 1) / (np.pi * gammas**2)
+        x, y = np.meshgrid(
+            np.arange(ksize) - ksize // 2,
+            np.arange(ksize) - ksize // 2,
+        )
+        cube = Moffat2D.evaluate(
+            x=x[None, ...],
+            y=y[None, ...],
+            amplitude=amplitude[:, None, None],
+            x_0=0,
+            y_0=0,
+            gamma=gammas[:, None, None],
+            alpha=alpha,
+        )
+        kernel = np.mean(cube, axis=0)
+        if from_currsys(self.meta.get("rounded_edges", False), self.cmds):
+            kernel = self._round_kernel_edges(kernel)
+        return kernel, float(np.sum(kernel))
+
+    @staticmethod
+    def _ensure_odd_int(value) -> int:
+        value = max(1, int(np.ceil(value)))
+        return value + 1 if value % 2 == 0 else value
+
+    def _next_kernel_size(self, ksize: int, max_ksize: int | None) -> int:
+        next_size = self._ensure_odd_int(max(ksize + 2, int(np.ceil(1.25 * ksize))))
+        if max_ksize is not None:
+            next_size = min(next_size, max_ksize)
+            next_size = next_size - 1 if next_size % 2 == 0 else next_size
+        return max(next_size, ksize + 2)
+
+    def _renormalize_clipped_kernel(self) -> bool:
+        return bool(from_currsys(
+            self.meta.get("renormalize_clipped_kernel", False), self.cmds))
 
     @staticmethod
     def natural_scale(wavelengths: u.Quantity,
@@ -322,7 +433,7 @@ class MoffatPSF(AnalyticalPSF):
         https://opg.optica.org/josa/fulltext.cfm?uri=josa-68-7-877&id=57124
         https://www.mdpi.com/2072-4292/14/2/405
         """
-        return seeing * (wavelengths / pivot) ** -0.2 * 1 / np.cos(zenith_angle.to(u.rad)) ** .6
+        return seeing * (wavelengths.to_value(pivot.unit) / pivot.value) ** -0.2 * 1 / np.cos(zenith_angle.to(u.rad)) ** .6
 
     @staticmethod
     def fwhm2gamma(fwhm: u.Quantity, alpha) -> u.Quantity:
@@ -336,7 +447,8 @@ class MoffatPSF(AnalyticalPSF):
             raise ValueError("Table must contain 'wavelength' and 'fwhm' columns.")
         wave_array = quantity_from_table("wavelength", table, "um").to_value(u.um)
         fwhm_array = table["fwhm"]
-        return make_interp_spline(wave_array, fwhm_array)  # returns bspline instance
+        interp = make_interp_spline(wave_array, fwhm_array)
+        return lambda wavelengths: interp(wavelengths.to_value(u.um))
 
 
 class AOEnhanceablePSF(MoffatPSF):
@@ -384,24 +496,56 @@ class AOEnhanceablePSF(MoffatPSF):
         kwargs["alpha"] = None if "alpha" not in kwargs else kwargs["alpha"]
         kwargs["fwhm"] = 1.0 if "fwhm" not in kwargs else kwargs["fwhm"]
         super().__init__(**kwargs)
+        self._ao_alpha = None
+        self._ao_interp = None
 
+    @property
+    def natural_alpha(self):
+        return super().alpha
+
+    @property
+    def ao_alpha(self):
+        if self._ao_alpha is None or self._ao_alpha[1] != self.meta['ao_table']:
+            _, alpha = self.ao_table_data()
+            self._ao_alpha = alpha, self.meta['ao_table']
+        return self._ao_alpha[0]
+
+    @property
+    def alpha(self):
+        return self.ao_alpha if self.meta['enable_ao'] else self.natural_alpha
+
+    def ao_table_data(self):
         aotab = DataContainer(filename=find_file(from_currsys(self.meta["ao_table"], self.cmds))).table
-        self.ao_scale = self.fwhm_from_table(aotab)
 
         if "alpha" in aotab.meta:
-            self.alpha = aotab.meta["alpha"]
-            logger.info(f"Alpha parameter found in AO table header: {self.alpha}")
+            alpha = aotab.meta["alpha"]
+            logger.info(f"Alpha parameter found in AO table header: {alpha}")
         elif self.meta["alpha"] is not None:
-            self.alpha = self.meta["alpha"]
-            logger.info(f"Alpha parameter found in kwargs: {self.alpha}")
+            alpha = self.meta["alpha"]
+            logger.info(f"Alpha parameter found in kwargs: {alpha}")
         else:
             raise ValueError("Alpha parameter missing: Not found in ao_table header or kwargs.")
 
-        if self.meta["enable_ao"]:
-            if self.meta["is_absolute"]:
-                self.fwhm = self.ao_scale
-            else:
-                self.fwhm = lambda wavelengths: (self.fwhm(wavelengths) * self.ao_scale(wavelengths)).to(u.arcsec)
+        return aotab, alpha
+
+    @property
+    def ao_scale(self):
+        if self._ao_interp is None or self._ao_interp[1] != self.meta['ao_table']:
+            ao_table, _ = self.ao_table_data()
+            self._ao_interp = self.fwhm_from_table(ao_table), self.meta['ao_table']
+        return self._ao_interp[0]
+
+    def ao_fwhm(self, wavelengths):
+        ao = self.ao_scale(wavelengths)
+        if self.meta["is_absolute"]:
+            return ao * u.arcsec
+        return self.natural_fwhm(wavelengths) * ao
+
+    def natural_fwhm(self, wavelengths):
+        return super().fwhm(wavelengths)
+
+    def fwhm(self, wavelengths):
+        return self.ao_fwhm(wavelengths) if self.meta["enable_ao"] else self.natural_fwhm(wavelengths)
 
 
 def wfe2gauss(wfe, wave, width=None):

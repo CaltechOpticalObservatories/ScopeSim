@@ -10,7 +10,8 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
                          design_res: float, echelle_angle: float|u.Quantity, min_order: int, max_order: int,
                          echelle_groove_length: float|u.Quantity,
                          pix_per_res_elem: float, disp_npix: int, xdisp_npix: int, pix_size: float|u.Quantity,
-                         xdisp_groove_length: float|u.Quantity = 0.0, xdisp_beta_center: float|u.Quantity = 0.0):
+                         xdisp_groove_length: float|u.Quantity = 0.0, xdisp_beta_center: float|u.Quantity = 0.0,
+                         dispersion_focal_len: float|u.Quantity = None):
     """
     
     Parameters
@@ -43,6 +44,9 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
         Cross disperser groove length. If float, assumed to be in mm.
     xdisp_beta_center: float|u.Quantity
         Cross disperser beta center angle. If float, assumed to be in degrees.
+    dispersion_focal_len: float|u.Quantity
+        Effective focal length for the echelle/main-dispersion detector
+        coordinate. If float, assumed to be in mm. Defaults to focal_len.
 
     Returns
     -------
@@ -65,6 +69,10 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
         xdisp_groove_length = xdisp_groove_length * u.mm
     if not isinstance(xdisp_beta_center, u.Quantity):
         xdisp_beta_center = xdisp_beta_center * u.deg
+    if dispersion_focal_len is None:
+        dispersion_focal_len = focal_len
+    elif not isinstance(dispersion_focal_len, u.Quantity):
+        dispersion_focal_len = dispersion_focal_len * u.mm
 
     x_disp_len = (xdisp_npix*pix_size).to(u.mm)
 
@@ -89,6 +97,7 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
                                    design_res=design_res,
                                    pixels_per_res_elem=pix_per_res_elem,
                                    focal_length=focal_len,
+                                   dispersion_focal_length=dispersion_focal_len,
                                    grating=echelle_grating,
                                    detector=Detector(disp_npix, xdisp_npix, pix_size),
                                    cross_disperser=cross_disperser)
@@ -186,10 +195,10 @@ class GratingSetup:
         t = detector_length / focal_length
         k = (l_max - l_min) / d
         x = k * (1 + np.sqrt(1 + t ** 2)) / 2 / t
-        u = np.arccos(np.sqrt(x))
-        v = np.arcsin(k / 2 / np.sqrt(x))
-        beta_max = u+v
-        beta_min = u-v
+        beta_center_guess = np.arccos(np.sqrt(x))
+        beta_half_range = np.arcsin(k / 2 / np.sqrt(x))
+        beta_max = beta_center_guess + beta_half_range
+        beta_min = beta_center_guess - beta_half_range
         alpha = np.arcsin(l_max / d - np.sin(beta_max))
         return alpha.to(u.rad), ((beta_min + beta_max) / 2).to(u.rad)
 
@@ -354,6 +363,7 @@ class SpectrographSetup:
             grating: GratingSetup,
             detector: Detector,
             cross_disperser: GratingSetup = None,
+            dispersion_focal_length: u.Quantity = None,
     ):
         """
 
@@ -365,6 +375,10 @@ class SpectrographSetup:
         # :param u.Quantity final_wave: longest wavelength at the edge of detector
         :param float pixels_per_res_elem: number of pixels per resolution element of spectrometer
         :param u.Quantity focal_length: the focal length of the detector
+        :param u.Quantity dispersion_focal_length: effective focal length for the
+            echelle/main-dispersion detector coordinate. This can differ from
+            focal_length when the prescription has already folded relay
+            magnification into the dispersion scale.
         :param GratingSetup grating: configured grating
         :param MKIDDetector detector: configured detector
         :return spectrograph simulation object
@@ -379,7 +393,13 @@ class SpectrographSetup:
         self.grating = grating
         self.detector = detector
         self.focal_length = focal_length.to(u.mm)
-        self.pixel_scale = np.arctan(self.detector.pixel_size / self.focal_length)
+        self.dispersion_focal_length = (
+            self.focal_length
+            if dispersion_focal_length is None
+            else dispersion_focal_length.to(u.mm)
+        )
+        self.pixel_scale = np.arctan(
+            self.detector.pixel_size / self.dispersion_focal_length)
         self.beta_central_pixel = self.grating.beta_center
         self.nord = int(self.m_max - self.m0 + 1)
         self.nominal_pixels_per_res_elem = pixels_per_res_elem
@@ -392,12 +412,13 @@ class SpectrographSetup:
                      # f'\n\tR0: {self.detector.design_R0}'
                      f'\n\tOrders: {self.orders}'
                      f'\n\tFocal length: {self.focal_length}'
+                     f'\n\tDispersion focal length: {self.dispersion_focal_length}'
                      f'\n\tIncidence angle: {np.rad2deg(self.grating.alpha):.3f}'
-                     f'\n\tReflectance angle: {np.rad2deg(self.beta_central_pixel):.2f}\n'
+                     f'\n\tReflectance angle: {np.rad2deg(self.beta_central_pixel):.2f}'
                      f'\n\tGroove length: {self.grating.d:.2f}'
                      f'\n\t# of pixels: {self.detector.n_pix_x}x{self.detector.n_pix_y}'
                      f'\n\tPixel size: {self.detector.pixel_size}'
-                     f'\n\tPixels per res. element: {self.nominal_pixels_per_res_elem}')
+                     f'\n\tPixels per res. element: {self.nominal_pixels_per_res_elem}\n')
 
     def set_beta_center(self, beta, littrow: bool = False):
         """
@@ -448,7 +469,8 @@ class SpectrographSetup:
         :return: pixel at beta
         """
         delta_angle = np.tan(beta - self.beta_central_pixel)
-        return self.focal_length * delta_angle / self.detector.pixel_size + self.detector.n_pix_x / 2
+        return (self.dispersion_focal_length * delta_angle /
+                self.detector.pixel_size + self.detector.n_pix_x / 2)
 
     def beta_for_x_pixel(self, pixel):
         """
@@ -456,7 +478,8 @@ class SpectrographSetup:
         :return: reflectance angle (radians) at pixel
         """
         center_offset = self.detector.pixel_size * (pixel - self.detector.n_pix_x / 2)
-        return self.beta_central_pixel + np.arctan(center_offset / self.focal_length)
+        return self.beta_central_pixel + np.arctan(
+            center_offset / self.dispersion_focal_length)
 
     def y_pixel_for_beta(self, beta):
         """

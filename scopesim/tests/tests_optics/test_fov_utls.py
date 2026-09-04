@@ -115,6 +115,29 @@ class TestExtractRangeFromSpectrum:
         assert new_spec.waverange[0] == 1.98 * u.um
         assert new_spec(1.98 * u.um).value == approx(12.8)
 
+    def test_reuses_cached_spectrum_waveset(self, monkeypatch):
+        from scopesim.optics import fov as fov_mod
+
+        fov_mod._SPECTRUM_WAVESET_AA_CACHE.clear()
+        wave = np.arange(0.7, 2.5, 0.1) * u.um
+        flux = np.arange(len(wave)) * PHOTLAM
+        spec = SourceSpectrum(Empirical1D, points=wave, lookup_table=flux)
+        original_waveset = SourceSpectrum.waveset.fget
+        calls = 0
+
+        def counting_waveset(self):
+            nonlocal calls
+            if self is spec:
+                calls += 1
+            return original_waveset(self)
+
+        monkeypatch.setattr(SourceSpectrum, "waveset", property(counting_waveset))
+
+        extract_range_from_spectrum(spec, [1.98, 2.12] * u.um)
+        extract_range_from_spectrum(spec, [1.90, 2.00] * u.um)
+
+        assert calls == 1
+
     @pytest.mark.parametrize(("endpoint", "msg"),
                              [pytest.param(1.5, "Waverange does not overlap", marks=pytest.mark.xfail(reason="Check was disabled in function, dunno why.")),
                               (2.05, "Waverange only partially overlaps")])

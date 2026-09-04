@@ -12,6 +12,7 @@ from .mosaic_trace_list import *
 from .surface_list import *
 from .ter_curves import *
 from . import ter_curves_utils
+from .illumination import *
 
 from .detector_list import *
 from .electronic import *

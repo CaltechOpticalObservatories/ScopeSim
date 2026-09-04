@@ -41,9 +41,7 @@ def make_emission_from_emissivity(temp: u.Quantity[u.K],
     flux *= emiss_src_spec
     flux.meta["temperature"] = temp
     flux.meta["solid_angle"] = u.sr**-1
-    flux.meta["history"] = [
-        "Created from Blackbody curve. Units are per steradian",
-    ]
+    flux.meta["history"] = ["Created from Blackbody curve. Units are per steradian",]
 
     return flux
 
@@ -87,8 +85,7 @@ def make_emission_from_array(flux, wave, meta) -> SourceSpectrum:
     flux = normalise_flux_if_binned(flux, wave)
 
     orig_unit = flux.unit
-    flux = SourceSpectrum(Empirical1D, points=wave,
-                          lookup_table=flux)
+    flux = SourceSpectrum(Empirical1D, points=wave, lookup_table=flux)
     flux.meta["solid_angle"] = angle
     flux.meta["history"] = [
         f"Created from emission array with units {orig_unit}",

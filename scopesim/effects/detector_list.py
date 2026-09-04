@@ -139,6 +139,7 @@ class DetectorList(Effect):
         super().__init__(**kwargs)
         params = {
             "pixel_scale": "!INST.pixel_scale",  # arcsec
+            "plate_scale": "!INST.plate_scale",  # arcsec / mm
             "active_detectors": "all",
         }
         self.meta.update(params)

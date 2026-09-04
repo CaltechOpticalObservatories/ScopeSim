@@ -10,12 +10,15 @@ This module implements a SelectorWheel effect that allows the user to define mul
 ( e.g. different aperture masks for different arms) in the wheel dictionary where each effect corresponds to a
 "selector_id" value. The user can set which id to use as the "selector", for e.g. aperture_id or id of the FoV object.
 """
+import importlib
+from numbers import Integral
+
 from ..utils import (check_keys, get_logger, real_colname)
 from .effects import Effect
 from ..optics.fov_volume_list import FovVolumeList
 from ..optics.fov import FieldOfView
+from ..optics.image_plane import ImagePlane
 from ..detector.detector import Detector
-import importlib
 
 logger = get_logger(__name__)
 
@@ -72,8 +75,7 @@ class SelectorWheel(Effect):
             else:
                 self.wheel_effects[selector_value] = effect_class(cmds=self.cmds, **effect_kwargs)
 
-        # Use the wheel effects' z_order as the z_order of the selector wheel
-        self.z_order = [eff.z_order for eff in self.wheel_effects.values()][0]
+        self.z_order = self._resolve_z_order()
 
 
     def apply_to(self, obj, **kwargs):
@@ -85,7 +87,6 @@ class SelectorWheel(Effect):
 
             effect_to_apply = self.get_effect(selector_value)
             if effect_to_apply is None:
-                logger.warning(f"No effect found for selector value: {selector_value}, skipping effect application.")
                 return obj
 
             obj = effect_to_apply.apply_to(obj, **kwargs)
@@ -104,12 +105,15 @@ class SelectorWheel(Effect):
                     continue
 
                 effect_to_apply = self.get_effect(val)
-                logger.debug(f"Applying effect for {self.meta['selector_key']}: {val} -> {effect_to_apply}, volumes: {len(vols_with_val)}")
 
                 if effect_to_apply is None:
                     new_volumes.extend(vols_with_val)
                     continue
 
+                logger.debug(
+                    f"Applying effect for {self.meta['selector_key']}: "
+                    f"{val} -> {effect_to_apply}, volumes: {len(vols_with_val)}"
+                )
                 newvollist = FovVolumeList()
                 newvollist.volumes = vols_with_val
                 newvollist = effect_to_apply.apply_to(newvollist, **kwargs)
@@ -123,7 +127,14 @@ class SelectorWheel(Effect):
 
             effect_to_apply = self.get_effect(selector_value)
             if effect_to_apply is None:
-                logger.warning(f"No effect found for detector ID: {selector_value}, skipping effect application.")
+                return obj
+
+            obj = effect_to_apply.apply_to(obj, **kwargs)
+
+        if isinstance(obj, ImagePlane):
+            selector_value = self._selector_value_from_image_plane(obj)
+            effect_to_apply = self.get_effect(selector_value)
+            if effect_to_apply is None:
                 return obj
 
             obj = effect_to_apply.apply_to(obj, **kwargs)
@@ -134,10 +145,52 @@ class SelectorWheel(Effect):
     def get_effect(self, selector_value):
         eff = None
         if selector_value not in self.wheel_effects.keys():
-            logger.warning(f"Entry for selector value {selector_value} not found in wheel effects. "
-                           f"Assuming no effect to apply for this selector value.")
+            if self._is_missing_selector_value_allowed(selector_value):
+                logger.debug(
+                    "Entry for selector value %s intentionally absent from wheel effects.",
+                    selector_value,
+                )
+            else:
+                logger.warning(f"Entry for selector value {selector_value} not found in wheel effects. "
+                               f"Assuming no effect to apply for this selector value.")
         else:
             eff = self.wheel_effects[selector_value]
         return eff
 
+    def _is_missing_selector_value_allowed(self, selector_value):
+        values = self.meta.get(
+            "allowed_missing_selector_values",
+            self.meta.get("allow_missing_selector_values", ()),
+        )
+        if values is None:
+            return False
+        if isinstance(values, str):
+            if values.lower() in {"all", "any", "*"}:
+                return True
+            values = (values,)
+        elif not isinstance(values, (list, tuple, set, frozenset)):
+            values = (values,)
+        return selector_value in values
 
+    def _resolve_z_order(self):
+        """Use an explicit wheel z_order if supplied, otherwise inherit one."""
+        configured_z_order = self.meta.get("z_order")
+        if configured_z_order is not None:
+            if isinstance(configured_z_order, Integral):
+                return (int(configured_z_order),)
+            return tuple(configured_z_order)
+
+        if not self.wheel_effects:
+            return ()
+        return tuple(next(iter(self.wheel_effects.values())).z_order)
+
+
+    def _selector_value_from_image_plane(self, obj):
+        selector_key = self.meta["selector_key"]
+        if selector_key in obj.meta:
+            return obj.meta[selector_key]
+        if selector_key in obj.hdu.header:
+            return obj.hdu.header[selector_key]
+        if selector_key in {"id", "image_plane_id", "IMGPLANE"}:
+            return obj.id
+        raise ValueError(f"Selector key {selector_key} not found in ImagePlane.")

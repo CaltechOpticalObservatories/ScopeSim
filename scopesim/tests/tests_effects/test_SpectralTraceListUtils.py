@@ -8,10 +8,15 @@ import pytest
 import numpy as np
 
 from astropy.io import fits
+from astropy.table import Table
+from astropy import units as u
 
+from scopesim.optics.image_plane_utils import header_from_list_of_xy
 from scopesim.effects.spectral_trace_list_utils import SpectralTrace
 from scopesim.effects.spectral_trace_list_utils import Transform2D, power_vector
 from scopesim.effects.spectral_trace_list_utils import make_image_interpolations
+from scopesim.effects.spectral_trace_list_utils import apply_detector_qe_to_trace_image
+from scopesim.effects.spectral_trace_list_utils import _clip_tiny_negative_trace_pixels
 from scopesim.tests.mocks.py_objects import trace_list_objects as tlo
 
 class TestSpectralTrace:
@@ -20,6 +25,18 @@ class TestSpectralTrace:
         trace_tbl = tlo.trace_1()
         spt = SpectralTrace(trace_tbl)
         assert isinstance(spt, SpectralTrace)
+
+    def test_copies_validation_metadata_from_fits_header(self):
+        hdu = fits.BinTableHDU(tlo.trace_1())
+        hdu.header["DESIGNR"] = 18000
+        hdu.header["FWHMPIX"] = 4.2
+        hdu.header["SLITWID"] = 0.7
+
+        spt = SpectralTrace(hdu)
+
+        assert spt.meta["design_res"] == 18000
+        assert spt.meta["nominal_fwhm_pix"] == 4.2
+        assert spt.meta["nominal_slit_width"] == 0.7
 
     def test_fails_without_table(self):
         a_number = 1
@@ -35,6 +52,81 @@ class TestSpectralTrace:
         trace_tbl = tlo.trace_5()
         spt = SpectralTrace(trace_tbl)
         assert spt.dispersion_axis == 'y'
+
+    def test_set_dispersion_uses_supplied_detector_pixel_size(self):
+        trace_tbl = tlo.trace_6()
+        spt = SpectralTrace(trace_tbl)
+
+        spt._set_dispersion(2.1, 2.4, pixsize=0.01)
+        small_pix = spt.dlam_per_pix(2.2)
+        spt._set_dispersion(2.1, 2.4, pixsize=0.02)
+        large_pix = spt.dlam_per_pix(2.2)
+
+        assert large_pix == pytest.approx(2 * small_pix)
+
+    def test_trace_flux_jacobian_handles_tilted_trace(self):
+        spt = SpectralTrace(_tilted_linear_trace_table())
+        det_header = header_from_list_of_xy([-1, 1], [-1, 1], 0.01, "D")
+        x_mm = np.array([[2.0]])
+        y_mm = np.array([[0.0]])
+
+        spt.meta["trace_flux_jacobian"] = False
+        projected_scale = spt._trace_flux_scale(
+            x_mm, y_mm, pixsize=0.01, pixscale=0.1, det_header=det_header)
+
+        spt.meta["trace_flux_jacobian"] = True
+        jacobian_scale = spt._trace_flux_scale(
+            x_mm, y_mm, pixsize=0.01, pixscale=0.1, det_header=det_header)
+
+        assert projected_scale[0, 0] > jacobian_scale[0, 0]
+        assert jacobian_scale[0, 0] == pytest.approx(1e-3, rel=1e-5)
+
+
+def _tilted_linear_trace_table():
+    xi_grid, wave_grid = np.meshgrid(
+        np.linspace(-1, 1, 5),
+        np.linspace(1, 3, 5),
+        indexing="ij",
+    )
+    xi = xi_grid.ravel()
+    wave = wave_grid.ravel()
+
+    return Table(
+        data=[
+            wave * u.um,
+            xi * u.arcsec,
+            (wave + 0.1 * xi) * u.mm,
+            (xi / 10) * u.mm,
+        ],
+        names=["wavelength", "s", "x", "y"],
+    )
+
+
+def test_apply_detector_qe_to_trace_image_uses_detector_position():
+    class PositionAwareQE:
+        def throughput_at(self, wave, detector_x=None, detector_y=None, **kwargs):
+            return 0.5 + 0.1 * np.asarray(detector_y)
+
+    image = np.ones((2, 2), dtype=float)
+    wave = np.ones((2, 2), dtype=float)
+    detector_x = np.zeros((2, 2), dtype=float)
+    detector_y = np.array([[0, 1], [2, 3]], dtype=float)
+
+    result = apply_detector_qe_to_trace_image(
+        image, PositionAwareQE(), wave, detector_x, detector_y)
+
+    np.testing.assert_allclose(result, [[0.5, 0.6], [0.7, 0.8]])
+
+
+def test_clip_tiny_negative_trace_pixels_only_clips_roundoff():
+    image = np.array([[1.0, -1e-15], [0.0, -1e-10]], dtype=float)
+
+    clipped = _clip_tiny_negative_trace_pixels(image)
+
+    assert clipped == 1
+    assert image[0, 1] == 0
+    assert image[1, 1] < 0
+
 
 class TestPowerVec:
     """Test function power_vector()"""
@@ -124,9 +216,50 @@ class TestTransform2D:
         zz = 1. + xx - yy
 
         matrix = np.array([[1, 1], [-1, 0]])
-        tf2d = Transform2D.fit(xx, yy, zz, degree=1)
+        tf2d = Transform2D.fit(xx, yy, zz, degree=1, normalize=False)
 
         assert tf2d.matrix == pytest.approx(matrix)
+
+    def test_fit_preserves_high_dynamic_range_coefficients(self):
+        x_grid, y_grid = np.meshgrid(
+            np.linspace(-5, 5, 3),
+            np.linspace(0.67, 0.69, 200),
+            indexing="ij",
+        )
+        x = x_grid.ravel()
+        y = y_grid.ravel()
+        z = (
+            1e8 * y**4
+            - 2e7 * y**3
+            + 3e5 * y**2
+            + 15 * x * y
+            + 0.2 * x
+        )
+
+        tf2d = Transform2D.fit(x, y, z, degree=4)
+
+        assert tf2d.matrix.dtype == np.float64
+        assert np.max(np.abs(tf2d(x, y) - z)) < 1e-5
+
+    def test_gradient_with_normalized_fit_uses_input_units(self):
+        x_grid, y_grid = np.meshgrid(
+            np.linspace(-5, 5, 5),
+            np.linspace(0.67, 0.69, 20),
+            indexing="ij",
+        )
+        x = x_grid.ravel()
+        y = y_grid.ravel()
+        z = 3 + 2 * x + 5 * y + 7 * x * y + 11 * y**2
+
+        tf2d = Transform2D.fit(x, y, z, degree=2)
+        dz_dx, dz_dy = tf2d.gradient()
+
+        assert dz_dx(x, y) == pytest.approx(2 + 7 * y, rel=1e-10, abs=1e-10)
+        assert dz_dy(x, y) == pytest.approx(
+            5 + 7 * x + 22 * y,
+            rel=1e-10,
+            abs=1e-10,
+        )
 
     def test_grid_false_shape_is_preserved(self, tf2d):
         n_x, n_y = 4, 2

@@ -32,6 +32,49 @@ from ..server.download_utils import create_retriever
 logger = get_logger(__name__)
 
 
+def detector_qe_at(
+    detector_qe,
+    wave: u.Quantity,
+    detector_x=None,
+    detector_y=None,
+    **kwargs,
+):
+    """Evaluate detector QE for trace-mapped light.
+
+    Spectral-only QE curves ignore detector position. Position-dependent QE
+    effects can provide ``throughput_at(wave, detector_x=..., detector_y=...)``
+    to support tapered coatings without changing callers that only need
+    wavelength-dependent throughput.
+    """
+    if detector_qe is None:
+        return np.ones(np.size(wave), dtype=float)
+
+    if hasattr(detector_qe, "throughput_at"):
+        return detector_qe.throughput_at(
+            wave, detector_x=detector_x, detector_y=detector_y, **kwargs)
+
+    if detector_x is not None or detector_y is not None:
+        try:
+            return detector_qe.throughput(
+                wave, detector_x=detector_x, detector_y=detector_y, **kwargs)
+        except TypeError:
+            pass
+
+    return detector_qe.throughput(wave)
+
+
+def diffuse_detector_qe(detector_qe, wave: u.Quantity, footprint=None, **kwargs):
+    """Evaluate effective detector QE for non-dispersed diffuse light."""
+    if detector_qe is None:
+        return np.ones(np.size(wave), dtype=float)
+
+    if hasattr(detector_qe, "effective_diffuse_throughput"):
+        return detector_qe.effective_diffuse_throughput(
+            wave, footprint=footprint, **kwargs)
+
+    return detector_qe_at(detector_qe, wave, **kwargs)
+
+
 class TERCurve(Effect):
     """
     Transmission, Emissivity, Reflection Curve.
@@ -553,6 +596,223 @@ class QuantumEfficiencyCurve(TERCurve):
         super().__init__(**kwargs)
         self.meta["action"] = "transmission"
         self.meta["position"] = -1          # position in surface table
+
+
+class SpectralQuantumEfficiency(TERCurve):
+    """Throughput-only detector QE for spectroscopic FOV cubes.
+
+    Detector QE should attenuate photons reaching the detector, but it should
+    not create a thermal background source from detector emissivity. Place this
+    effect before spectral trace mapping so each order cube is multiplied by the
+    detector QE as a function of wavelength.
+
+    ``throughput_at`` and ``effective_diffuse_throughput`` define the detector
+    QE interface used by future position-dependent coatings. Spectral QE ignores
+    detector position; tapered QE effects should override these methods.
+    """
+
+    z_order: ClassVar[tuple[int, ...]] = (610,)
+    uses_detector_footprint: ClassVar[bool] = False
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.meta["action"] = "transmission"
+        self.meta["position"] = -1
+
+    def apply_to(self, obj, **kwargs):
+        if not isinstance(obj, FieldOfView):
+            return obj
+        return super().apply_to(obj, **kwargs)
+
+    def throughput_at(self, wave, detector_x=None, detector_y=None, **kwargs):
+        """Return trace-mapped detector QE.
+
+        Spectral QE is independent of detector position. Position-dependent QE
+        subclasses should override this method.
+        """
+        return self.throughput(wave)
+
+    def effective_diffuse_throughput(self, wave, footprint=None, **kwargs):
+        """Return footprint-averaged QE for diffuse image-plane backgrounds."""
+        return self.throughput(wave)
+
+    @property
+    def background_source(self):
+        return None
+
+
+class TaperedQuantumEfficiency(Effect):
+    """Position-dependent flattop detector QE coating.
+
+    The QE bandpass center varies linearly with one detector coordinate. This
+    represents tapered coatings whose bandpass is intentionally shifted along
+    the cross-dispersion axis. ``flat_width`` is the full wavelength width of
+    the peak plateau at each detector position. ``transition_width`` is the
+    width of each cosine-edged shoulder from ``peak`` down to ``floor``.
+    Trace-mapped light should call :meth:`throughput_at` with detector pixel
+    coordinates. Non-dispersed diffuse light should call
+    :meth:`effective_diffuse_throughput`, which averages the coating over a
+    representative detector footprint.
+    """
+
+    z_order: ClassVar[tuple[int, ...]] = (610,)
+    uses_detector_footprint: ClassVar[bool] = True
+    required_keys = {
+        "center_wave_min",
+        "center_wave_max",
+        "position_min",
+        "position_max",
+        "flat_width",
+    }
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        params = {
+            "axis": "y",
+            "wave_unit": "um",
+            "position_unit": "pix",
+            "peak": 0.99,
+            "floor": 0.0,
+            "transition_width": None,
+            "transition_fraction": 1.0,
+            "clip_position": True,
+            "diffuse_position_samples": 256,
+        }
+        self.meta.update(params)
+        self.meta.update(kwargs)
+        check_keys(self.meta, self.required_keys, action="error")
+
+    def apply_to(self, obj, **kwargs):
+        if isinstance(obj, FieldOfView):
+            obj.meta["detector_qe"] = self
+        return obj
+
+    def throughput(self, wave):
+        """Return QE at the representative midpoint of the taper."""
+        return self.throughput_at(wave)
+
+    def throughput_at(self, wave, detector_x=None, detector_y=None, **kwargs):
+        """Return detector QE at wavelength and detector position."""
+        wave_values = self._wave_values(wave)
+        position = self._position_values(detector_x, detector_y)
+        center = self._center_wave_values(position)
+        return self._flattop_response(wave_values, center)
+
+    def effective_diffuse_throughput(self, wave, footprint=None, **kwargs):
+        """Return QE averaged over a representative detector footprint."""
+        wave_values = np.atleast_1d(self._wave_values(wave))
+        positions = self._diffuse_positions(footprint)
+        centers = self._center_wave_values(positions)
+        values = self._flattop_response(
+            wave_values[:, None],
+            centers[None, :],
+        )
+        return np.mean(values, axis=1)
+
+    def _wave_values(self, wave) -> np.ndarray:
+        wave_unit = u.Unit(from_currsys(self.meta["wave_unit"], self.cmds))
+        return u.Quantity(wave, wave_unit).to_value(wave_unit)
+
+    def _position_values(self, detector_x=None, detector_y=None) -> np.ndarray:
+        axis = str(from_currsys(self.meta["axis"], self.cmds)).lower()
+        if axis in {"x", "dispersion"}:
+            position = detector_x
+        elif axis in {"y", "cross_dispersion", "cross-dispersion"}:
+            position = detector_y
+        else:
+            raise ValueError("axis must be 'x' or 'y'.")
+
+        if position is None:
+            position = 0.5 * (self._position_min() + self._position_max())
+        if hasattr(position, "unit"):
+            position_unit = self.meta.get("position_unit")
+            if position_unit not in (None, "None"):
+                return u.Quantity(position).to_value(u.Unit(position_unit))
+            return u.Quantity(position).value
+        return np.asarray(position, dtype=float)
+
+    def _position_min(self) -> float:
+        return float(from_currsys(self.meta["position_min"], self.cmds))
+
+    def _position_max(self) -> float:
+        return float(from_currsys(self.meta["position_max"], self.cmds))
+
+    def _center_wave_values(self, position) -> np.ndarray:
+        pos_min = self._position_min()
+        pos_max = self._position_max()
+        if pos_max == pos_min:
+            raise ValueError("position_min and position_max must differ.")
+
+        position = np.asarray(position, dtype=float)
+        fraction = (position - pos_min) / (pos_max - pos_min)
+        if from_currsys(self.meta["clip_position"], self.cmds):
+            fraction = np.clip(fraction, 0.0, 1.0)
+
+        wave_unit = u.Unit(from_currsys(self.meta["wave_unit"], self.cmds))
+        center_min = quantify(
+            from_currsys(self.meta["center_wave_min"], self.cmds), wave_unit,
+        ).to_value(wave_unit)
+        center_max = quantify(
+            from_currsys(self.meta["center_wave_max"], self.cmds), wave_unit,
+        ).to_value(wave_unit)
+        return center_min + fraction * (center_max - center_min)
+
+    def _flattop_response(self, wave_values, center_values) -> np.ndarray:
+        wave_unit = u.Unit(from_currsys(self.meta["wave_unit"], self.cmds))
+        flat_width = quantify(
+            from_currsys(self.meta["flat_width"], self.cmds), wave_unit,
+        ).to_value(wave_unit)
+        if flat_width <= 0:
+            raise ValueError("flat_width must be positive.")
+
+        transition_width = self._transition_width(wave_unit, flat_width)
+        flat_half_width = 0.5 * flat_width
+        outer_half_width = flat_half_width + transition_width
+        peak = float(from_currsys(self.meta["peak"], self.cmds))
+        floor = float(from_currsys(self.meta["floor"], self.cmds))
+        distance = np.abs(
+            np.asarray(wave_values, dtype=float)
+            - np.asarray(center_values, dtype=float)
+        )
+
+        if transition_width <= 0:
+            values = np.where(distance <= flat_half_width, peak, floor)
+            return np.clip(values, 0.0, 1.0)
+
+        edge_fraction = np.clip(
+            (distance - flat_half_width) / transition_width, 0.0, 1.0,
+        )
+        edge_values = (
+            floor
+            + (peak - floor) * 0.5 * (1 + np.cos(np.pi * edge_fraction))
+        )
+        values = np.where(
+            distance <= flat_half_width,
+            peak,
+            np.where(distance < outer_half_width, edge_values, floor),
+        )
+        return np.clip(values, 0.0, 1.0)
+
+    def _transition_width(self, wave_unit, flat_width: float) -> float:
+        value = from_currsys(self.meta.get("transition_width"), self.cmds)
+        if value in (None, "None"):
+            fraction = float(from_currsys(
+                self.meta["transition_fraction"], self.cmds))
+            value = fraction * flat_width
+        width = quantify(value, wave_unit).to_value(wave_unit)
+        if width < 0:
+            raise ValueError("transition_width must not be negative.")
+        return width
+
+    def _diffuse_positions(self, footprint=None) -> np.ndarray:
+        nsamp = int(from_currsys(
+            self.meta["diffuse_position_samples"], self.cmds))
+        nsamp = max(nsamp, 2)
+        return np.linspace(self._position_min(), self._position_max(), nsamp)
+
+    @property
+    def background_source(self):
+        return None
 
 
 class FilterCurve(TERCurve):

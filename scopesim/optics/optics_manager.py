@@ -4,7 +4,7 @@
 from inspect import isclass
 from typing import TextIO
 from io import StringIO
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -22,6 +22,76 @@ from .. import rc
 
 
 logger = get_logger(__name__)
+
+
+Z_ORDER_PHASES = (
+    (200, "fov_setup"),
+    (300, "image_plane_setup"),
+    (400, "detector_setup"),
+    (500, "source"),
+    (600, "fov"),
+    (700, "image_plane"),
+    (800, "detector"),
+    (900, "detector_array"),
+    (1000, "fits_header"),
+)
+
+EFFECT_ORDER_COLUMNS = (
+    "phase",
+    "phase_z",
+    "phase_index",
+    "phase_sort_key",
+    "element_index",
+    "element",
+    "effect_index",
+    "effect",
+    "class",
+    "z_orders",
+    "phase_z_orders",
+    "selector_key",
+    "selector_values",
+    "selected_classes",
+    "selected_z_orders",
+)
+
+
+def _format_iterable(values: Iterable) -> str:
+    return ", ".join(str(value) for value in values)
+
+
+def _format_z_orders(z_order: Iterable[int]) -> str:
+    return _format_iterable(z_order)
+
+
+def _selector_wheel_summary(effect) -> dict[str, str]:
+    """Return a compact summary for selector-like wrapper effects."""
+    wheel_effects = getattr(effect, "wheel_effects", None)
+    if not wheel_effects:
+        return {
+            "selector_key": "",
+            "selector_values": "",
+            "selected_classes": "",
+            "selected_z_orders": "",
+        }
+
+    classes = []
+    z_orders = []
+    for wheel_effect in wheel_effects.values():
+        class_name = wheel_effect.__class__.__name__
+        if class_name not in classes:
+            classes.append(class_name)
+
+        z_order = getattr(wheel_effect, "z_order", ())
+        z_order_text = _format_z_orders(z_order)
+        if z_order_text and z_order_text not in z_orders:
+            z_orders.append(z_order_text)
+
+    return {
+        "selector_key": str(effect.meta.get("selector_key", "")),
+        "selector_values": _format_iterable(wheel_effects.keys()),
+        "selected_classes": _format_iterable(classes),
+        "selected_z_orders": "; ".join(z_orders),
+    }
 
 
 class OpticsManager:
@@ -189,6 +259,51 @@ class OpticsManager:
 
         # return sorted(_gather_effects(), key=_sortkey)
         return list(_gather_effects())
+
+    def effect_order_table(self) -> Table:
+        """
+        Return the actual effect order used by each optical-train phase.
+
+        The table reflects the current ScopeSim execution order. Within a
+        z-order phase, effects are listed in optical-element/YAML order because
+        :meth:`get_z_order_effects` currently does not sort by ``z_order``.
+        """
+        rows = []
+
+        for phase_z, phase in Z_ORDER_PHASES:
+            z_range = range(phase_z, phase_z + 100)
+            phase_index = 0
+
+            for element_index, opt_el in enumerate(self.optical_elements):
+                element_name = opt_el.meta.get("name", "")
+                for effect_index, effect in enumerate(opt_el.effects):
+                    if not effect.include or not hasattr(effect, "z_order"):
+                        continue
+
+                    phase_z_orders = tuple(
+                        z_order for z_order in effect.z_order
+                        if z_order in z_range)
+                    if not phase_z_orders:
+                        continue
+
+                    selector_summary = _selector_wheel_summary(effect)
+                    rows.append({
+                        "phase": phase,
+                        "phase_z": phase_z,
+                        "phase_index": phase_index,
+                        "phase_sort_key": min(phase_z_orders) % 100,
+                        "element_index": element_index,
+                        "element": element_name,
+                        "effect_index": effect_index,
+                        "effect": effect.display_name,
+                        "class": effect.__class__.__name__,
+                        "z_orders": _format_z_orders(effect.z_order),
+                        "phase_z_orders": _format_z_orders(phase_z_orders),
+                        **selector_summary,
+                    })
+                    phase_index += 1
+
+        return Table(rows=rows, names=EFFECT_ORDER_COLUMNS)
 
     @property
     def is_spectroscope(self) -> bool:

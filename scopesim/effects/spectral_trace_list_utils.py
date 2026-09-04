@@ -24,11 +24,50 @@ from astropy import units as u
 from astropy.wcs import WCS
 from astropy.modeling.models import Polynomial2D
 
+from .ter_curves import detector_qe_at
 from ..utils import (power_vector, quantify, from_currsys, close_loop,
                      figure_factory, get_logger)
 
 
 logger = get_logger(__name__)
+
+
+def _clip_tiny_negative_trace_pixels(image: np.ndarray) -> int:
+    """Set floating-point roundoff-scale negative trace pixels to zero."""
+    if image is None or not np.issubdtype(image.dtype, np.floating):
+        return 0
+
+    negative = image < 0
+    if not np.any(negative):
+        return 0
+
+    finite = np.isfinite(image)
+    image_scale = np.nanmax(np.abs(image[finite])) if np.any(finite) else 0
+    tolerance = 128 * np.finfo(float).eps * max(float(image_scale), 1.0)
+    tiny_negative = negative & (image >= -tolerance)
+    image[tiny_negative] = 0
+    return int(np.sum(tiny_negative))
+
+
+def apply_detector_qe_to_trace_image(
+    image: np.ndarray,
+    detector_qe,
+    wave_um: np.ndarray,
+    detector_x: np.ndarray,
+    detector_y: np.ndarray,
+    **kwargs,
+) -> np.ndarray:
+    """Apply detector QE to an already trace-mapped image."""
+    if detector_qe is None:
+        return image
+    qe_values = detector_qe_at(
+        detector_qe,
+        wave_um * u.um,
+        detector_x=detector_x,
+        detector_y=detector_y,
+        **kwargs,
+    )
+    return image * np.asarray(qe_values, dtype=float)
 
 
 class SpectralTrace:
@@ -59,6 +98,7 @@ class SpectralTrace:
         "spline_order": 4,
         "pixel_size": None,
         "description": "<no description>",
+        "trace_flux_jacobian": "!SIM.spectral.trace_flux_jacobian",
     }
 
     def __init__(self, trace_tbl, cmds=None, **kwargs):
@@ -75,6 +115,18 @@ class SpectralTrace:
             self.meta["trace_id"] = trace_tbl.header.get("EXTNAME",
                                                          "<unknown trace id>")
             self.dispersion_axis = trace_tbl.header.get("DISPDIR", "unknown")
+            for header_key, meta_key in (
+                ("DESIGNR", "design_res"),
+                ("FWHMPIX", "nominal_fwhm_pix"),
+                ("PIXSIZE", "pixel_size"),
+                ("DISPFLEN", "dispersion_focal_length"),
+                ("SLITWID", "nominal_slit_width"),
+                ("PLTSCALE", "plate_scale"),
+                ("DETPAD", "detector_pad"),
+                ("DETANG", "detector_angle"),
+            ):
+                if header_key in trace_tbl.header:
+                    self.meta[meta_key] = trace_tbl.header[header_key]
         elif isinstance(trace_tbl, Table):
             self.table = trace_tbl
             self.dispersion_axis = "unknown"
@@ -155,19 +207,8 @@ class SpectralTrace:
             logger.info(
                 "Dispersion axis determined to be %s", self.dispersion_axis)
 
-    def map_spectra_to_focal_plane(self, fov):
-        """
-        Apply the spectral trace mapping to a spectral cube.
-
-        The cube is contained in a FieldOfView object, which also has
-        world coordinate systems for the Source (sky coordinates and
-        wavelengths) and for the focal plane.
-        The method returns a section of the fov image along with info on
-        where this image lies in the focal plane.
-        """
-        logger.debug("Mapping %s", fov.trace_id)
-        # Initialise the image based on the footprint of the spectral
-        # trace and the focal plane WCS
+    def _focal_plane_grid(self, fov):
+        """Return the exact focal-plane grid used to rasterize this FOV."""
         wave_min = fov.meta["wave_min"].value       # [um]
         wave_max = fov.meta["wave_max"].value       # [um]
         xi_min = fov.meta["xi_min"].value           # [arcsec]
@@ -179,15 +220,7 @@ class SpectralTrace:
             logger.warning("xlim_mm is None")
             return None
 
-        fov_header = fov.header
         det_header = fov.detector_header
-
-        # WCSD from the FieldOfView - this is the full detector plane
-        pixsize = fov_header["CDELT1D"] * u.Unit(fov_header["CUNIT1D"])
-        pixsize = pixsize.to_value(u.mm)
-        pixscale = fov_header["CDELT1"] * u.Unit(fov_header["CUNIT1"])
-        pixscale = pixscale.to_value(u.arcsec)
-
         fpa_wcsd = WCS(det_header, key="D")
         naxis1d, naxis2d = det_header["NAXIS1"], det_header["NAXIS2"]
         xlim_px, ylim_px = fpa_wcsd.all_world2pix(xlim_mm, ylim_mm, 0)
@@ -208,22 +241,49 @@ class SpectralTrace:
         ymin = max(ymin, 0)
         ymax = min(ymax, naxis2d)
 
-        # Create header for the subimage - I think this only needs the DET one,
-        # but we'll do both. The WCSs are initialised from the full fpa WCS and
-        # then shifted accordingly.
         det_wcs = WCS(det_header, key="D")
         det_wcs.wcs.crpix -= np.array([xmin, ymin])
 
         sub_naxis1 = xmax - xmin
         sub_naxis2 = ymax - ymin
-
-        # initialise the subimage
-        image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float32)
-
-        # Adjust the limits of the subimage in millimeters in the focal plane
-        # This takes the adjustment to integer pixels into account
         xmin_mm, ymin_mm = fpa_wcsd.all_pix2world(xmin, ymin, 0)
         xmax_mm, ymax_mm = fpa_wcsd.all_pix2world(xmax, ymax, 0)
+
+        x_mm = np.linspace(xmin_mm, xmax_mm, sub_naxis1, dtype=np.float32)
+        y_mm = np.linspace(ymin_mm, ymax_mm, sub_naxis2, dtype=np.float32)
+        return xmin, ymin, x_mm, y_mm, det_wcs
+
+    def map_spectra_to_focal_plane(self, fov):
+        """
+        Apply the spectral trace mapping to a spectral cube.
+
+        The cube is contained in a FieldOfView object, which also has
+        world coordinate systems for the Source (sky coordinates and
+        wavelengths) and for the focal plane.
+        The method returns a section of the fov image along with info on
+        where this image lies in the focal plane.
+        """
+        logger.debug("Mapping %s", fov.trace_id)
+        wave_min = fov.meta["wave_min"].value       # [um]
+        wave_max = fov.meta["wave_max"].value       # [um]
+        xi_min = fov.meta["xi_min"].value           # [arcsec]
+        xi_max = fov.meta["xi_max"].value           # [arcsec]
+        fov_header = fov.header
+        det_header = fov.detector_header
+        pixsize = det_header["CDELT1D"] * u.Unit(det_header["CUNIT1D"])
+        pixsize = pixsize.to_value(u.mm)
+        pixscale = fov_header["CDELT1"] * u.Unit(fov_header["CUNIT1"])
+        pixscale = pixscale.to_value(u.arcsec)
+
+        focal_plane_grid = self._focal_plane_grid(fov)
+        if focal_plane_grid is None:
+            return None
+        xmin, ymin, x_mm, y_mm, det_wcs = focal_plane_grid
+        sub_naxis1 = len(x_mm)
+        sub_naxis2 = len(y_mm)
+        xmax = xmin + sub_naxis1
+        ymax = ymin + sub_naxis2
+        image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float32)
 
         self._set_dispersion(wave_min, wave_max, pixsize=pixsize)
         try:
@@ -236,12 +296,7 @@ class SpectralTrace:
         xilam_wcs = xilam.wcs
 
         # focal-plane coordinate images
-        ximg_fpa, yimg_fpa = np.meshgrid(np.linspace(xmin_mm, xmax_mm,
-                                                     sub_naxis1,
-                                                     dtype=np.float32),
-                                         np.linspace(ymin_mm, ymax_mm,
-                                                     sub_naxis2,
-                                                     dtype=np.float32))
+        ximg_fpa, yimg_fpa = np.meshgrid(x_mm, y_mm)
 
         # Image mapping (xi, lambda) on the focal plane
         xi_fpa = self.xy2xi(ximg_fpa, yimg_fpa).astype(np.float32)
@@ -276,10 +331,26 @@ class SpectralTrace:
         image = xilam.interp(xi_fpa, lam_fpa, grid=False) * ijmask
 
         # Scale to ph / s / pixel
-        dlam_by_dx, dlam_by_dy = self.xy2lam.gradient()
-        dlam_per_pix = pixsize * np.sqrt(dlam_by_dx(ximg_fpa, yimg_fpa)**2 +
-                                         dlam_by_dy(ximg_fpa, yimg_fpa)**2)
-        image *= pixscale * dlam_per_pix        # [arcsec/pix] * [um/pix]
+        image *= self._trace_flux_scale(
+            ximg_fpa, yimg_fpa, pixsize, pixscale, det_header)
+
+        detector_qe = fov.meta.get("detector_qe")
+        if detector_qe is not None:
+            xpix_img, ypix_img = np.meshgrid(
+                np.arange(xmin, xmax, dtype=np.float32),
+                np.arange(ymin, ymax, dtype=np.float32),
+            )
+            image = apply_detector_qe_to_trace_image(
+                image,
+                detector_qe,
+                lam_fpa,
+                xpix_img,
+                ypix_img,
+                detector_x_mm=ximg_fpa,
+                detector_y_mm=yimg_fpa,
+                trace=self,
+                fov=fov,
+            )
 
         # img_header = sub_wcs.to_header()
         # img_header.update(det_wcs.to_header())
@@ -288,13 +359,46 @@ class SpectralTrace:
         img_header["XMAX"] = xmax
         img_header["YMIN"] = ymin
         img_header["YMAX"] = ymax
+        img_header["BUNIT"] = "ph s-1"
 
+        _clip_tiny_negative_trace_pixels(image)
         if np.any(image < 0):
             logger.warning("map_spectra_to_focal_plane: %d negative pixels",
                            np.sum(image < 0))
 
         image_hdu = fits.ImageHDU(header=img_header, data=image)
         return image_hdu
+
+    def _trace_flux_scale(self, x_mm, y_mm, pixsize, pixscale, det_header):
+        """Return the local [arcsec um] per detector pixel flux scale."""
+        try:
+            use_jacobian = bool(from_currsys(
+                self.meta["trace_flux_jacobian"], self.cmds))
+        except ValueError:
+            use_jacobian = False
+
+        if not use_jacobian:
+            dlam_by_dx, dlam_by_dy = self.xy2lam.gradient()
+            dlam_per_pix = pixsize * np.sqrt(
+                dlam_by_dx(x_mm, y_mm)**2 + dlam_by_dy(x_mm, y_mm)**2)
+            return pixscale * dlam_per_pix
+
+        dxi_by_dx, dxi_by_dy = self.xy2xi.gradient()
+        dlam_by_dx, dlam_by_dy = self.xy2lam.gradient()
+        jacobian = (dxi_by_dx(x_mm, y_mm) * dlam_by_dy(x_mm, y_mm) -
+                    dxi_by_dy(x_mm, y_mm) * dlam_by_dx(x_mm, y_mm))
+        return np.abs(jacobian) * self._detector_pixel_area(det_header)
+
+    @staticmethod
+    def _detector_pixel_area(det_header):
+        """Return detector WCS pixel area in mm2."""
+        try:
+            pixel_scale_matrix = WCS(det_header, key="D").pixel_scale_matrix
+            return np.abs(np.linalg.det(pixel_scale_matrix))
+        except Exception:  # pragma: no cover - FITS fallback for odd headers
+            cdelt1 = det_header["CDELT1D"] * u.Unit(det_header["CUNIT1D"])
+            cdelt2 = det_header["CDELT2D"] * u.Unit(det_header["CUNIT2D"])
+            return np.abs((cdelt1 * cdelt2).to_value(u.mm**2))
 
     def rectify(self, hdulist, interps=None, wcs=None, **kwargs):
         """Create 2D spectrum for a trace.
@@ -629,8 +733,12 @@ class SpectralTrace:
             dlam_grad = self.xy2lam.gradient()[0]  # dlam_by_dx
         else:
             dlam_grad = self.xy2lam.gradient()[1]  # dlam_by_dy
-        pixsize = (from_currsys(self.meta["pixel_scale"], self.cmds) /
-                   from_currsys(self.meta["plate_scale"], self.cmds))
+        if pixsize is None:
+            pixsize = (from_currsys(self.meta["pixel_scale"], self.cmds) /
+                       from_currsys(self.meta["plate_scale"], self.cmds))
+        elif isinstance(pixsize, u.Quantity):
+            pixsize = pixsize.to_value(u.mm)
+
         self.dlam_per_pix = interp1d(lam,
                                      dlam_grad(x_mm, y_mm) * pixsize,
                                      fill_value="extrapolate")
@@ -783,12 +891,15 @@ class Transform2D():
     """
 
     def __init__(self, matrix, pretransform_x=None,
-                 pretransform_y=None, posttransform=None):
+                 pretransform_y=None, posttransform=None,
+                 dpretransform_x=1.0, dpretransform_y=1.0):
         self.matrix = np.asarray(matrix)
         self.ny, self.nx = self.matrix.shape
         self.pretransform_x = self._repackage(pretransform_x)
         self.pretransform_y = self._repackage(pretransform_y)
         self.posttransform = self._repackage(posttransform)
+        self.dpretransform_x = dpretransform_x
+        self.dpretransform_y = dpretransform_y
 
     def _repackage(self, trafo):
         """Make sure `trafo` is a tuple."""
@@ -822,12 +933,15 @@ class Transform2D():
         in x and y. When grid=False, a vector. In this case, x and y must
         have the same length.
         """
+        pretransform_x = self.pretransform_x
+        pretransform_y = self.pretransform_y
+        posttransform = self.posttransform
         if "pretransform_x" in kwargs:
-            self.pretransform_x = self._repackage(kwargs["pretransform_x"])
+            pretransform_x = self._repackage(kwargs["pretransform_x"])
         if "pretransform_y" in kwargs:
-            self.pretransform_y = self._repackage(kwargs["pretransform_y"])
+            pretransform_y = self._repackage(kwargs["pretransform_y"])
         if "posttransform" in kwargs:
-            self.posttransform = self._repackage(kwargs["posttransform"])
+            posttransform = self._repackage(kwargs["posttransform"])
 
         x = np.array(x)
         y = np.array(y)
@@ -838,10 +952,10 @@ class Transform2D():
                              "is False")
 
         # Apply pre transforms
-        if self.pretransform_x is not None:
-            x = self.pretransform_x[0](x, **self.pretransform_x[1])
-        if self.pretransform_y is not None:
-            y = self.pretransform_y[0](y, **self.pretransform_y[1])
+        if pretransform_x is not None:
+            x = pretransform_x[0](x, **pretransform_x[1])
+        if pretransform_y is not None:
+            y = pretransform_y[0](y, **pretransform_y[1])
 
         xvec = power_vector(x.flatten(), self.nx - 1)
         yvec = power_vector(y.flatten(), self.ny - 1)
@@ -856,32 +970,92 @@ class Transform2D():
             # expression in the "grid" branch.
             result = (yvec * temp).sum(axis=0)
             if not orig_shape:
-                result = np.float32(result)
+                result = result.item()
             else:
                 result = result.reshape(orig_shape)
 
         # Apply posttransform
-        if self.posttransform is not None:
-            result = self.posttransform[0](result, **self.posttransform[1])
+        if posttransform is not None:
+            result = posttransform[0](result, **posttransform[1])
 
         return result
 
     @classmethod
-    def fit(cls, xin, yin, xout, degree=4):
+    def fit(cls, xin, yin, xout, degree=4, normalize=True):
         """Determine polynomial fits."""
+        xin = np.asarray(xin, dtype=float)
+        yin = np.asarray(yin, dtype=float)
+        xout = np.asarray(xout, dtype=float)
+        pretransform_x = pretransform_y = None
+        dpretransform_x = dpretransform_y = 1.0
+        if normalize:
+            x_offset, x_scale = _fit_normalization(xin)
+            y_offset, y_scale = _fit_normalization(yin)
+            xin_fit = _linear_rescale(xin, x_offset, x_scale)
+            yin_fit = _linear_rescale(yin, y_offset, y_scale)
+            pretransform_x = (
+                _linear_rescale,
+                {"offset": x_offset, "scale": x_scale},
+            )
+            pretransform_y = (
+                _linear_rescale,
+                {"offset": y_offset, "scale": y_scale},
+            )
+            dpretransform_x = 1.0 / x_scale
+            dpretransform_y = 1.0 / y_scale
+        else:
+            xin_fit = xin
+            yin_fit = yin
         pinit = Polynomial2D(degree=degree)
         fitter = fitting.LinearLSQFitter()
-        fit = fitter(pinit, xin, yin, xout)
-        return Transform2D(fit2matrix(fit))
+        fit = fitter(pinit, xin_fit, yin_fit, xout)
+        return Transform2D(
+            fit2matrix(fit),
+            pretransform_x=pretransform_x,
+            pretransform_y=pretransform_y,
+            dpretransform_x=dpretransform_x,
+            dpretransform_y=dpretransform_y,
+        )
 
     def gradient(self):
         """Compute the gradient of a 2d polynomial transformation."""
         mat = self.matrix
 
-        dmat_x = (mat * np.arange(self.nx))[:, 1:]
-        dmat_y = (mat.T * np.arange(self.ny)).T[1:, :]
+        dmat_x = (mat * np.arange(self.nx))[:, 1:] * self.dpretransform_x
+        dmat_y = (mat.T * np.arange(self.ny)).T[1:, :] * self.dpretransform_y
 
-        return Transform2D(dmat_x), Transform2D(dmat_y)
+        return (
+            Transform2D(
+                dmat_x,
+                pretransform_x=self.pretransform_x,
+                pretransform_y=self.pretransform_y,
+            ),
+            Transform2D(
+                dmat_y,
+                pretransform_x=self.pretransform_x,
+                pretransform_y=self.pretransform_y,
+            ),
+        )
+
+
+def _fit_normalization(values):
+    """Return a stable offset and scale for polynomial fitting."""
+    values = np.asarray(values, dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return 0.0, 1.0
+    minimum = float(np.nanmin(finite))
+    maximum = float(np.nanmax(finite))
+    offset = minimum + (maximum - minimum) / 2
+    scale = (maximum - minimum) / 2
+    if not np.isfinite(scale) or scale == 0:
+        scale = 1.0
+    return offset, scale
+
+
+def _linear_rescale(values, offset=0.0, scale=1.0):
+    """Linearly rescale values for polynomial fitting/evaluation."""
+    return (np.asarray(values, dtype=float) - offset) / scale
 
 
 def fit2matrix(fit):
@@ -894,7 +1068,7 @@ def fit2matrix(fit):
     """
     coeffs = dict(zip(fit.param_names, fit.parameters))
     deg = fit.degree
-    mat = np.zeros((deg + 1, deg + 1), dtype=np.float32)
+    mat = np.zeros((deg + 1, deg + 1), dtype=float)
     for i in range(deg + 1):
         for j in range(deg + 1):
             try:
