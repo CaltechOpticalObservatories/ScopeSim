@@ -24,9 +24,15 @@ from astropy import units as u
 from astropy.wcs import WCS
 from astropy.modeling.models import Polynomial2D
 
+from ..utils import (
+    power_vector,
+    quantify,
+    from_currsys,
+    close_loop,
+    figure_factory,
+    get_logger,
+)
 from .ter_curves import detector_qe_at
-from ..utils import (power_vector, quantify, from_currsys, close_loop,
-                     figure_factory, get_logger)
 
 
 logger = get_logger(__name__)
@@ -139,6 +145,7 @@ class SpectralTrace:
         # Declaration of other attributes
         self._xilamimg = None
         self.dlam_per_pix = None
+        self.fit_inverse = True
 
     @property
     def trace_id(self):
@@ -363,8 +370,9 @@ class SpectralTrace:
 
         _clip_tiny_negative_trace_pixels(image)
         if np.any(image < 0):
-            logger.warning("map_spectra_to_focal_plane: %d negative pixels",
-                           np.sum(image < 0))
+            logger.warning(
+                "map_spectra_to_focal_plane: %d negative pixels",
+                np.sum(image < 0))
 
         image_hdu = fits.ImageHDU(header=img_header, data=image)
         return image_hdu
@@ -400,8 +408,27 @@ class SpectralTrace:
             cdelt2 = det_header["CDELT2D"] * u.Unit(det_header["CUNIT2D"])
             return np.abs((cdelt1 * cdelt2).to_value(u.mm**2))
 
-    def rectify(self, hdulist, interps=None, wcs=None, **kwargs):
+    def rectify(
+        self,
+        hdulist: fits.HDUList,
+        interps: list | None = None,
+        wcs: WCS | None = None,
+        fit_inverse: bool = True,
+        bin_width: float | None = None,
+        wave_min: float | None = None,
+        wave_max: float | None = None,
+        xi_min: float | None = None,
+        xi_max: float | None = None,
+    ) -> fits.ImageHDU | None:
         """Create 2D spectrum for a trace.
+
+        .. todo: Consider turning `interps` into a dict keyed on extname.
+
+        .. todo: Proper typing on `interps`.
+
+        .. todo: Rewrite and expand docstring (FH).
+
+        .. todo: Consider using quantities for float parameters.
 
         Parameters
         ----------
@@ -428,21 +455,21 @@ class SpectralTrace:
            Spatial limits of the slit on the sky. This should be taken from
            the header of the hdulist, but this is not yet provided by scopesim
         """
-        wave_min = kwargs.get("wave_min",
-                              self.wave_min)
-        wave_max = kwargs.get("wave_max",
-                              self.wave_max)
+        # Note: fit_inverse used to be self.fit_inverse, but wasn't used
+        #       outside this function.
+        wave_min = wave_min if wave_min is not None else self.wave_min
+        wave_max = wave_max if wave_max is not None else self.wave_max
         if wave_max < self.wave_min or wave_min > self.wave_max:
             logger.debug("   Outside filter range")
             return None
+
         wave_min = max(wave_min, self.wave_min)
         wave_max = min(wave_max, self.wave_max)
         logger.info("Rectifying %s (%.02f .. %.02f um)",
                     self.trace_id, wave_min, wave_max)
 
         # bin_width is taken as the minimum dispersion of the trace
-        # ..todo: if wcs is given take bin width from cdelt1
-        bin_width = kwargs.get("bin_width", None)
+        # TODO: if wcs is given take bin width from cdelt1
         if bin_width is None:
             self._set_dispersion(wave_min, wave_max)
             bin_width = np.abs(self.dlam_per_pix.y).min()
@@ -451,20 +478,23 @@ class SpectralTrace:
         pixscale = from_currsys(self.meta["pixel_scale"], self.cmds)
 
         # Temporary solution to get slit length
-        xi_min = kwargs.get("xi_min", None)
         if xi_min is None:
             try:
                 xi_min = hdulist[0].header["HIERARCH INS SLIT XIMIN"]
-            except KeyError:
-                logger.error("xi_min not found")
-                return None
-        xi_max = kwargs.get("xi_max", None)
+            except KeyError as err:
+                raise KeyError(
+                    "xi_min must be in header as 'INS SLIT XIMIN' or provided "
+                    "directly as an argument."
+                ) from err
+
         if xi_max is None:
             try:
                 xi_max = hdulist[0].header["HIERARCH INS SLIT XIMAX"]
-            except KeyError:
-                logger.error("xi_max not found")
-                return None
+            except KeyError as err:
+                raise KeyError(
+                    "xi_max must be in header as 'INS SLIT XIMAX' or provided "
+                    "directly as an argument."
+                ) from err
 
         if wcs is None:
             wcs = WCS(naxis=2)
@@ -485,16 +515,33 @@ class SpectralTrace:
             interps = make_image_interpolations(hdulist, kx=1, ky=1)
 
         # Create Xi, Lam images (do I need Iarr and Jarr or can I build Xi, Lam directly?)
-        Iarr, Jarr = np.meshgrid(np.arange(nlam, dtype=np.float32),
-                                 np.arange(nxi, dtype=np.float32))
+        Iarr, Jarr = np.meshgrid(
+            np.arange(nlam, dtype=np.float32),
+            np.arange(nxi, dtype=np.float32),
+        )
         Lam, Xi = wcs.all_pix2world(Iarr, Jarr, 0)
 
         # Make sure that we do have microns
         Lam = Lam * u.Unit(wcs.wcs.cunit[0]).to(u.um)
 
+        # TODO: Replace self.xilam2x and self.xilam2y by fitted
+        #       functions fit_xilam2x and fit_xilam2y, which need
+        #       to be determined by mapping a grid of (xi, lam) to (x,y)
+        #       and back to (xip, lamp); then fit (x,y)(xip, lamp).
+        if fit_inverse:
+            fit_xilam2x, fit_xilam2y = self._fit_transform(
+                xi_min,
+                xi_max,
+                wave_min,
+                wave_max,
+            )
+        else:
+            logger.debug("Using matrix transform")
+            fit_xilam2x, fit_xilam2y = self.xilam2x, self.xilam2y
+
         # Convert Xi, Lam to focal plane units
-        Xarr = self.xilam2x(Xi, Lam)
-        Yarr = self.xilam2y(Xi, Lam)
+        Xarr = fit_xilam2x(Xi, Lam)
+        Yarr = fit_xilam2y(Xi, Lam)
 
         rect_spec = np.zeros_like(Xarr, dtype=np.float32)
 
@@ -518,6 +565,33 @@ class SpectralTrace:
         header = wcs.to_header()
         header["EXTNAME"] = self.trace_id
         return fits.ImageHDU(data=rect_spec, header=header)
+
+    def _fit_transform(self, ximin, ximax, wmin, wmax):
+        """Fit inverses to self.xy2xi and self.xy2lam
+
+        The method replaces self.xilam2x and self.xilam2y by fitted
+        functions fit_xilam2x and fit_xilam2y, determined by mapping a grid of
+        (xi, lam) to (x,y) and back to (xip, lamp); then fit (x,y)(xip, lamp).
+        """
+
+        # Build input (xi, lam) grid
+        xi = np.linspace(ximin, ximax, 51)
+        lam = np.linspace(wmin, wmax, 201)
+
+        # Do a full round using the matrix transforms
+        x2d = self.xilam2x(xi, lam, grid=True)
+        y2d = self.xilam2y(xi, lam, grid=True)
+        xip = self.xy2xi(x2d, y2d, grid=False)
+        lamp = self.xy2lam(x2d, y2d, grid=False)
+
+        # Determine the fits
+        pinit_x = Polynomial2D(degree=4)
+        pinit_y = Polynomial2D(degree=4)
+        fitter = fitting.LinearLSQFitter()
+        xilam2x = fitter(pinit_x, xip, lamp, x2d)
+        xilam2y = fitter(pinit_y, xip, lamp, y2d)
+
+        return xilam2x, xilam2y
 
     def footprint(self, wave_min=None, wave_max=None, xi_min=None, xi_max=None):
         """
@@ -593,14 +667,18 @@ class SpectralTrace:
 
         # Map the edges of xi/lam to the focal plance
         n_edge = 512
-        wave_edge = np.concatenate((np.linspace(wave_min, wave_max, n_edge),
-                                    [wave_max] * n_edge,
-                                    np.linspace(wave_min, wave_max, n_edge),
-                                    [wave_min] * n_edge))
-        xi_edge = np.concatenate(([xi_min] * n_edge,
-                                  np.linspace(xi_min, xi_max, n_edge),
-                                  [xi_max] * n_edge,
-                                  np.linspace(xi_min, xi_max, n_edge)))
+        wave_edge = np.concatenate((
+            np.linspace(wave_min, wave_max, n_edge),
+            [wave_max] * n_edge,
+            np.linspace(wave_min, wave_max, n_edge),
+            [wave_min] * n_edge,
+        ))
+        xi_edge = np.concatenate((
+            [xi_min] * n_edge,
+            np.linspace(xi_min, xi_max, n_edge),
+            [xi_max] * n_edge,
+            np.linspace(xi_min, xi_max, n_edge),
+        ))
 
         x_edge = self.xilam2x(xi_edge, wave_edge)
         y_edge = self.xilam2y(xi_edge, wave_edge)
@@ -692,7 +770,7 @@ class SpectralTrace:
         if plot_ctrlpnts:
             axes.plot(x, y, "o", c=c)
 
-        if plot_outline:
+        if plot_outline or plot_trace_id:
             blue_end = self.table[mask][w == w.min()]
             red_end = self.table[mask][w == w.max()]
             blue_end.sort(sname)
@@ -700,6 +778,8 @@ class SpectralTrace:
             corners = vstack([blue_end[[0, -1]][xname, yname],
                               red_end[[-1, 0]][xname, yname],
                               blue_end[0][xname, yname]])
+
+        if plot_outline:
             axes.plot(corners[xname], corners[yname], c=c)
 
         if plot_trace_id:
@@ -802,6 +882,7 @@ class XiLamImage():
             dlam_per_pix_val = dlam_per_pix
             logger.warning("Using scalar dlam_per_pix = %.2g",
                            dlam_per_pix_val)
+
         for i, eta in enumerate(cube_eta):
             lam0 = self.lam + dlam_per_pix_val * eta / d_eta
 
@@ -834,7 +915,7 @@ class XiLamImage():
         self.wcsa.wcs.cdelt = [d_lam, 1./n_xi]
         self.wcsa.wcs.ctype = ["LINEAR", "LINEAR"]
         self.wcsa.wcs.cname = ["WAVELEN", "SLITPOS"]
-        self.wcs.wcs.cunit = ["um", ""]
+        self.wcsa.wcs.cunit = ["um", ""]
 
         self.xi = self.wcs.all_pix2world(self.lam[0], np.arange(n_xi), 0)[1]
         self.npix_xi = n_xi
@@ -918,7 +999,8 @@ class Transform2D():
         this case, x and y must be of the same length).
 
         Functions `pretransform_x`, `pretransform_y` and `posttransform`
-        can be supplied to override the instance values.
+        can be supplied to override the instance values for this call only;
+        the instance itself is not modified.
 
         Parameters
         ----------
@@ -933,6 +1015,7 @@ class Transform2D():
         in x and y. When grid=False, a vector. In this case, x and y must
         have the same length.
         """
+        # Per-call overrides must not modify the instance
         pretransform_x = self.pretransform_x
         pretransform_y = self.pretransform_y
         posttransform = self.posttransform
