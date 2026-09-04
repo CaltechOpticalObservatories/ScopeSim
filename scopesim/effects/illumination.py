@@ -6,6 +6,7 @@ import importlib
 from typing import ClassVar
 
 import numpy as np
+from numpy.typing import NDArray
 from astropy import units as u
 from astropy.units import UnitConversionError
 from astropy.modeling.functional_models import Gaussian2D
@@ -42,8 +43,33 @@ def gaussian2d(
     mu: tuple[float, float] = (0.0, 0.0),
     sigma: tuple[float, float] = (2000.0, 2000.0),
     theta: u.Quantity[u.deg] | float = 0.0 * u.deg,
-) -> np.ndarray:
-    """Return a 2D elliptical Gaussian illumination map."""
+) -> NDArray:
+    """
+    2D elliptical Gaussian to be used for vignetting map.
+
+    .. versionadded:: 0.11.3
+
+    Parameters
+    ----------
+    shape : tuple[int, int]
+        Image shape in pixels (ny, nx).
+    amp : float, optional
+        Peak throughput. The default is 1.0.
+    mu : tuple[float, float], optional
+        Offset of the peak center in pixels (x, y) from the image center.
+        The default is (0.0, 0.0), i.e. no offset.
+    sigma : tuple[float, float], optional
+        Gaussian widths in pixels (sx, sy). The default is (2000.0, 2000.0).
+    theta : float, optional
+        Rotation angle (if float, the angle is interpreted in degrees),
+        counterclockwise. The default is 0°.
+
+    Returns
+    -------
+    NDArray
+        Vignetting map.
+
+    """
     nx, ny = reversed(shape)
     y, x = np.ogrid[:ny, :nx]
     x = x - nx / 2
@@ -66,8 +92,36 @@ def quadratic_vignetting(
     r_ref: float | None = None,
     mu: tuple[float, float] = (0.0, 0.0),
     stretch: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
-) -> np.ndarray:
-    """Return a quadratic vignetting pattern."""
+) -> NDArray:
+    """
+    Quadratic vignetting pattern with independent stretch factors.
+
+    .. versionadded:: 0.11.3
+
+    Parameters
+    ----------
+    shape : tuple[int, int]
+        Image shape in pixels (ny, nx).
+    falloff : float, optional
+        Fractional illumination drop at `r_ref`. The default is 0.01 (= 1 %).
+    r_ref : float | None, optional
+        Reference radius in stretched pixels. If None (the default), use the
+        corner distance.
+    mu : tuple[float, float], optional
+        Offset of the vignetting center in pixels (x, y) from the image center.
+        The default is (0.0, 0.0), i.e. no offset.
+    stretch : tuple[float, float, float, float], optional
+        ``(+x, -x, +y, -y)`` independent scale factors for half-planes
+        respectively. All 1.0 gives a circular pattern. A value > 1 widens the
+        falloff in that direction (shallower); < 1 narrows it (steeper).
+        The default is (1.0, 1.0, 1.0, 1.0).
+
+    Returns
+    -------
+    NDArray
+        Vignetting map.
+
+    """
     nx, ny = reversed(shape)
 
     yy, xx = np.ogrid[:ny, :nx]
@@ -388,7 +442,43 @@ def _detector_pixel_area_from_header(header, cmds) -> u.Quantity | None:
 
 
 class Illumination(Effect):
-    """Large-scale multiplicative illumination variation on the image plane."""
+    """Large-scale illumination variation across the image plane.
+
+    .. versionadded:: 0.11.3
+
+    Parameters
+    ----------
+    model : callable, optional
+        Function ``f(shape, **kwargs) -> ndarray`` returning the
+        illumination map. Defaults to :func:`gaussian2d`.
+    modelargs : dict, optional
+        Keyword arguments forwarded to ``model``. If omitted, the model's
+        own defaults are used.
+
+    include : str
+        Turn effect on/off from the IRDB
+        default.yaml.  Defaults to ``"!DET.include_illumination"``.
+
+    Examples
+    --------
+    Polynomial vignetting with <1 % falloff (auto r_ref from image shape)
+
+    >>> eff = Illumination(
+    ...     model=quadratic_vignetting,
+    ...     modelargs={"falloff": 0.01},
+    ... )
+
+    Custom model
+
+    >>> def my_model(shape, slope=-0.001):
+    >>>     ny, nx = shape[-2], shape[-1]
+    >>>     y, x = np.ogrid[:ny, :nx]
+    >>>     r = np.sqrt((x - nx / 2)**2 + (y - ny / 2)**2)
+    >>>     return np.clip(1 + slope * r, 0, None)
+    >>>
+    >>> eff = Illumination(model=my_model, modelargs={"slope": -0.0005})
+
+    """
 
     z_order: ClassVar[tuple[int, ...]] = (750,)
 
@@ -422,13 +512,15 @@ class Illumination(Effect):
         return illumination_map.astype(np.float32)
 
     def plot(self):
-        """Plot the cached illumination map."""
+        """Plot effect."""
         if self._map is None:
-            raise RuntimeError("No illumination map cached - run a simulation first.")
+            raise RuntimeError(
+                "No illumination map cached — run a simulation first."
+            )
 
         fig, ax = figure_factory()
         im = ax.imshow(
-            self._map, origin="lower", vmin=0.98, vmax=1.0, cmap="gray_r",
+            self._map, origin="lower", vmin=0.98, vmax=1., cmap="gray_r",
         )
         fig.colorbar(im, ax=ax, label="Relative illumination")
         ax.set_title("Illumination")
