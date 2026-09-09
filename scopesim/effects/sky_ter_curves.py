@@ -336,11 +336,6 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
                            "incl_loweratm": kwargs.get("incl_loweratm", "N"),
                            "incl_airglow": kwargs.get("incl_airglow", "N")})
 
-        ec_frame = HeliocentricTrueEcliptic(obstime=self.time)
-        target_ecl = self.target.transform_to(ec_frame)
-        params["ecl_lon"] = 135.0 #target_ecl.lon.wrap_at(180*u.deg).deg
-        params["ecl_lat"] = 90.0 #target_ecl.lat.wrap_at(90*u.deg).deg
-
         z_target = get_zenith_angle(self.target, self.location, self.time)
         if self.brightness is None:
             moon = get_body("moon", self.time)
@@ -370,8 +365,16 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
                 params["time"] = 3
             else:
                 params["time"] = 0
+
+            # Set accurate zodiacal background
+            ec_frame = HeliocentricTrueEcliptic(obstime=self.time)
+            target_ecl = self.target.transform_to(ec_frame)
+            params["ecl_lon"] = target_ecl.lon.wrap_at(180*u.deg).deg
+            params["ecl_lat"] = target_ecl.lat.wrap_at(90*u.deg).deg
         else:
             params["time"] = 0
+            params["ecl_lon"] = 135.0
+            params["ecl_lat"] = 90.0
             if self.brightness == 'bright':
                 params.update({
                     "airmass": zendist2airmass(z_target),
