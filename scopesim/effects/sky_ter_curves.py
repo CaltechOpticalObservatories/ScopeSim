@@ -338,8 +338,8 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
 
         ec_frame = HeliocentricTrueEcliptic(obstime=self.time)
         target_ecl = self.target.transform_to(ec_frame)
-        params["ecl_lon"] = target_ecl.lon.wrap_at(180*u.deg).deg
-        params["ecl_lat"] = target_ecl.lat.wrap_at(90*u.deg).deg
+        params["ecl_lon"] = 135.0 #target_ecl.lon.wrap_at(180*u.deg).deg
+        params["ecl_lat"] = 90.0 #target_ecl.lat.wrap_at(90*u.deg).deg
 
         z_target = get_zenith_angle(self.target, self.location, self.time)
         if self.brightness is None:
@@ -376,12 +376,12 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
                 params.update({
                     "airmass": zendist2airmass(z_target),
                     "incl_moon": "Y",
-                    "moon_sun_sep": 180.0, "moon_target_sep": 60.0, "moon_alt": 45.0, "moon_earth_dist": 1.0})
+                    "moon_sun_sep": 180.0, "moon_target_sep": 45.0, "moon_alt": 45.0, "moon_earth_dist": 1.0})
             elif self.brightness == 'grey' or self.brightness == 'gray':
                 params.update({
                     "airmass": zendist2airmass(z_target),
                     "incl_moon": "Y",
-                    "moon_sun_sep": 90.0, "moon_target_sep": 60.0, "moon_alt": 45.0, "moon_earth_dist": 1.0})
+                    "moon_sun_sep": 90.0, "moon_target_sep": 45.0, "moon_alt": 45.0, "moon_earth_dist": 1.0})
             elif self.brightness == 'dark':
                 params.update({
                     "airmass": zendist2airmass(z_target),
