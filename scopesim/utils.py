@@ -1174,7 +1174,7 @@ def resolve_time(time_str: int | float | Literal['bright', 'gray', 'grey', 'dark
             t = Time(time_str, format="isot", location=location)
         elif time_str in ["bright", "gray", "grey", "dark"]:
             logger.info(f"Brightness level supplied instead of time, {time_str}")
-            t = Time.now(location=location)
+            t = Time.now()
         else:
             logger.error(f"Unrecognized string input for time: {time_str}.")
             raise ValueError(f"Unrecognized string input for time: {time_str}.")
