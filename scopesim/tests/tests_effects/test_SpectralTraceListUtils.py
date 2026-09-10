@@ -15,6 +15,7 @@ from scopesim.optics.image_plane_utils import header_from_list_of_xy
 from scopesim.effects.spectral_trace_list_utils import SpectralTrace
 from scopesim.effects.spectral_trace_list_utils import Transform2D, power_vector
 from scopesim.effects.spectral_trace_list_utils import make_image_interpolations
+from scopesim.effects.spectral_trace_list_utils import XiLamImage
 from scopesim.effects.spectral_trace_list_utils import apply_detector_qe_to_trace_image
 from scopesim.effects.spectral_trace_list_utils import _clip_tiny_negative_trace_pixels
 from scopesim.tests.mocks.py_objects import trace_list_objects as tlo
@@ -128,6 +129,17 @@ def test_clip_tiny_negative_trace_pixels_only_clips_roundoff():
     assert image[1, 1] < 0
 
 
+class TestSpectralTracePlot:
+    """Tests for SpectralTrace.plot()"""
+    @pytest.mark.parametrize("plot_outline", [True, False])
+    def test_plot_trace_id_works_without_outline(self, plot_outline):
+        # plot_trace_id previously relied on corners, which was only
+        # computed when plot_outline was True
+        spt = SpectralTrace(tlo.trace_1(), trace_id="TRACE_1")
+        axes = spt.plot(plot_trace_id=True, plot_outline=plot_outline)
+        assert any(txt.get_text() == spt.trace_id for txt in axes.texts)
+
+
 class TestPowerVec:
     """Test function power_vector()"""
     def test_gives_correct_result(self):
@@ -220,6 +232,17 @@ class TestTransform2D:
 
         assert tf2d.matrix == pytest.approx(matrix)
 
+    def test_call_kwargs_do_not_modify_instance(self, quadratic):
+        # pre/posttransform overrides passed to __call__ previously
+        # rewired the instance for all subsequent calls
+        tf2d = Transform2D(quadratic['matrix'])
+        x, y = 0.7, -0.3
+        plain = tf2d(x, y)
+        shifted = tf2d(x, y, posttransform=lambda z: z + 100)
+        assert shifted == pytest.approx(plain + 100)
+        assert tf2d.posttransform is None
+        assert tf2d(x, y) == pytest.approx(plain)
+
     def test_fit_preserves_high_dynamic_range_coefficients(self):
         x_grid, y_grid = np.meshgrid(
             np.linspace(-5, 5, 3),
@@ -265,6 +288,30 @@ class TestTransform2D:
         n_x, n_y = 4, 2
         res = tf2d(np.ones((n_y, n_x)), np.ones((n_y, n_x)), grid=False)
         assert res.shape == (n_y, n_x)
+
+
+class MockCubeFov:
+    """Minimal stand-in for a FieldOfView carrying a spectral cube."""
+    def __init__(self, n_lam=20, n_eta=3, n_xi=11):
+        hdr = fits.Header()
+        hdr["NAXIS"] = 3
+        hdr["NAXIS1"], hdr["NAXIS2"], hdr["NAXIS3"] = n_xi, n_eta, n_lam
+        hdr["CTYPE1"], hdr["CTYPE2"], hdr["CTYPE3"] = "LINEAR", "LINEAR", "WAVE"
+        hdr["CRPIX1"], hdr["CRPIX2"], hdr["CRPIX3"] = 1, 1, 1
+        hdr["CRVAL1"], hdr["CRVAL2"], hdr["CRVAL3"] = 0., 0., 2.0
+        hdr["CDELT1"], hdr["CDELT2"], hdr["CDELT3"] = 0.1, 0.1, 0.001
+        hdr["CUNIT1"], hdr["CUNIT2"], hdr["CUNIT3"] = "arcsec", "arcsec", "um"
+        self.cube = fits.ImageHDU(
+            data=np.ones((n_lam, n_eta, n_xi)), header=hdr)
+        self.meta = {"xi_min": -0.5 * u.arcsec, "xi_max": 0.5 * u.arcsec}
+
+
+class TestXiLamImage:
+    def test_primary_wcs_keeps_arcsec_cunit(self):
+        # The wcsa block previously overwrote self.wcs.wcs.cunit
+        xilam = XiLamImage(MockCubeFov(), dlam_per_pix=0.001)
+        assert list(xilam.wcs.wcs.cunit) == [u.um, u.arcsec]
+        assert list(xilam.wcsa.wcs.cunit) == [u.um, u.dimensionless_unscaled]
 
 
 class TestImageInterpolations:

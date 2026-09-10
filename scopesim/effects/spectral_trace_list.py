@@ -16,13 +16,13 @@ from astropy.io import fits
 from astropy.table import Table
 import astropy.units as u
 
-from .effects import Effect
-from .ter_curves import FilterCurve
-from .spectral_trace_list_utils import SpectralTrace, make_image_interpolations
+from ..utils import from_currsys, check_keys, figure_factory, get_logger
 from ..optics.image_plane_utils import header_from_list_of_xy
 from ..optics.fov import FieldOfView
 from ..optics.fov_volume_list import FovVolumeList
-from ..utils import from_currsys, check_keys, figure_factory, get_logger
+from .effects import Effect
+from .ter_curves import FilterCurve
+from .spectral_trace_list_utils import SpectralTrace, make_image_interpolations
 from .data_container import DataContainer
 from ..optics import echelle
 
@@ -259,7 +259,11 @@ class SpectralTraceList(Effect):
                 self.update_meta()
 
             spt = self.spectral_traces[obj.trace_id]
-            obj.hdu = spt.map_spectra_to_focal_plane(obj)
+            try:
+                # If footprint is outside FOV, this will assign None to the hdu
+                obj.hdu = spt.map_spectra_to_focal_plane(obj)
+            except ValueError as err:  # xlim_mm is None
+                logger.error(err)
             obj.image_plane_id = spt.meta["image_plane_id"]
 
         logger.debug("%s done", self.display_name)
@@ -294,9 +298,6 @@ class SpectralTraceList(Effect):
 
         This method creates an HDU list with one extension per spectral
         trace, i.e. it essentially treats all traces independently.
-        For the case of an IFU where the traces correspond to spatial
-        slices for the same wavelength range, use method `rectify_cube`
-        (not yet implemented).
 
         Parameters
         ----------
@@ -364,22 +365,29 @@ class SpectralTraceList(Effect):
 
         for i, trace_id in tqdm(enumerate(self.spectral_traces, start=1),
                                 desc=" Traces", total=len(self.spectral_traces)):
-            hdu = self[trace_id].rectify(hdulist,
-                                         interps=interps,
-                                         bin_width=bin_width,
-                                         xi_min=xi_min, xi_max=xi_max,
-                                         wave_min=wave_min, wave_max=wave_max)
-            if hdu is not None:   # ..todo: rectify does not do that yet
-                outhdul.append(hdu)
-                outhdul[0].header[f"EXTNAME{i}"] = trace_id
+            try:
+                hdu = self[trace_id].rectify(
+                    hdulist,
+                    interps=interps,
+                    bin_width=bin_width,
+                    xi_min=xi_min,
+                    xi_max=xi_max,
+                    wave_min=wave_min,
+                    wave_max=wave_max,
+                )
+            except (KeyError, ValueError) as err:
+                logger.error(err)
+                continue
+
+            if hdu is None:   # TODO: rectify does not do that yet
+                continue
+
+            outhdul.append(hdu)
+            outhdul[0].header[f"EXTNAME{i}"] = trace_id
 
         outhdul[0].header.update(inhdul[0].header)
 
         return outhdul
-
-    def rectify_cube(self, hdulist):
-        """Rectify traces and combine into a cube."""
-        raise NotImplementedError()
 
     def plot(self, wave_min=None, wave_max=None, axes=None, **kwargs):
         """Plot every spectral trace in the spectral trace list.
