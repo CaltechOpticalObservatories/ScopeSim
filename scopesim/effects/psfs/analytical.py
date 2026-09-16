@@ -255,13 +255,13 @@ class MoffatPSF(AnalyticalPSF):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.target, self.location, self.time, _ = get_observation_info_from_cmds(self.cmds)
         self._fwhm_interp = None
 
     def fwhm(self, wavelengths):
         fwhm = self.meta["fwhm"]
         if isinstance(fwhm, dict) and {"pivot_wave", "pivot_wave_unit"}.issubset(fwhm):
-            target, location, time, _ = get_observation_info_from_cmds(self.cmds)
-            key = tuple(fwhm.items()), target, location, time
+            key = tuple(fwhm.items()), self.target, self.location, self.time
         elif isinstance(fwhm, dict):
             key = tuple(fwhm.items())
         else:
