@@ -256,8 +256,8 @@ class SpectralTrace:
         xmin_mm, ymin_mm = fpa_wcsd.all_pix2world(xmin, ymin, 0)
         xmax_mm, ymax_mm = fpa_wcsd.all_pix2world(xmax, ymax, 0)
 
-        x_mm = np.linspace(xmin_mm, xmax_mm, sub_naxis1, dtype=np.float32)
-        y_mm = np.linspace(ymin_mm, ymax_mm, sub_naxis2, dtype=np.float32)
+        x_mm = np.linspace(xmin_mm, xmax_mm, sub_naxis1, endpoint=False, dtype=np.float32)
+        y_mm = np.linspace(ymin_mm, ymax_mm, sub_naxis2, endpoint=False, dtype=np.float32)
         return xmin, ymin, x_mm, y_mm, det_wcs
 
     def map_spectra_to_focal_plane(self, fov):
@@ -870,7 +870,7 @@ class XiLamImage():
         # arrays of cube coordinates
         cube_xi = d_xi * np.arange(n_xi) + fov.meta["xi_min"].value
         cube_eta = d_eta * (np.arange(n_eta) - (n_eta - 1) / 2)
-        cube_lam = wcs_lam.all_pix2world(np.arange(n_lam), 1)[0]
+        cube_lam = wcs_lam.all_pix2world(np.arange(n_lam), 0)[0]
         cube_lam *= u.Unit(wcs_lam.wcs.cunit[0]).to(u.um)
 
         # Initialise the array to hold the xi-lambda image

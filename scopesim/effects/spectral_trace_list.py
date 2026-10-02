@@ -246,17 +246,17 @@ class SpectralTraceList(Effect):
                 logger.info("Making cube")
                 obj.cube = obj.make_hdu()
 
-            # Check whether an offset slit is used. If so, recompute spectral traces.
-            offset_x = obj.cube.header["CRVAL1D"]
-            offset_y = obj.cube.header["CRVAL2D"]
-            if (offset_x != self.meta["offset_x"] or
-                offset_y != self.meta["offset_y"]):
-                logger.debug("Recomputing spectral traces for offset (%.1g, %.1g)",
-                             offset_x, offset_y)
-                self.meta["offset_x"] = offset_x
-                self.meta["offset_y"] = offset_y
-                self.make_spectral_traces()
-                self.update_meta()
+            # # Check whether an offset slit is used. If so, recompute spectral traces.
+            # offset_x = obj.cube.header["CRVAL1D"]
+            # offset_y = obj.cube.header["CRVAL2D"]
+            # if (offset_x != self.meta["offset_x"] or
+            #     offset_y != self.meta["offset_y"]):
+            #     logger.debug("Recomputing spectral traces for offset (%.1g, %.1g)",
+            #                  offset_x, offset_y)
+            #     self.meta["offset_x"] = offset_x
+            #     self.meta["offset_y"] = offset_y
+            #     self.make_spectral_traces()
+            #     self.update_meta()
 
             spt = self.spectral_traces[obj.trace_id]
             try:
