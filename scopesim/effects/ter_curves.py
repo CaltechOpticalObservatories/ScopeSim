@@ -688,6 +688,17 @@ class TaperedQuantumEfficiency(Effect):
 
     def apply_to(self, obj, **kwargs):
         if isinstance(obj, FieldOfView):
+            if obj.detector_header is not None and u.Unit(from_currsys(self.meta["position_unit"], self.cmds)) == u.pixel:
+                axis = str(from_currsys(self.meta["axis"], self.cmds)).lower()
+                if axis in {"x", "dispersion"}:
+                    detector_axis = "NAXIS1"
+                elif axis in {"y", "cross_dispersion", "cross-dispersion"}:
+                    detector_axis = "NAXIS2"
+                else:
+                    raise ValueError("axis must be 'x' or 'y'.")
+                detector_pixels = obj.detector_header[detector_axis]
+                if self._position_min() != 0 or self._position_max() != detector_pixels:
+                    warnings.warn(f"Tapered QE {axis}-axis span {self._position_min():g}..{self._position_max():g} pix differs from detector {detector_axis} span 0..{detector_pixels} pix.", stacklevel=2)
             obj.meta["detector_qe"] = self
         return obj
 
