@@ -7,6 +7,7 @@ from astropy.table import Table
 from palace import palace
 import skycalc_ipy
 
+from . import AtmosphericTERCurve
 from ..utils import (get_logger, from_currsys, from_rc_config, find_file,
                      zendist2airmass, get_zenith_angle, get_moon_phase, get_observation_info_from_cmds, get_local_time)
 from .. import rc
@@ -403,3 +404,14 @@ class SkyBackgroundTERCurve(SkycalcTERCurve):
         return params
 
 
+class TAPASTERCurve(AtmosphericTERCurve):
+    z_order: ClassVar[tuple[int, ...]] = (111, 511)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.target, self.location, self.time, self.brightness = get_observation_info_from_cmds(self.cmds)
+        self.airmass = zendist2airmass(get_zenith_angle(self.target, self.location, self.time))
+        self.surface.table['transmission'] = self.surface.table['transmission'] ** self.airmass
+
+    def apply_to(self, obj, **kwargs):
+        return super().apply_to(obj, **kwargs)

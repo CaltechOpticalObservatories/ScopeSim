@@ -125,8 +125,9 @@ class TERCurve(Effect):
         3.0         0.9             0.1
 
     """
-    ## Made TERCurve a FOV effect as well to be able to use it for dichroic trees which act on FoV objects
-    z_order: ClassVar[tuple[int, ...]] = (10, 110, 510, 610)
+    # Even though there is a FOV block in apply_to, the default z_order for TERCurve should not have 6xx otherwise
+    # it will apply that transmission twice! Once to the source, then to the FOV, found out the hard way :(
+    z_order: ClassVar[tuple[int, ...]] = (10, 110, 510)
     report_plot_include: ClassVar[bool] = True
     report_table_include: ClassVar[bool] = False
 
