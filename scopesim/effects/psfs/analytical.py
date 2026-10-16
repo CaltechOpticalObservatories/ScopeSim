@@ -258,19 +258,7 @@ class MoffatPSF(AnalyticalPSF):
         self._fwhm_interp = None
 
     def fwhm(self, wavelengths):
-        fwhm = self.meta["fwhm"]
-        if isinstance(fwhm, dict) and {"pivot_wave", "pivot_wave_unit"}.issubset(fwhm):
-            target, location, time, _ = get_observation_info_from_cmds(self.cmds)
-            key = tuple(fwhm.items()), target, location, time
-        elif isinstance(fwhm, dict):
-            key = tuple(fwhm.items())
-        else:
-            key = fwhm
-
-        if self._fwhm_interp is None or self._fwhm_interp[1] != key:
-            self._fwhm_interp = self.get_fwhm_interp(), key
-
-        return self._fwhm_interp[0](wavelengths)
+        return self.get_fwhm_interp()(wavelengths)
 
     @property
     def alpha(self):
@@ -282,33 +270,47 @@ class MoffatPSF(AnalyticalPSF):
         Overwrite this function for subclassing if FWHM input options change.
         """
         fwhm = self.meta["fwhm"]
+        if isinstance(fwhm, dict) and {"pivot_wave", "pivot_wave_unit"}.issubset(fwhm):
+            target, location, time, _ = get_observation_info_from_cmds(self.cmds)
+            zenith_angle = get_zenith_angle(target, location, time)
+            # The natural seeing law depends on the observation only through zenith angle.
+            key = tuple(fwhm.items()), zenith_angle
+        elif isinstance(fwhm, dict):
+            key = tuple(fwhm.items())
+        else:
+            key = fwhm
+
+        if self._fwhm_interp is not None and self._fwhm_interp[1] == key:
+            return self._fwhm_interp[0]
+
         if isinstance(fwhm, dict):
             logger.info("dict supplied for FWHM")
             if check_keys(fwhm, {"seeing", "seeing_unit", "pivot_wave", "pivot_wave_unit"}, action="warn"):
                 logger.info("seeing and pivot supplied, using natural scale seeing law")
-                target, location, time, _ = get_observation_info_from_cmds(self.cmds)
-                zenith_angle = get_zenith_angle(target, location, time)
                 seeing = (fwhm["seeing"] * u.Unit(fwhm["seeing_unit"])).to(u.arcsec)
                 pivot = (fwhm["pivot_wave"] * u.Unit(fwhm["pivot_wave_unit"])).to(u.um)
 
-                return partial(self.natural_scale, seeing=seeing, pivot=pivot, zenith_angle=zenith_angle*u.deg)
+                interp = partial(self.natural_scale, seeing=seeing, pivot=pivot, zenith_angle=zenith_angle*u.deg)
 
             elif check_keys(fwhm, {"seeing", "seeing_unit"}, action="error"):
                 logger.info("only seeing supplied, FWHM is wavelength independent")
                 seeing = (fwhm["seeing"] * u.Unit(fwhm["seeing_unit"])).to_value(u.arcsec)
-                return lambda wavelengths: np.full(wavelengths.shape, seeing, dtype=float) * u.arcsec
+                interp = lambda wavelengths: np.full(wavelengths.shape, seeing, dtype=float) * u.arcsec
 
-        if isinstance(fwhm, (int, float)):
+        elif isinstance(fwhm, (int, float)):
             logger.info("float value supplied, assuming arcsec")
-            return lambda wavelengths: np.full(wavelengths.shape, fwhm, dtype=float) * u.arcsec
+            interp = lambda wavelengths: np.full(wavelengths.shape, fwhm, dtype=float) * u.arcsec
 
-        if isinstance(fwhm, str):
+        elif isinstance(fwhm, str):
             logger.info("filename supplied for FWHM")
             self.table = DataContainer(filename=find_file(from_currsys(fwhm, self.cmds))).table
-            interp = self.fwhm_from_table(self.table)
-            return lambda wavelengths: interp(wavelengths) * u.arcsec
+            table_interp = self.fwhm_from_table(self.table)
+            interp = lambda wavelengths: table_interp(wavelengths) * u.arcsec
+        else:
+            raise TypeError("fwhm kwarg must be of type dict or float or str")
 
-        raise TypeError("fwhm kwarg must be of type dict or float or str")
+        self._fwhm_interp = interp, key
+        return interp
 
     def get_kernel(self, fov):
         pixel_scale = fov.header["CDELT1"] * u.deg.to(u.arcsec)
