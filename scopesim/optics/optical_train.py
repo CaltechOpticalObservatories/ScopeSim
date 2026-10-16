@@ -23,7 +23,7 @@ from .fov_manager import FOVManager
 from .image_plane import ImagePlane
 from ..commands.user_commands import UserCommands
 from ..detector import DetectorManager
-from ..effects import ExtraFitsKeywords
+from ..effects import DichroicTree, ExtraFitsKeywords, SelectorWheel
 from ..utils import from_currsys, top_level_catch, get_logger
 from ..source.source_templates import empty_sky
 from ..source.source_fields import SpectrumSourceField
@@ -37,7 +37,12 @@ import multiprocessing as mp
 N_PROCESSES = mp.cpu_count() - 1
 USE_MULTIPROCESSING = False
 
-def extract_source(fov, source):
+def extract_source(fov, source, source_effects=()):
+    # Branch spectra must be filtered before extraction clips them to the FOV wavelength range.
+    if source_effects:
+        source = source.make_copy()
+        for effect in source_effects:
+            source = effect.apply_to(source, fov=fov)
     fov.extract_from(source)
     return fov
 
@@ -538,7 +543,16 @@ class OpticalTrain:
         source = self.prepare_source(source)
 
         # [1D - transmission curves]
-        for effect in self.optics_manager.source_effects:
+        source_effects = self.optics_manager.source_effects
+        branch_effects = []
+        if not self.fov_manager.is_spectroscope:
+            for ii, effect in enumerate(source_effects):
+                if isinstance(effect, (DichroicTree, SelectorWheel)):
+                    # Keep downstream attenuation and emission in optical order for each branch.
+                    source_effects, branch_effects = source_effects[:ii], source_effects[ii:]
+                    break
+
+        for effect in source_effects:
             source = effect.apply_to(source)
 
         # [3D - Atmospheric shifts, PSF, NCPAs, Grating shift/distortion]
@@ -552,7 +566,7 @@ class OpticalTrain:
 
             with mp.Pool(processes=N_PROCESSES) as pool:
                 fovs = pool.starmap(extract_source,
-                                    zip(fovs, [source] * len(fovs)))
+                                    zip(fovs, [source] * len(fovs), [branch_effects] * len(fovs)))
 
             with mp.Pool(processes=N_PROCESSES) as pool:
                 fovs = pool.starmap(view_fov,
@@ -568,7 +582,7 @@ class OpticalTrain:
             fovs = self.fov_manager.fovs
             nobar = len(fovs) <= 1
             for fov in tqdm(fovs, desc=" FOVs", position=0, disable=nobar):
-                fov.extract_from(source)
+                fov = extract_source(fov, source, branch_effects)
 
                 fov.view()
                 foveffs = self.optics_manager.fov_effects
