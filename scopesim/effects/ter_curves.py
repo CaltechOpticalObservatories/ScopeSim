@@ -1621,6 +1621,7 @@ class DichroicTree(Effect):
         if isinstance(obj, FieldOfView):
             logger.debug("Executing %s, observe", self.meta['name'])
             obj_id = obj.meta.get(id_colname, None)
+            setattr(obj, id_colname, obj_id)
             row = self.table[self.table[id_colname] == obj_id]
 
             if len(row) != 1:
