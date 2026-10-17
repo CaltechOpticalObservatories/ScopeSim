@@ -261,7 +261,9 @@ class MoffatPSF(AnalyticalPSF):
         fwhm = self.meta["fwhm"]
         if isinstance(fwhm, dict) and {"pivot_wave", "pivot_wave_unit"}.issubset(fwhm):
             target, location, time, _ = get_observation_info_from_cmds(self.cmds)
-            key = tuple(fwhm.items()), target, location, time
+            # The seeing law depends on zenith angle, not the coordinate frame
+            # instance (SkyCoord equality raises for different observation times).
+            key = tuple(fwhm.items()), get_zenith_angle(target, location, time)
         elif isinstance(fwhm, dict):
             key = tuple(fwhm.items())
         else:

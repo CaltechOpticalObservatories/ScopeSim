@@ -7,6 +7,29 @@ from astropy import units as u
 from scopesim.effects.psfs.analytical import MoffatPSF
 
 
+def test_seeing_cache_uses_physical_zenith_angle(monkeypatch):
+    from astropy.coordinates import SkyCoord, AltAz, EarthLocation
+    from astropy.time import Time
+    from scopesim.effects.psfs import analytical
+
+    location = EarthLocation.from_geodetic(0*u.deg, 30*u.deg)
+    altitude = 60*u.deg
+    times = iter(Time(60310 + np.arange(10)/86400, format='mjd'))
+
+    def observing_info(cmds):
+        time = next(times)
+        target = SkyCoord(alt=altitude, az=0*u.deg, frame=AltAz(obstime=time, location=location))
+        return target, location, time, 'dark'
+
+    monkeypatch.setattr(analytical, 'get_observation_info_from_cmds', observing_info)
+    psf = MoffatPSF(alpha=4.765, fwhm={'seeing': .7, 'seeing_unit': 'arcsec', 'pivot_wave': 500, 'pivot_wave_unit': 'nm'})
+    first = psf.fwhm(np.array([.5])*u.um)
+    np.testing.assert_allclose(psf.fwhm(np.array([.5])*u.um), first)
+    altitude = 30*u.deg
+    expected = .7 / np.sin(altitude.to_value(u.rad))**.6
+    assert psf.fwhm(np.array([.5])*u.um)[0].to_value(u.arcsec) == pytest.approx(expected)
+
+
 class SimpleFov:
     header = {"CDELT1": 0.1 / 3600}
     meta = {"wave_min": 1.0 * u.um, "wave_max": 1.1 * u.um}
