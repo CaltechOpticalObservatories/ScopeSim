@@ -1,5 +1,5 @@
 from typing import ClassVar, Any
-from functools import partial
+from functools import partial, lru_cache
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord, EarthLocation
@@ -9,6 +9,7 @@ from astropy.time import Time
 from astropy.coordinates import SkyCoord, HADec
 from scipy.interpolate import make_interp_spline, RegularGridInterpolator
 from scipy.ndimage import map_coordinates
+from scipy.sparse import csr_array
 
 from .effects import Effect
 from ..optics.fov import FieldOfView3D
@@ -122,13 +123,16 @@ class ShiftFoV3D(Effect):
         for w in range(nw):
             out[w] = np.roll(data[w], (dy[w], dx[w]), axis=(0, 1))
             # zero out the rolled in part, select the correct slice based on sign of dxint, dyint
-            xslice = slice(0, dx[w]) if dx[w] > 0 else slice(nx-dx[w], nx)
-            yslice = slice(0, dy[w]) if dy[w] > 0 else slice(ny-dy[w], ny)
-            out[w][yslice, xslice] = 0
+            if dx[w] != 0:
+                xslice = slice(0, dx[w]) if dx[w] > 0 else slice(nx + dx[w], nx)
+                out[w, :, xslice] = 0
+            if dy[w] != 0:
+                yslice = slice(0, dy[w]) if dy[w] > 0 else slice(ny + dy[w], ny)
+                out[w, yslice, :] = 0
         return out
 
     @staticmethod
-    def map_coords_shift(data, dx, dy, chunk_w: int=8, order: int=3):
+    def map_coords_shift(data, dx, dy, chunk_w: int=64, order: int=3):
         """
         Shift each wavelength plane data[w, :, :] by (dx[w], dy[w]) using
         scipy.ndimage.map_coordinates independently on each spatial plane.
@@ -142,7 +146,7 @@ class ShiftFoV3D(Effect):
         dy : np.ndarray, shape (nwave,)
             Shift along y (axis=0) in pixels. Positive moves content toward +y.
         chunk_w : int
-            Retained for call compatibility; planes are now processed separately.
+            Number of independent wavelength planes processed together.
         order : int
             Spline interpolation order. Default 3.
 
@@ -156,15 +160,32 @@ class ShiftFoV3D(Effect):
         if dx.shape != (nw,) or dy.shape != (nw,):
             raise ValueError("dx and dy must have shape (nwave,)")
 
-        yi, xi = np.indices((ny, nx), dtype=np.float32)
-        out = np.empty_like(data)
-        # Atmospheric refraction shifts sky positions without mixing wavelengths.
-        # Filtering the full cube once per small output chunk scales quadratically
-        # with the spectral grid; spatial-plane interpolation is linear in nw.
-        for wave in range(nw):
-            coords = [yi - dy[wave], xi - dx[wave]]
-            out[wave] = map_coordinates(data[wave], coords, order=order, mode='nearest', prefilter=order > 1)
-        return out
+        # The same rounded displacement recurs in many wavelength planes.
+        # Reuse its spatial interpolation operator, without ever interpolating
+        # along wavelength or filtering the same profile thousands of times.
+        shifted = data
+        for axis, displacement, length in ((2, dx, nx), (1, dy, ny)):
+            out = np.empty(data.shape, dtype=float)
+            for offset in np.unique(displacement):
+                operator = _spatial_shift_operator(length, float(offset), order)
+                planes = np.flatnonzero(displacement == offset)
+                for start in range(0, len(planes), chunk_w):
+                    selected = planes[start:start + chunk_w]
+                    block = np.moveaxis(shifted[selected], axis, 0)
+                    result = operator @ block.reshape(length, -1)
+                    out[selected] = np.moveaxis(result.reshape(block.shape), 0, axis)
+            shifted = out
+        return shifted.astype(data.dtype, copy=False)
+
+
+@lru_cache(maxsize=128)
+def _spatial_shift_operator(length, shift, order):
+    # Apply scipy's interpolation to unit basis profiles once. Cubic spline
+    # coefficients decay exponentially; omit only weights below 1e-13.
+    row, column = np.indices((length, length), dtype=float)
+    response = map_coordinates(np.eye(length), [row, column - shift], order=order, mode='nearest', prefilter=order > 1)
+    response[abs(response) < 1e-13] = 0
+    return csr_array(response.T)
 
 
 class ADShift(ShiftFoV3D):
