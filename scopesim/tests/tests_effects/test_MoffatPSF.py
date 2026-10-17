@@ -31,7 +31,7 @@ def test_seeing_cache_uses_physical_zenith_angle(monkeypatch):
 
 
 class SimpleFov:
-    header = {"CDELT1": 0.1 / 3600}
+    header = {"CDELT1": 0.1 / 3600, "CDELT2": 0.1 / 3600}
     meta = {"wave_min": 1.0 * u.um, "wave_max": 1.1 * u.um}
     waveset = np.linspace(1.0, 1.1, 5) * u.um
 

@@ -232,7 +232,15 @@ class TERCurve(Effect):
         ## If obj is a FieldOfView, apply the throughput
         if isinstance(obj, FieldOfView):
             thru = self.throughput
-            if obj.hdu is not None and obj.hdu.header['NAXIS'] == 3:
+            if obj.hdu is None:
+                # Retain native spectral knots until spatial rendering, so
+                # narrow lines survive multiplication by the throughput.
+                for field in obj.fields:
+                    if isinstance(field, CubeSourceField):
+                        field.data *= thru(field.waveset).value[:, None, None]
+                    elif isinstance(field, SpectrumSourceField):
+                        field.spectra = {ref: spec * thru for ref, spec in field.spectra.items()}
+            elif obj.hdu.header['NAXIS'] == 3:
                 swcs = WCS(obj.hdu.header).spectral
                 with u.set_enabled_equivalencies(u.spectral()):
                     wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um

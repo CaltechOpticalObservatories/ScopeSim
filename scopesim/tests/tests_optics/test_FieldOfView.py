@@ -453,14 +453,18 @@ class TestMakeSpectrum:
     def test_make_spectrum_from_cube(self):
         src_cube = so._cube_source()  # 10x10" @ 0.2"/pix, [0.5, 2.5]m @ 0.02µm
         fov = _fov_197_202_um(ndim=1)
+        original = src_cube.fields[0].data.copy()
         fov.extract_from(src_cube)
 
         spec = fov.make_hdu()
 
-        in_sum = np.sum(src_cube.fields[0].data[74:77, :, :]) * 1e-8
+        # 1.98 and 2.00 um cells are complete; the 2.02 um cell is half
+        # inside this FOV. Cropping must not change the input cube in place.
+        in_sum = (original[74:76].sum() + original[76].sum()/2)*1e-8
         out_sum = np.sum(spec(fov.waveset).value)
 
         assert in_sum == approx(out_sum)
+        np.testing.assert_array_equal(src_cube.fields[0].data, original)
 
     def test_makes_spectrum_from_all_types_of_source_object(self):
         src_table = so._table_source()

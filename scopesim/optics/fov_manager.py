@@ -215,6 +215,16 @@ class FOVManager:
                                                 [ys_min, ys_max],
                                                 pixel_scale=pixel_scale / 3600.)
 
+            if self.is_spectroscope and "eta_min" in vol["meta"]:
+                # Tile the physical slit exactly. Detector sampling sets the
+                # approximate integration step, never the admitted slit area.
+                for axis, lower, upper in ((1, xs_min, xs_max), (2, ys_min, ys_max)):
+                    count = max(1, int(np.ceil((upper - lower)*3600/pixel_scale)))
+                    skyhdr[f'NAXIS{axis}'] = count
+                    skyhdr[f'CDELT{axis}'] = (upper - lower)/count
+                    skyhdr[f'CRPIX{axis}'] = (count + 1)/2
+                    skyhdr[f'CRVAL{axis}'] = (lower + upper)/2
+
             fov_dethdr, _ = ipu.det_wcs_from_sky_wcs(
                 WCS(skyhdr), pixel_scale, plate_scale)
             skyhdr.update(fov_dethdr.to_header())

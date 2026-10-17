@@ -7,6 +7,7 @@ from astropy.wcs import WCS, find_all_wcs
 from astropy.io import fits
 from astropy.utils.exceptions import AstropyWarning
 from scipy import ndimage as ndi
+from scipy.sparse import csr_array
 
 from ..utils import get_logger
 
@@ -623,6 +624,38 @@ def affine_map(
                                   order=spline_order)
 
     return output
+
+
+def project_spatial_density(image_hdu, canvas_header):
+    """Average a surface brightness image/cube over destination pixel areas.
+
+    Overlaps are exact for aligned rectangular pixels, including signed and
+    unequal scales. Rotated inputs retain the existing affine interpolation
+    before this area integration. No global flux renormalization is applied
+    after clipping to the destination footprint.
+    """
+    source = reorient_imagehdu(image_hdu.copy())
+    source_wcs = WCS(source.header, naxis=2)
+    canvas_wcs = WCS(canvas_header, naxis=2)
+    nx, ny = source.data.shape[-1], source.data.shape[-2]
+    x = np.arange(canvas_header['NAXIS1'] + 1) - .5
+    y = np.arange(canvas_header['NAXIS2'] + 1) - .5
+    xedges, _ = source_wcs.all_world2pix(*canvas_wcs.all_pix2world(x, np.zeros_like(x), 0), 0)
+    _, yedges = source_wcs.all_world2pix(*canvas_wcs.all_pix2world(np.zeros_like(y), y, 0), 0)
+
+    weights = []
+    for count, edges in ((nx, xedges), (ny, yedges)):
+        lower = np.minimum(edges[:-1], edges[1:])[:, None]
+        upper = np.maximum(edges[:-1], edges[1:])[:, None]
+        input_lower = np.arange(count)[None, :] - .5
+        overlap = np.maximum(0, np.minimum(upper, input_lower + 1) - np.maximum(lower, input_lower))
+        weights.append(csr_array(overlap/(upper - lower)))
+    wx, wy = weights
+    planes = source.data.reshape(-1, ny, nx)
+    rows = wy @ planes.transpose(1, 0, 2).reshape(ny, -1)
+    rows = rows.reshape(wy.shape[0], len(planes), nx).transpose(1, 0, 2)
+    mapped = (wx @ rows.reshape(-1, nx).T).T
+    return mapped.reshape(source.data.shape[:-2] + (wy.shape[0], wx.shape[0]))
 
 
 def add_imagehdu_to_imagehdu(

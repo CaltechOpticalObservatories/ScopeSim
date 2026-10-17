@@ -2,17 +2,18 @@
 """Contains simple Vibration, NCPA, Seeing and Diffraction PSFs."""
 
 from typing import ClassVar, Any
-from functools import partial
+from functools import partial, lru_cache
 
 import numpy as np
 from astropy import units as u
 from astropy.convolution import Gaussian2DKernel
-from astropy.modeling.models import Moffat2D
 from scipy.interpolate import make_interp_spline
+from scipy.special import gammaln, stdtr
+from astropy.wcs import WCS
 
 from .. import DataContainer
 from ...optics import ImagePlane
-from ...optics.fov import FieldOfView
+from ...optics.fov import FieldOfView, FieldOfView3D
 from ...utils import (from_currsys, quantify, quantity_from_table, figure_factory, check_keys, get_logger, find_file,
                       get_zenith_angle, get_observation_info_from_cmds)
 from . import PSF, PoorMansFOV
@@ -256,6 +257,7 @@ class MoffatPSF(AnalyticalPSF):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._fwhm_interp = None
+        self._kernel_cache = {}
 
     def fwhm(self, wavelengths):
         fwhm = self.meta["fwhm"]
@@ -313,8 +315,9 @@ class MoffatPSF(AnalyticalPSF):
         raise TypeError("fwhm kwarg must be of type dict or float or str")
 
     def get_kernel(self, fov):
-        pixel_scale = fov.header["CDELT1"] * u.deg.to(u.arcsec)
+        pixel_scale = abs(fov.header["CDELT1"]) * u.deg.to(u.arcsec)
         pixel_scale = quantify(pixel_scale, u.arcsec)
+        ystep = abs(fov.header["CDELT2"] / fov.header["CDELT1"])
 
         # Sample the wavelength-dependent seeing law with a bounded number of
         # representative points. Kernel sizing is driven by the broadest PSF
@@ -326,14 +329,17 @@ class MoffatPSF(AnalyticalPSF):
 
         target = self._target_enclosed_energy()
         max_ksize = self._max_kernel_size()
-        ksize = self._minimum_kernel_size(np.max(fwhms))
+        ksize = self._minimum_kernel_size(np.max(fwhms) / min(1., ystep))
         if max_ksize is not None:
             ksize = min(ksize, max_ksize)
 
-        kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize)
+        key = (tuple(gammas), alpha, ystep, target, max_ksize, ksize, self.meta["rounded_edges"], self._renormalize_clipped_kernel())
+        if key in self._kernel_cache:
+            return self._kernel_cache[key].copy()
+        kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize, ystep)
         while norm < target and (max_ksize is None or ksize < max_ksize):
             ksize = self._next_kernel_size(ksize, max_ksize)
-            kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize)
+            kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize, ystep)
 
         if norm < target:
             logger.warning(
@@ -354,7 +360,35 @@ class MoffatPSF(AnalyticalPSF):
 
         if self._renormalize_clipped_kernel() and norm > 0:
             kernel /= norm
+        if len(self._kernel_cache) >= 256:
+            self._kernel_cache.pop(next(iter(self._kernel_cache)))
+        self._kernel_cache[key] = kernel
         return kernel
+
+    def point_source_image(self, fov, x, y):
+        """Pixel-integrated effective PSF at an actual sky position [arcsec]."""
+        dx, dy = abs(fov.header['CDELT1'])*3600, abs(fov.header['CDELT2'])*3600
+        xp, yp = WCS(fov.header, naxis=2).all_world2pix(x/3600, y/3600, 0)
+        xx = (np.arange(fov.header['NAXIS1']) - xp)[None, :]*dx
+        yy = (np.arange(fov.header['NAXIS2']) - yp)[:, None]*dy
+        wave = self._sample_kernel_wavelengths(fov.waveset)
+        gammas = self.fwhm2gamma(self.fwhm(wave), self.alpha).to_value(u.arcsec)
+        return moffat_cell_integrals(xx, yy, dx, dy, gammas, self.alpha)
+
+    def _apply_convolution(self, obj):
+        if isinstance(obj, FieldOfView3D) and obj.hdu is None:
+            obj.hdu = obj.make_hdu(spatial_psf=self)
+        else:
+            super()._apply_convolution(obj)
+
+    def padded_header(self, fov):
+        """Spatial support needed to illuminate this FOV through the PSF."""
+        kernel = self.get_kernel(fov)
+        header = fov.header.copy()
+        for axis, padding in ((1, kernel.shape[1]//2), (2, kernel.shape[0]//2)):
+            header[f'NAXIS{axis}'] += 2*padding
+            header[f'CRPIX{axis}'] += padding
+        return header
 
     def _sample_kernel_wavelengths(self, waveset: u.Quantity) -> u.Quantity:
         max_samples = max(2, int(from_currsys(
@@ -389,22 +423,9 @@ class MoffatPSF(AnalyticalPSF):
         kx = float(from_currsys(self.meta.get("kernel_size", 4.0), self.cmds))
         return self._ensure_odd_int(kx * max_fwhm_pix)
 
-    def _make_moffat_kernel(self, gammas: np.ndarray, alpha:float, ksize: int) -> tuple[np.ndarray, float]:
-        amplitude = (alpha - 1) / (np.pi * gammas**2)
-        x, y = np.meshgrid(
-            np.arange(ksize) - ksize // 2,
-            np.arange(ksize) - ksize // 2,
-        )
-        cube = Moffat2D.evaluate(
-            x=x[None, ...],
-            y=y[None, ...],
-            amplitude=amplitude[:, None, None],
-            x_0=0,
-            y_0=0,
-            gamma=gammas[:, None, None],
-            alpha=alpha,
-        )
-        kernel = np.mean(cube, axis=0)
+    def _make_moffat_kernel(self, gammas, alpha, ksize, ystep=1.):
+        positions = np.arange(ksize) - ksize//2
+        kernel = moffat_cell_integrals(positions[None, :], positions[:, None]*ystep, 1., ystep, gammas, alpha)
         if from_currsys(self.meta.get("rounded_edges", False), self.cmds):
             kernel = self._round_kernel_edges(kernel)
         return kernel, float(np.sum(kernel))
@@ -451,6 +472,31 @@ class MoffatPSF(AnalyticalPSF):
         fwhm_array = table["fwhm"]
         interp = make_interp_spline(wave_array, fwhm_array)
         return lambda wavelengths: interp(wavelengths.to_value(u.um))
+
+
+@lru_cache(maxsize=16)
+def _legendre_rule(order):
+    return np.polynomial.legendre.leggauss(order)
+
+
+def moffat_cell_integrals(x, y, dx, dy, gammas, alpha):
+    """Integrate normalized Moffat profiles over rectangles, averaging wavelengths.
+
+    Integrate the conditional Student-t profile analytically along y and use
+    Gauss-Legendre quadrature along x. This resolves narrow profiles without
+    oversampling a spectral cube. All coordinates share one angular unit.
+    """
+    nodes, weights = _legendre_rule(max(8, int(np.ceil(8*dx/np.min(gammas)))))
+    xx = x[..., None] + dx*nodes/2
+    lower, upper = y[..., None] - dy/2, y[..., None] + dy/2
+    integral = np.zeros(np.broadcast_shapes(x.shape, y.shape))
+    normalization = np.exp(gammaln(alpha - .5) - gammaln(alpha - 1)) / np.sqrt(np.pi)
+    for gamma in gammas:
+        marginal = normalization/gamma * (1 + (xx/gamma)**2)**(.5 - alpha)
+        scale = np.sqrt((2*alpha - 1)/(gamma**2 + xx**2))
+        probability = stdtr(2*alpha - 1, upper*scale) - stdtr(2*alpha - 1, lower*scale)
+        integral += np.sum(marginal*probability*weights, axis=-1)*dx/2
+    return integral/len(gammas)
 
 
 class AOEnhanceablePSF(MoffatPSF):

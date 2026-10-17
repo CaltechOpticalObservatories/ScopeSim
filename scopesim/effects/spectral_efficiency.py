@@ -112,12 +112,7 @@ class SpectralEfficiency(Effect):
             logger.warning("No grating efficiency for trace %s", trace_id)
             return obj
 
-        swcs = WCS(obj.hdu.header).spectral
-        with u.set_enabled_equivalencies(u.spectral()):
-            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
-            thru = effic.throughput(wave)
-        obj.hdu.data = obj.hdu.data * thru.value[:, None, None]
-        return obj
+        return effic.apply_to(obj)
 
     def plot(self):
         """Plot the grating efficiencies."""
@@ -197,9 +192,12 @@ class EchelleSpectralEfficiency(Effect):
         """Interface between FieldOfView and SpectralEfficiency."""
         trace_id = obj.trace_id
 
-        swcs = WCS(obj.hdu.header).spectral
-        with u.set_enabled_equivalencies(u.spectral()):
-            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
+        if obj.hdu is None:
+            wave = obj.cube_waveset
+        else:
+            swcs = WCS(obj.hdu.header).spectral
+            with u.set_enabled_equivalencies(u.spectral()):
+                wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
 
         efficiency = self.efficiency_generator(trace_id, wave)
         params = {"description": trace_id}
@@ -207,8 +205,7 @@ class EchelleSpectralEfficiency(Effect):
         effic_curve = TERCurve(array_dict={"wavelength": wave, "transmission": efficiency}, **params)
         self.efficiencies[trace_id] = effic_curve
 
-        obj.hdu.data *= effic_curve.throughput(wave).value[:, None, None]
-        return obj
+        return effic_curve.apply_to(obj)
 
     def plot(self):
         """Plot the grating efficiencies."""

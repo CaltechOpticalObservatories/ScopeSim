@@ -20,9 +20,11 @@ from astar_utils.nested_mapping import RecursiveNestedMapping, is_bangkey, recur
 from .optics_manager import OpticsManager
 from .fov_manager import FOVManager
 from .image_plane import ImagePlane
+from .fov import FieldOfView3D
 from ..commands.user_commands import UserCommands
 from ..detector import DetectorManager
-from ..effects import ExtraFitsKeywords
+from ..effects import ExtraFitsKeywords, SelectorWheel, MoffatPSF, TERCurve, SpectralEfficiency, EchelleSpectralEfficiency
+from ..effects.ter_curves import FilterWheelBase, TaperedQuantumEfficiency
 from ..utils import from_currsys, top_level_catch, get_logger
 from ..source.source_templates import empty_sky
 from .. import __version__
@@ -586,10 +588,28 @@ class OpticalTrain:
             fovs = self.fov_manager.fovs
             nobar = len(fovs) <= 1
             for fov in tqdm(fovs, desc=" FOVs", position=0, disable=nobar):
-                fov.extract_from(source)
+                foveffs = []
+                for effect in self.optics_manager.fov_effects:
+                    if isinstance(effect, SelectorWheel):
+                        effect = effect.get_effect(fov.meta[effect.meta['selector_key']])
+                    if isinstance(effect, FilterWheelBase):
+                        effect = effect.current_filter
+                    if effect is not None:
+                        foveffs.append(effect)
 
-                fov.view()
-                foveffs = self.optics_manager.fov_effects
+                # Render at the PSF stage when preceding effects only multiply
+                # spectra. Point positions then stay continuous, and resolved
+                # images are convolved before clipping to the aperture.
+                psf_indices = [i for i, effect in enumerate(foveffs) if isinstance(effect, MoffatPSF)]
+                defer_render = isinstance(fov, FieldOfView3D) and len(psf_indices) == 1
+                if defer_render:
+                    psf_index = psf_indices[0]
+                    defer_render = all(isinstance(effect, (TERCurve, SpectralEfficiency, EchelleSpectralEfficiency, TaperedQuantumEfficiency)) for effect in foveffs[:psf_index])
+                if defer_render:
+                    fov.extract_from(source, spatial_header=foveffs[psf_index].padded_header(fov))
+                else:
+                    fov.extract_from(source)
+                    fov.view()
                 nobar = len(foveffs) <= 1
                 for effect in tqdm(foveffs, disable=nobar,
                                    desc=" FOV effects", position=1):#, leave=False):
@@ -607,6 +627,10 @@ class OpticalTrain:
                     # HACK: to get sky WCS from FOV into image plane...
                     self.image_planes[fov.image_plane_id].header.update(
                         WCS(fov.hdu).to_header())
+
+                # Mapping is complete. Keep the rendered FOV and trace's
+                # rectified spectrum, without retaining every input cube.
+                fov.cube = None
 
                 # ..todo: finish off the multiple image plane stuff
 
