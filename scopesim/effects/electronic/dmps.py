@@ -105,9 +105,10 @@ class DetectorModePropertiesSetter(Effect):
         saturation level (peak to full_well).
         """
         immax = np.max(obj.data)
-        fillfrac = kwargs.get("fill_frac",
-                              from_currsys("!OBS.auto_exposure.fill_frac",
-                                           self.cmds))
+        fillfrac = kwargs.get(
+            "fill_frac",
+            from_currsys("!OBS.auto_exposure.fill_frac", self.cmds),
+        )
 
         goodmodes = []
         goodron = []

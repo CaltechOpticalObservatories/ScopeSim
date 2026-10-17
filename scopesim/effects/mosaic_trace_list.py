@@ -239,7 +239,7 @@ class MosaicOutputFormat(MosaicSpectralTraceList):
        "image": The output is a (pseudo-)detector image where the
               spectrum for each fibre occupies a row.
 
-    .. versionadded:: PLACEHOLDER_NEXT_RELEASE_VERSION
+    .. versionadded:: 0.12.0
     """
 
     required_keys = {"filename", "format"}
@@ -253,8 +253,8 @@ class MosaicOutputFormat(MosaicSpectralTraceList):
                            type(det))
             return det
 
-        image = det._hdu.data
-        detwcs = WCS(det._hdu.header, key="D")
+        image = det.data
+        detwcs = WCS(det.header, key="D")
 
         output_format = from_currsys(self.meta["format"], self.cmds)
 
@@ -271,8 +271,9 @@ class MosaicOutputFormat(MosaicSpectralTraceList):
 
             det._hdu = fits.BinTableHDU.from_columns([
                 fits.Column(name="wavelength", format="D", array=lam, unit="um"),
-                fits.Column(name="spectrum", format="D", array=spec, unit="ADU"),
+                fits.Column(name="spectrum", format="D", array=spec, unit="adu"),
             ])
+            det._hdu.header["INHERIT"] = True
 
         elif output_format == "table":
             ntrace = len(self.spectral_traces)
@@ -298,8 +299,9 @@ class MosaicOutputFormat(MosaicSpectralTraceList):
 
             tab = Table(data=[idarr, xarr, yarr, lamarr, specarr],
                         names=["id", "x", "y", "wavelength", "spectrum"],
-                        units=["", "arcsec", "arcsec", "um", "ADU"])
+                        units=["", "arcsec", "arcsec", "um", "adu"])
             det._hdu = fits.BinTableHDU(data=tab)
+            det._hdu.header["INHERIT"] = True
 
         elif output_format == "image":
             pass
