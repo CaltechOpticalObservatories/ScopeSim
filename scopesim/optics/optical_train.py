@@ -23,7 +23,7 @@ from .image_plane import ImagePlane
 from .fov import FieldOfView3D
 from ..commands.user_commands import UserCommands
 from ..detector import DetectorManager
-from ..effects import ExtraFitsKeywords, SelectorWheel, MoffatPSF, TERCurve, SpectralEfficiency, EchelleSpectralEfficiency
+from ..effects import ExtraFitsKeywords, SelectorWheel, MoffatPSF, TERCurve, SpectralEfficiency, EchelleSpectralEfficiency, SpectralTraceList
 from ..effects.ter_curves import FilterWheelBase, TaperedQuantumEfficiency
 from ..utils import from_currsys, top_level_catch, get_logger
 from ..source.source_templates import empty_sky
@@ -596,6 +596,10 @@ class OpticalTrain:
                         effect = effect.current_filter
                     if effect is not None:
                         foveffs.append(effect)
+
+                for effect in foveffs:
+                    if isinstance(effect, SpectralTraceList):
+                        fov.meta['spectral_padding'] = effect.spectral_traces[fov.trace_id].spectral_padding(fov)
 
                 # Render at the PSF stage when preceding effects only multiply
                 # spectra. Point positions then stay continuous, and resolved

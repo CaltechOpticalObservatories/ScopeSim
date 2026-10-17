@@ -14,9 +14,8 @@ import warnings
 
 import numpy as np
 
-from scipy.interpolate import RectBivariateSpline
-from scipy.interpolate import interp1d
-from scipy.ndimage import gaussian_filter1d
+from scipy.interpolate import interp1d, RectBivariateSpline
+from scipy.ndimage import gaussian_filter1d, map_coordinates
 
 from astropy.table import Table, vstack
 from astropy.modeling import fitting
@@ -273,6 +272,24 @@ class SpectralTrace:
         y_mm = np.linspace(ymin_mm, ymax_mm, sub_naxis2, endpoint=False, dtype=np.float32)
         return xmin, ymin, x_mm, y_mm, det_wcs
 
+    def spectral_padding(self, fov):
+        """Input wavelength support for slit displacement and optical blur."""
+        lower, upper = fov.meta['wave_min'].to_value(u.um), fov.meta['wave_max'].to_value(u.um)
+        wave = np.unique(u.Quantity(self.table[self.meta['wave_colname']]).to_value(u.um))
+        wave = np.r_[lower, wave[(wave > lower) & (wave < upper)], upper]
+        width = (fov.meta['eta_max'] - fov.meta['eta_min']).to_value(u.arcsec)
+        if 'slit_dispersion_colname' in self.meta:
+            derivative = self.slit_dispersion(wave)
+        else:
+            pixsize = (fov.detector_header['CDELT1D']*u.Unit(fov.detector_header['CUNIT1D'])).to_value(u.mm)
+            self._set_dispersion(lower, upper, pixsize=pixsize)
+            step = abs(fov.header['CDELT2'])*3600
+            derivative = self.dlam_per_pix(wave)/step
+        padding = np.max(abs(derivative))*width/2
+        if 'optical_resolving_power' in self.meta:
+            padding += 5*upper/(self.meta['optical_resolving_power']*np.sqrt(8*np.log(2)))
+        return padding*u.um
+
     def map_spectra_to_focal_plane(self, fov):
         """
         Apply the spectral trace mapping to a spectral cube.
@@ -314,9 +331,6 @@ class SpectralTrace:
             xilam.convolve_lsf(self.meta["optical_resolving_power"])
         self._xilamimg = xilam
 
-        npix_xi, npix_lam = xilam.npix_xi, xilam.npix_lam
-        xilam_wcs = xilam.wcs
-
         # focal-plane coordinate images
         ximg_fpa, yimg_fpa = np.meshgrid(x_mm, y_mm)
 
@@ -324,33 +338,11 @@ class SpectralTrace:
         xi_fpa = self.xy2xi(ximg_fpa, yimg_fpa).astype(np.float32)
         lam_fpa = self.xy2lam(ximg_fpa, yimg_fpa).astype(np.float32)
 
-        # mask everything outside the wavelength range
-        mask = (xi_fpa >= xi_min) & (xi_fpa <= xi_max)
-        xi_fpa *= mask
-        lam_fpa *= mask
-
-        # mask everything outside the wavelength range
-        # mask = (lam_fpa >= wave_min) & (lam_fpa <= wave_max)
-        # xi_fpa *= mask
-        # lam_fpa *= mask
-
-        # Convert to pixel images
-        # These are the pixel coordinates in the image corresponding to
-        # xi, lambda
-        # It is much quicker to do the linear transformation by hand
-        # than to use the astropy.wcs functions for conversion.
-        i_img = ((lam_fpa - xilam_wcs.wcs.crval[0])
-                 / xilam_wcs.wcs.cdelt[0]).astype(int)
-        j_img = ((xi_fpa - xilam_wcs.wcs.crval[1])
-                 / xilam_wcs.wcs.cdelt[1]).astype(int)
-
-        # truncate images to remove pixel coordinates outside the image
-        ijmask = ((i_img >= 0) * (i_img < npix_lam)
-                  * (j_img >= 0) * (j_img < npix_xi))
-
-        # do the actual interpolation
-        # image is in [ph/s/um/arcsec]
-        image = xilam.interp(xi_fpa, lam_fpa, grid=False) * ijmask
+        # The physical slit ends include the outer half-cells. A truncated
+        # integer index incorrectly admits pixels below the lower boundary.
+        inside = (xi_fpa >= xi_min) & (xi_fpa < xi_max)
+        inside &= (lam_fpa >= wave_min) & (lam_fpa < wave_max)
+        image = xilam.interp(xi_fpa, lam_fpa, grid=False)*inside
 
         # Scale to ph / s / pixel
         image *= self._trace_flux_scale(
@@ -914,12 +906,16 @@ class XiLamImage():
             # lam0 is the target wavelength. We need to check that this
             # overlaps with the wavelength range covered by the cube
             if lam0.min() < cube_lam.max() and lam0.max() > cube_lam.min():
-                plane = fov.cube.data[:, i, :].T
-                plane_interp = RectBivariateSpline(cube_xi, cube_lam, plane,
-                                                   kx=1, ky=1)
-                self.image += plane_interp(cube_xi, lam0)
+                # Only wavelength changes here; xi is already on its native
+                # grid. Building a 2D spline for every slit cell is redundant.
+                index = np.searchsorted(cube_lam, lam0, side='right') - 1
+                index = np.clip(index, 0, n_lam - 2)
+                fraction = (lam0 - cube_lam[index])/d_lam
+                valid = (lam0 >= cube_lam[0]) & (lam0 <= cube_lam[-1])
+                plane = fov.cube.data[:, i, :]
+                self.image += ((1 - fraction[:, None])*plane[index] + fraction[:, None]*plane[index + 1]).T*valid
 
-        self.image *= d_eta     # ph/s/um/arcsec2 --> ph/s/um/arcsec
+        self.image *= abs(d_eta)     # ph/s/um/arcsec2 --> ph/s/um/arcsec
 
         # WCS for the xi-lambda image, i.e. the rectified 2D spectrum
         # Default WCS with xi in arcsec
@@ -945,14 +941,13 @@ class XiLamImage():
         self.xi = self.wcs.all_pix2world(self.lam[0], np.arange(n_xi), 0)[1]
         self.npix_xi = n_xi
         self.npix_lam = n_lam
-        # ..todo: cubic spline introduces negative values, linear does not.
-        #  Alternative might be to cubic-spline interpolate on sqrt(image),
-        #  with subsequent squaring of the result. This would require
-        #  wrapping RectBivariateSpline in a new (sub)class.
-        spline_order = (1, 1)
-        self.interp = RectBivariateSpline(self.xi, self.lam, self.image,
-                                          kx=spline_order[0],
-                                          ky=spline_order[1])
+
+    def interp(self, xi, wavelength, grid=True):
+        """Bilinear density interpolation on the existing uniform WCS grid."""
+        xi, wavelength = np.meshgrid(xi, wavelength, indexing='ij') if grid else np.broadcast_arrays(xi, wavelength)
+        row = (xi - self.xi[0])/self.wcs.wcs.cdelt[1]
+        column = (wavelength - self.lam[0])/self.wcs.wcs.cdelt[0]
+        return map_coordinates(self.image, [row, column], order=1, mode='nearest', prefilter=False)
 
     def convolve_lsf(self, resolving_power):
         """Apply an optical Gaussian LSF at constant R, preserving photon density.
@@ -970,7 +965,6 @@ class XiLamImage():
         density = interp1d(log_wave, self.image * self.lam, axis=1)(log_grid)
         blurred = gaussian_filter1d(density, sigma, axis=1, mode="nearest")
         self.image = interp1d(log_grid, blurred, axis=1)(log_wave) / self.lam
-        self.interp = RectBivariateSpline(self.xi, self.lam, self.image, kx=1, ky=1)
 
 
 class Transform2D():

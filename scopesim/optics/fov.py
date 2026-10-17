@@ -76,6 +76,7 @@ class FieldOfView:
             "wave_max": quantify(waverange[1], u.um),
             "wave_bin_n": 1,
             "wave_bin_type": "linear",
+            'spectral_padding': 0*u.um,
 
             "area": 0 * u.m**2,
             "pixel_area": None,  # [arcsec]
@@ -172,6 +173,7 @@ class FieldOfView:
             logger.debug("%d fields in FOV", len(fields_in_fov))
 
         minmax = array_minmax(corners_arcsec) * u.arcsec
+        source_range = self.waverange + np.array([-1, 1])*self.meta['spectral_padding']
 
         for field in fields_in_fov:
             if isinstance(field, TableSourceField):
@@ -183,7 +185,7 @@ class FieldOfView:
                 new_fld = TableSourceField(
                     field=extracted,
                     spectra={
-                        ref: extract_range_from_spectrum(spec, self.waverange)
+                        ref: extract_range_from_spectrum(spec, source_range)
                         for ref, spec in field.spectra.items()
                         if ref in extracted["ref"]
                     },
@@ -197,7 +199,7 @@ class FieldOfView:
                 new_fld = ImageSourceField(
                     field=extracted,
                     spectra={
-                        ref: extract_range_from_spectrum(spec, self.waverange)
+                        ref: extract_range_from_spectrum(spec, source_range)
                         for ref, spec in field.spectra.items()
                     },
                 )
@@ -215,7 +217,7 @@ class FieldOfView:
                     field=None,
                     header=field.header,
                     spectra={
-                        ref: extract_range_from_spectrum(spec, self.waverange)
+                        ref: extract_range_from_spectrum(spec, source_range)
                         for ref, spec in field.spectra.items()
                     },
                 )
@@ -407,7 +409,7 @@ class FieldOfView:
             hdu_waves = hdu_waves.quantity.to(u.um)
 
         wdel = hdr["CDELT3"] * u.Unit(hdr.get("CUNIT3", "AA"))
-        fov_wmin, fov_wmax = self.waverange
+        fov_wmin, fov_wmax = self.waverange + np.array([-1, 1])*self.meta['spectral_padding']
         # need to go [+/-] half a bin
         margin = abs(wdel)/2
         if isinstance(self, FieldOfView3D):
@@ -934,7 +936,8 @@ class FieldOfView3D(FieldOfView):
         wave_unit = u.Unit(from_currsys('!SIM.spectral.wave_unit', self.cmds))
         step = from_currsys('!SIM.spectral.spectral_bin_width', self.cmds)
         start, stop = self.meta['wave_min'].value, self.meta['wave_max'].value
-        return (start + np.arange(int((stop - start)/step))*step)*wave_unit
+        padding = int(np.ceil(self.meta['spectral_padding'].to_value(wave_unit)/step))
+        return (start + np.arange(-padding, int((stop - start)/step) + padding)*step)*wave_unit
 
     def _make_cubefields(self, fov_waveset):
         """

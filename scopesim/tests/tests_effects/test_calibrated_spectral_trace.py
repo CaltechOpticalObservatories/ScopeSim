@@ -74,3 +74,14 @@ def test_missing_aperture_geometry_fails():
 def test_detector_jacobian_uses_physical_pixel_area():
     header = fits.Header({'CTYPE1D': 'LINEAR', 'CTYPE2D': 'LINEAR', 'CUNIT1D': 'm', 'CUNIT2D': 'm', 'CDELT1D': .000015, 'CDELT2D': .000030, 'CRPIX1D': 1., 'CRPIX2D': 1., 'CRVAL1D': 0., 'CRVAL2D': 0.})
     assert SpectralTrace._detector_pixel_area(header) == pytest.approx(.015*.030)
+
+
+def test_rectified_interpolation_reproduces_a_linear_density_field():
+    fov = line_cube(.1)
+    wave = .995 + np.arange(2001)*fov.cube.header['CDELT3']
+    xi = np.arange(3)*.1
+    fov.cube.data[:] = 2 + 3*xi[None, None, :] + 5*wave[:, None, None]
+    image = XiLamImage(fov, lambda w: 0., slit_dispersion=lambda w: 0.)
+    positions, wavelengths = np.array([.03, .17]), np.array([.998, 1.003])
+    expected = 2 + 3*positions + 5*wavelengths
+    np.testing.assert_allclose(image.interp(positions, wavelengths, grid=False), expected, rtol=2e-6)

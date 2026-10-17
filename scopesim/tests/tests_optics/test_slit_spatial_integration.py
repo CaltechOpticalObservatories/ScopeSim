@@ -128,3 +128,19 @@ def test_fov_manager_tiles_physical_slit_width(width):
     fov = next(manager.generate_fovs_list())
     assert fov.header['NAXIS2']*fov.header['CDELT2']*3600 == pytest.approx(width)
     assert fov.header['NAXIS1']*fov.header['CDELT1']*3600 == pytest.approx(11.)
+
+
+@pytest.mark.parametrize('edge', ['left', 'right'])
+def test_subpixel_deposition_does_not_wrap_or_index_beyond_slit(edge):
+    fov = physical_fov()
+    fov.meta['sub_pixel'] = True
+    xpixel = -.25 if edge == 'left' else fov.header['NAXIS1'] - .75
+    ypixel = (fov.header['NAXIS2'] - 1)/2
+    x, y = WCS(fov.header, naxis=2).all_pix2world(xpixel, ypixel, 0)
+    source = Source(x=[x*3600], y=[y*3600], ref=[0], weight=[1.], spectra=[SourceSpectrum(ConstFlux1D, amplitude=1*PHOTLAM)])
+    fov.extract_from(source)
+    cube = fov.make_hdu()
+    admitted = cube.data.sum(axis=(1, 2))*fov.pixel_area.value/1e4
+    np.testing.assert_allclose(admitted, .75, rtol=1e-6)
+    opposite = -1 if edge == 'left' else 0
+    np.testing.assert_array_equal(cube.data[:, :, opposite], 0.)
