@@ -520,9 +520,12 @@ class SkycalcTERCurve(AtmosphericTERCurve):
 
         else:
             path = find_file(use_local_file)
-            fits_tbl = fits.getdata(path, ext=1)
+            with fits.open(path) as sky_file:
+                fits_tbl = sky_file[1].data
+                wave_unit = u.Unit(sky_file[1].columns["lam"].unit)
             fits_hdr = fits.getheader(path, ext=0)
             tbl = Table(fits_tbl)
+            tbl["lam"] = tbl["lam"] * wave_unit.to(u.um)
             tbl["lam"].unit = u.um
             for colname in tbl.colnames:
                 if "flux" in colname:
