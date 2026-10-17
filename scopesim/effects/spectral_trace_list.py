@@ -690,6 +690,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
         self.cmds = cmds
 
         trace_param_filename = kwargs.pop("filename")
+        self.physical_slit_dispersion = kwargs.pop("physical_slit_dispersion", False)
         save_generated_hdulist = kwargs.pop("save_generated_hdulist", False)
         generated_hdulist_filename = kwargs.pop(
             "generated_hdulist_filename", "analytical_echelle_traces.fits")
@@ -881,7 +882,19 @@ class EchelleSpectralTraceList(SpectralTraceList):
                      'x': xval,
                      'y': yval})
 
+                if self.physical_slit_dispersion:
+                    # The analytical prescription assumes equal slit magnification
+                    # along and across the slit. Use its native, unrotated echelle
+                    # mapping; neither the sky raster nor detector rotation changes
+                    # this physical wavelength displacement. Preserve the legacy sign.
+                    native_angle = row['plate_scale'] * u.Unit(trace_params.meta['plate_scale_unit']) * pix_size
+                    raw_pixel = ss.wavelength_to_x_pixel(w, order)
+                    delta_wave = ss.x_pixel_to_wavelength(raw_pixel + .5, order) - ss.x_pixel_to_wavelength(raw_pixel - .5, order)
+                    order_table['dlam_deta'] = (-delta_wave / native_angle).to(u.um / u.arcsec)
+
                 trace_hdu = fits.BinTableHDU(order_table)
+                if self.physical_slit_dispersion:
+                    trace_hdu.header['SLITCOL'] = 'dlam_deta'
                 trace_hdu.header['DISPDIR'] = row['dispdir']
                 trace_hdu.header["EXTNAME"] = f'{prefix}_{order:d}'
                 trace_hdu.header["DESIGNR"] = (

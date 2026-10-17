@@ -144,6 +144,8 @@ class MetisLMSSpectralTraceList(SpectralTraceList):
             slicefov.detector_header = obj.detector_header
             slicefov.meta["xi_min"] = obj.meta["xi_min"]
             slicefov.meta["xi_max"] = obj.meta["xi_max"]
+            slicefov.meta["eta_min"] = ymin * u.arcsec
+            slicefov.meta["eta_max"] = ymax * u.arcsec
             slicefov.meta["trace_id"] = sptid
             slicefov.cube = fits.ImageHDU(header=slicewcs.to_header(),
                                           data=slicecube)

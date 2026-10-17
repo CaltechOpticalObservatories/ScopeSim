@@ -394,11 +394,7 @@ class SpectralTrace:
 
     def _trace_flux_scale(self, x_mm, y_mm, pixsize, pixscale, det_header):
         """Return the local [arcsec um] per detector pixel flux scale."""
-        try:
-            use_jacobian = bool(from_currsys(
-                self.meta["trace_flux_jacobian"], self.cmds))
-        except ValueError:
-            use_jacobian = False
+        use_jacobian = from_currsys(self.meta["trace_flux_jacobian"], self.cmds)
 
         if not use_jacobian:
             dlam_by_dx, dlam_by_dy = self.xy2lam.gradient()
@@ -415,13 +411,10 @@ class SpectralTrace:
     @staticmethod
     def _detector_pixel_area(det_header):
         """Return detector WCS pixel area in mm2."""
-        try:
-            pixel_scale_matrix = WCS(det_header, key="D").pixel_scale_matrix
-            return np.abs(np.linalg.det(pixel_scale_matrix))
-        except Exception:  # pragma: no cover - FITS fallback for odd headers
-            cdelt1 = det_header["CDELT1D"] * u.Unit(det_header["CUNIT1D"])
-            cdelt2 = det_header["CDELT2D"] * u.Unit(det_header["CUNIT2D"])
-            return np.abs((cdelt1 * cdelt2).to_value(u.mm**2))
+        detector_wcs = WCS(det_header, key="D")
+        pixel_area = np.abs(np.linalg.det(detector_wcs.pixel_scale_matrix))
+        pixel_area *= u.Unit(detector_wcs.wcs.cunit[0]) * u.Unit(detector_wcs.wcs.cunit[1])
+        return pixel_area.to_value(u.mm**2)
 
     def rectify(
         self,
@@ -889,8 +882,16 @@ class XiLamImage():
         (n_lam, n_eta, n_xi) = fov.cube.data.shape
 
         # arrays of cube coordinates
-        cube_xi = d_xi * np.arange(n_xi) + fov.meta["xi_min"].value
-        cube_eta = d_eta * (np.arange(n_eta) - (n_eta - 1) / 2)
+        cube_xi = cube_wcs.all_pix2world(np.arange(n_xi), np.zeros(n_xi), np.zeros(n_xi), 0)[0]
+        cube_eta = cube_wcs.all_pix2world(np.zeros(n_eta), np.arange(n_eta), np.zeros(n_eta), 0)[1]
+        if cube_wcs.has_celestial:
+            # Slit coordinates are offsets about zero; RA wraps at 360 degrees.
+            cube_xi = (cube_xi + 180) % 360 - 180
+        cube_xi *= u.Unit(cube_wcs.wcs.cunit[0]).to(u.arcsec)
+        cube_eta *= u.Unit(cube_wcs.wcs.cunit[1]).to(u.arcsec)
+        # Each IFU slice has its own optical axis, independent of sky position.
+        eta_center = (fov.meta["eta_min"] + fov.meta["eta_max"]) / 2
+        cube_eta -= eta_center.to_value(u.arcsec)
         cube_lam = wcs_lam.all_pix2world(np.arange(n_lam), 0)[0]
         cube_lam *= u.Unit(wcs_lam.wcs.cunit[0]).to(u.um)
 
@@ -924,7 +925,7 @@ class XiLamImage():
         # Default WCS with xi in arcsec
         self.wcs = WCS(naxis=2)
         self.wcs.wcs.crpix = [1, 1]
-        self.wcs.wcs.crval = [self.lam[0], fov.meta["xi_min"].value]
+        self.wcs.wcs.crval = [self.lam[0], cube_xi[0]]
         self.wcs.wcs.pc = [[1, 0], [0, 1]]
         self.wcs.wcs.cdelt = [d_lam, d_xi]
         self.wcs.wcs.ctype = ["LINEAR", "LINEAR"]

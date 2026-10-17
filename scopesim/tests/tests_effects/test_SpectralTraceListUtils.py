@@ -303,7 +303,7 @@ class MockCubeFov:
         hdr["CUNIT1"], hdr["CUNIT2"], hdr["CUNIT3"] = "arcsec", "arcsec", "um"
         self.cube = fits.ImageHDU(
             data=np.ones((n_lam, n_eta, n_xi)), header=hdr)
-        self.meta = {"xi_min": -0.5 * u.arcsec, "xi_max": 0.5 * u.arcsec}
+        self.meta = {"xi_min": -0.5 * u.arcsec, "xi_max": 0.5 * u.arcsec, "eta_min": -0.5 * u.arcsec, "eta_max": 0.5 * u.arcsec}
 
 
 class TestXiLamImage:
