@@ -7,7 +7,7 @@ from collections.abc import Iterable, Generator
 from weakref import WeakKeyDictionary
 
 import numpy as np
-from scipy.interpolate import interp1d
+from scipy.integrate import cumulative_trapezoid
 
 from astropy import units as u
 from astropy.io import fits
@@ -490,10 +490,11 @@ class FieldOfView:
                                     for cube in cube_fields])
             _waveset = cube_fields[naxis3_max].waveset
         elif specfields := self._get_fields(SpectrumSourceField):
-            _waveset = np.concatenate([
+            _waveset = np.concatenate([self.waverange << u.um] + [
                 spec.waveset.to(u.um)
                 for field in specfields
                 for spec in field.spectra.values()
+                if spec.waveset is not None
             ])
         else:
             _waveset = self.waverange << u.um
@@ -928,7 +929,7 @@ class FieldOfView3D(FieldOfView):
         Find Cube fields.
 
         * rescale and reorient cubes
-        * interp1d smaller cubes with waveset
+        * integrate native spectral samples into the FOV wavelength bins
         * yield cubes to be added to cavas cube
         """
         for field in self._get_cube_fields():
@@ -936,17 +937,9 @@ class FieldOfView3D(FieldOfView):
             # Assumption is that ImageHDUs have units of PHOTLAM arcsec-2
 
             # TODO: Deal with this bounds_error in a more elegant way
-            field_interp = interp1d(
-                field.waveset.to(u.um).value,
-                field.data,
-                axis=0,
-                kind="linear",
-                bounds_error=False,
-                fill_value=0,
-            )
-
-            field_data = field_interp(fov_waveset.value)
+            field_data = rebin_spectral_density(field.waveset.to_value(u.um), field.data, spectral_bin_edges(fov_waveset.to_value(u.um)))
             field_hdu = fits.ImageHDU(data=field_data, header=field.header)
+            field_hdu.header.update(CRPIX3=1., CRVAL3=fov_waveset[0].to_value(u.um), CDELT3=np.diff(fov_waveset[:2])[0].to_value(u.um), CUNIT3='um', CTYPE3='WAVE')
             yield field_hdu
 
     def _make_imagefields(self, fov_waveset, spline_order):
@@ -975,7 +968,7 @@ class FieldOfView3D(FieldOfView):
                 differential=True,
             )
 
-            spec = field.spectrum(fov_waveset)
+            spec = average_spectrum(field.spectrum, fov_waveset)
             # 2D * 1D -> 3D
             field_cube = canvas_image_hdu.data[None, :, :] * spec[:, None, None]
             yield field_cube.value
@@ -998,7 +991,7 @@ class FieldOfView3D(FieldOfView):
             #       if this is the case and if yes, remove the condition here!!
             # Fluxes (yes that's the correct plural) in PHOTLAM
             fluxes = {
-                ref: spec(fov_waveset)
+                ref: average_spectrum(spec, fov_waveset)
                 for ref, spec in field.spectra.items()
                 if ref in field.field["ref"]
             }
@@ -1025,7 +1018,7 @@ class FieldOfView3D(FieldOfView):
             #        Remember, cube output needs PHOTLAM arcsec-2 !
             #        So if SOLIDANG or BUNIT or whatever is not in arcsec-2,
             #        the spectrum shoule be scaled accordingly!
-            spec = field.spectrum(fov_waveset)
+            spec = average_spectrum(field.spectrum, fov_waveset)
             yield spec[:, None, None].value
 
     def make_hdu(self):
@@ -1189,6 +1182,8 @@ def extract_range_from_spectrum(spectrum, waverange):
 
     wave_min, wave_max = quantify(waverange, u.um).to(u.AA).value
     spec_waveset = _spectrum_waveset_aa_value(spectrum)
+    if spec_waveset is None:
+        return spectrum
     mask = (spec_waveset > wave_min) & (spec_waveset < wave_max)
 
     # FIXME: Why did I comment this out in 2023? Seems useful to have...
@@ -1214,6 +1209,42 @@ def _spectrum_waveset_aa_value(spectrum):
     """Return cached spectrum waveset values in Angstrom."""
     spec_waveset = _SPECTRUM_WAVESET_AA_CACHE.get(spectrum)
     if spec_waveset is None:
+        if spectrum.waveset is None:
+            return None
         spec_waveset = spectrum.waveset.to(u.AA).value
         _SPECTRUM_WAVESET_AA_CACHE[spectrum] = spec_waveset
     return spec_waveset
+
+
+def spectral_bin_edges(centers):
+    """Edges of bins whose centers are the supplied wavelength samples."""
+    half_steps = np.diff(centers) / 2
+    return np.r_[centers[0] - half_steps[0], centers[:-1] + half_steps, centers[-1] + half_steps[-1]]
+
+
+def rebin_spectral_density(wave, density, edges):
+    """Integrate a piecewise-linear density, with zero flux beyond its support.
+
+    Wavelength is the first axis; density may also carry spatial dimensions.
+    The result remains a density, averaged over each requested bin.
+    """
+    if wave[1] < wave[0]:
+        wave, density = wave[::-1], density[::-1]
+    integral = cumulative_trapezoid(density, wave, axis=0, initial=0)
+    clipped = np.clip(edges, wave[0], wave[-1])
+    index = np.clip(np.searchsorted(wave, clipped, side='right') - 1, 0, len(wave) - 2)
+    dimensions = (len(edges),) + (1,)*(density.ndim - 1)
+    offset = (clipped - wave[index]).reshape(dimensions)
+    step = (wave[index + 1] - wave[index]).reshape(dimensions)
+    at_edges = integral[index] + density[index]*offset + (density[index + 1] - density[index])*offset**2/(2*step)
+    widths = np.diff(edges).reshape((len(edges) - 1,) + (1,)*(density.ndim - 1))
+    return np.diff(at_edges, axis=0) / widths
+
+
+def average_spectrum(spectrum, wavelengths):
+    """Average PHOTLAM over numerical bins without discarding native line samples."""
+    edges = spectral_bin_edges(wavelengths.to_value(u.AA))
+    native = _spectrum_waveset_aa_value(spectrum)
+    wave = edges if native is None else np.union1d(edges, native[(native > edges[0]) & (native < edges[-1])])
+    flux = spectrum(wave*u.AA).to_value(PHOTLAM)
+    return rebin_spectral_density(wave, flux, edges) * PHOTLAM
