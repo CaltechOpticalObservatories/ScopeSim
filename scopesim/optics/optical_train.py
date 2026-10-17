@@ -234,6 +234,7 @@ class OpticalTrain:
         explicit definition of which output image owns each trace coordinate.
         """
         from ..effects import (
+            DetectorModePropertiesSetter,
             ImagePlaneBackground,
             Rotate90CCD,
             SelectorWheel,
@@ -252,10 +253,14 @@ class OpticalTrain:
             selected = effect.wheel_effects.values() if isinstance(effect, SelectorWheel) else [effect]
             if any(not isinstance(item, ImagePlaneBackground) for item in selected):
                 raise NotImplementedError('Trace detector coordinates only support additive image-plane backgrounds.')
-        if self.optics_manager.detector_array_effects:
-            raise NotImplementedError(
-                "Trace detector coordinates do not yet support detector-array "
-                "effects.")
+        for effect in self.optics_manager.detector_array_effects:
+            if not isinstance(effect, DetectorModePropertiesSetter):
+                raise NotImplementedError('Trace detector coordinates do not yet support this detector-array effect.')
+            # Mode setters update commands, not image coordinates. Resolve an
+            # explicit mode before reading any binning command it can set.
+            if from_currsys(effect.mode_key, self.cmds) == 'auto':
+                raise NotImplementedError('Select an explicit detector readout mode before inspecting coordinates.')
+            effect.apply_to(None)
 
         fovs_by_trace = {}
         for fov in self.fov_manager.fovs:

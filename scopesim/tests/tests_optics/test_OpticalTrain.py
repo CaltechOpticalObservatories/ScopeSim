@@ -26,6 +26,7 @@ from scopesim.effects import (
     OnChipBinning,
     BasicReadoutNoise,
     ImagePlaneBackground,
+    DetectorModePropertiesSetter,
     SelectorWheel,
 )
 from scopesim.utils import find_file
@@ -201,6 +202,17 @@ class TestInit:
 
 
 class TestTraceDetectorCoordinates:
+    def test_explicit_detector_mode_resolves_its_binning_before_mapping(self):
+        train, _ = spectral_geometry_train()
+        before = train.trace_detector_coordinates()
+        train.cmds = UserCommands(properties={'!OBS.detector_readout_mode': 'slow'})
+        setter = DetectorModePropertiesSetter(mode_properties={'slow': {'!DET.binx': 2}}, cmds=train.cmds)
+        train.optics_manager.detector_array_effects = [setter]
+        train.optics_manager.detector_effects = [OnChipBinning(binx='!DET.binx', biny=1, cmds=train.cmds)]
+        after = train.trace_detector_coordinates()
+        np.testing.assert_allclose(after['detector_x'], (before['detector_x'] + .5*u.pixel)/2 - .5*u.pixel)
+        np.testing.assert_array_equal(after['detector_y'], before['detector_y'])
+
     @pytest.mark.parametrize('selected', [False, True])
     def test_additive_background_preserves_trace_coordinates(self, selected):
         train, _ = spectral_geometry_train()
