@@ -41,4 +41,3 @@ def test_optical_lsf_preserves_photons_and_adds_variance():
     center = np.sum(image.lam*image.image[1])/image.image[1].sum()
     variance = np.sum((image.lam-center)**2*image.image[1])/image.image[1].sum()
     assert variance == pytest.approx(.00002**2 + (1/10000/np.sqrt(8*np.log(2)))**2, rel=.02)
-

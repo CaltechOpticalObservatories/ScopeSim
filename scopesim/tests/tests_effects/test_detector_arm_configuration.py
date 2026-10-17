@@ -51,4 +51,3 @@ def test_independent_detector_readout_modes():
         DetectorModePropertiesSetter(mode_properties=modes, mode_key=f'!DET.mode_{arm}', cmds=cmds).apply_to(None)
     assert cmds['!DET.gain_blue'] == .6
     assert cmds['!DET.gain_red'] == 1.8
-

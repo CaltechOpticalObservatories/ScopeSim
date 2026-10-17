@@ -30,4 +30,3 @@ def test_background_uses_current_named_calibration(tmp_path):
     cmds['!INST.slit'] = 'missing'
     with pytest.raises(KeyError):
         effect.apply_to(plane)
-

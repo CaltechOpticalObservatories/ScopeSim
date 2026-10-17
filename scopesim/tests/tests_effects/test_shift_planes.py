@@ -12,4 +12,3 @@ def test_dispersion_does_not_mix_wavelengths():
     for wave in range(19):
         expected = map_coordinates(data[wave], [yy-dy[wave], xx-dx[wave]], order=3, mode='nearest')
         np.testing.assert_allclose(shifted[wave], expected, atol=2e-5)
-

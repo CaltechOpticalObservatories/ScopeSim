@@ -56,4 +56,3 @@ def test_ccd_bin_does_not_multiply_amplifier_noise():
     OnChipBinning(binx=2, biny=2).apply_to(det)
     BasicReadoutNoise(noise_std=3, ndit=1, random_seed=17).apply_to(det)
     assert det.data.std() == pytest.approx(3, rel=.02)
-

@@ -22,4 +22,3 @@ def test_skycalc_missing_wavelength_unit_fails(tmp_path):
     Table([[500., 1000., 2000.], [.5, .8, .9], [100., 200., 300.]], names=['lam', 'trans', 'flux']).write(path)
     with pytest.raises(TypeError, match='Unit'):
         SkycalcTERCurve(use_local_skycalc_file=str(path))
-

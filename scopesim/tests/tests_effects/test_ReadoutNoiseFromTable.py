@@ -23,4 +23,3 @@ def test_nir_averaging_preserves_signal_and_reduces_noise(tmp_path, ndit):
     assert det.data.std() == pytest.approx(9/np.sqrt(ndit), rel=.02)
     with pytest.raises(ValueError, match='outside'):
         ReadoutNoiseFromTable(filename=str(noise_file), dit=101, ndit=ndit).apply_to(det)
-
