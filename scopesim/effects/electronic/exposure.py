@@ -277,5 +277,6 @@ class ExposureIntegration(Effect):
             )
 
         obj._hdu.data *= dit * ndit
+        obj.header["EXPTIME"] = (dit * ndit, "Total accumulated integration time [s]")
 
         return obj
