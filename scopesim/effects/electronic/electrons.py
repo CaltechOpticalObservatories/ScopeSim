@@ -271,7 +271,7 @@ class ADConversion(Effect):
         super().__init__(**kwargs)
         params = {
             "dtype": "uint16",
-            "gain": 1.      # default, usually overridden from yaml
+            "gain": "!DET.gain"
         }
         self.meta.update(params)
         self.meta.update(kwargs)
@@ -307,16 +307,17 @@ class ADConversion(Effect):
         # Apply the gain value (copy from DarkCurrent)
         # Note that this does not cater for the case where the gain is given
         # as a plain dictionary. Should we implement that?
-        if hasattr(self.cmds["!DET.gain"], "dic"):
+        configured_gain = from_currsys(self.meta["gain"], self.cmds)
+        if hasattr(configured_gain, "dic"):
             dtcr_id = obj.meta[real_colname("id", obj.meta)]
-            gain = self.cmds["!DET.gain"].dic[dtcr_id]
+            gain = configured_gain.dic[dtcr_id]
             logger.info(f"Detector {dtcr_id}: applying gain {gain}")
-        elif isinstance(self.cmds["!DET.gain"], (float, int)):
-            gain = self.cmds["!DET.gain"]
+        elif isinstance(configured_gain, (float, int)):
+            gain = configured_gain
             logger.info(f"Applying gain {gain}")
         else:
             raise ValueError("<ADConversion>.meta['gain'] must be either "
-                             f"dict or float, but is {self.cmds['!DET.gain']}")
+                             f"dict or float, but is {configured_gain}")
 
         # Apply gain
         obj._hdu.data /= gain

@@ -355,16 +355,17 @@ class DetectorList(Effect):
                 hdr["PC2_1"] = -sang
                 hdr["PC2_2"] = cang
 
-            # hdr["GAIN"] = row["gain"]
-            if "id" in row:
-                hdr["DET_ID"] = row["id"]
-                hdr["EXTNAME"] = f"DET_{row['id']}"
-
             row_dict = {
                 f"HIERARCH {col.upper()}" if len(col) > 8 else col: row[col]
                 for col in row.colnames
             }
             hdr.update(row_dict)
+            if "id" in row.colnames:
+                # Keep routing identifiers numeric when detector metadata is
+                # serialized to FITS (NumPy integers otherwise become strings).
+                hdr["ID"] = int(row["id"])
+                hdr["DET_ID"] = int(row["id"])
+                hdr["EXTNAME"] = f"DET_{row['id']}"
             hdrs.append(hdr)
 
         return hdrs
