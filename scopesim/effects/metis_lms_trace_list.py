@@ -324,6 +324,7 @@ class MetisLMSSpectralTrace(SpectralTrace):
     """SpectralTrace for the METIS LM spectrograph."""
 
     _class_params = {
+        **SpectralTrace._class_params,
         "naxis1": 122,
         "nslice": 28,
         "slicewidth": 0.0207,  # arcsec
