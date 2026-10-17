@@ -121,6 +121,7 @@ class OpticalTrain:
         self.detector_managers = []
         self.yaml_dicts = None
         self._last_source = None
+        self._readout_id = 0
 
         if cmds is not None:
             self.load(cmds)
@@ -233,13 +234,11 @@ class OpticalTrain:
         explicit definition of which output image owns each trace coordinate.
         """
         from ..effects import (
-            BinnedImage,
-            OnChipBinning,
             Rotate90CCD,
             SelectorWheel,
             SpectralTraceList,
-            UnequalBinnedImage,
         )
+        from ..effects.electronic.pixels import BinnedImageBase
 
         trace_lists = self.optics_manager.get_all(SpectralTraceList)
         if len(trace_lists) != 1:
@@ -326,31 +325,14 @@ class OpticalTrain:
                     "detectors on one image plane.")
             detector = detector_manager[0]
             detector_id = detector.header["ID"]
+            readout_header = detector._native_header.copy()
 
             for effect in self.optics_manager.detector_effects:
-                selected_effect = (
-                    effect.wheel_effects.get(detector_id)
-                    if isinstance(effect, SelectorWheel)
-                    else effect
-                )
+                selected_effect = effect.get_effect(detector_id) if isinstance(effect, SelectorWheel) else effect
                 if selected_effect is None:
                     continue
-                if isinstance(selected_effect, BinnedImage):
-                    bin_size = from_currsys(
-                        selected_effect.meta["bin_size"], self.cmds)
-                    if bin_size != 1:
-                        raise NotImplementedError(
-                            "Trace detector coordinates do not yet support "
-                            "post-extraction detector binning.")
-                if isinstance(selected_effect, (UnequalBinnedImage, OnChipBinning)):
-                    binx = from_currsys(
-                        selected_effect.meta["binx"], self.cmds)
-                    biny = from_currsys(
-                        selected_effect.meta["biny"], self.cmds)
-                    if binx != 1 or biny != 1:
-                        raise NotImplementedError(
-                            "Trace detector coordinates do not yet support "
-                            "post-extraction detector binning.")
+                if isinstance(selected_effect, BinnedImageBase):
+                    readout_header = selected_effect.bin_header(readout_header)
                 if isinstance(selected_effect, Rotate90CCD):
                     rotations = from_currsys(
                         selected_effect.meta["rotations"], self.cmds)
@@ -359,7 +341,7 @@ class OpticalTrain:
                             "Trace detector coordinates do not yet support "
                             "post-extraction detector rotation.")
 
-            detector_wcs = WCS(detector.header, key="D")
+            detector_wcs = WCS(detector._native_header, key="D")
             image_plane_wcs = image_plane._det_wcs
             if (
                 not np.allclose(image_plane_wcs.wcs.pc, np.eye(2))
@@ -429,13 +411,7 @@ class OpticalTrain:
                         f"Trace {trace_name!r} has overlapping FOV wavelength "
                         "ranges.")
 
-                (
-                    _,
-                    _,
-                    x_grid_mm,
-                    y_grid_mm,
-                    subimage_wcs,
-                ) = trace._focal_plane_grid(fov)
+                _, _, x_grid_mm, y_grid_mm, subimage_wcs = trace._focal_plane_grid(fov)
                 if (
                     not np.allclose(subimage_wcs.wcs.pc, np.eye(2))
                     or not np.allclose(
@@ -477,6 +453,8 @@ class OpticalTrain:
                     f"Requested wavelengths for trace {trace_name!r} "
                     "do not map through a configured FOV.")
 
+            focal_x, focal_y = detector_wcs.all_pix2world(x_pix, y_pix, 0)
+            x_pix, y_pix = WCS(readout_header, key='D').all_world2pix(focal_x, focal_y, 0)
             point_count = wave_grid.size
             columns["readout_index"].extend(
                 np.full(point_count, readout_index))
@@ -534,6 +512,7 @@ class OpticalTrain:
         """
         if update:
             self.update(**kwargs)
+        self._readout_id = 0
 
         if self.cmds["!SIM.random.seed"] is None:
             # Concretize seed from system entropy to keep constant during the
@@ -716,7 +695,7 @@ class OpticalTrain:
         self,
         filename: Path | str | None = None,
         reset: bool = True,
-        roid: int = 0,
+        roid: int | None = None,
         **kwargs
     ) -> list[HDUList]:
         """
@@ -731,13 +710,10 @@ class OpticalTrain:
         reset : bool, optional
             If true (the default), do not keep any parameters set during any
             previous readout. This is usually what you want.
-        roid : int, optional
-            Readout ID, used for seeding randomness. If you run multiple
-            readouts on the same observation and want the random effects to
-            produce different results, set this parameter with e.g. the loop
-            counter. Simple integers are fine (0, 1, 2, ...), because this gets
-            wrangled into a proper random seed downstream. If you need to
-            reproduce a specific readout in a sequence, set e.g. `roid=4`.
+        roid : int or None, optional
+            Readout ID for reproducible noise. By default, successive calls
+            use 0, 1, 2, ... within each observation. Supply an explicit ID to
+            replay that noise realization with the same root seed.
         **kwargs :
             Any other kwargs passed to the detector effects.
 
@@ -749,6 +725,9 @@ class OpticalTrain:
         """
         if reset:
             self.cmds.clear()
+        if roid is None:
+            roid = self._readout_id
+            self._readout_id += 1
 
         # Hack to make sure AutoExposure and Quantization work properly.
         # Should probably be removed once #428 is fixed properly.

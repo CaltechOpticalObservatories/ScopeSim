@@ -3,7 +3,7 @@ import pytest
 from scopesim.detector import Detector
 from scopesim.optics.image_plane_utils import header_from_list_of_xy
 from astropy.wcs import WCS
-from scopesim.effects.electronic import OnChipBinning, BasicReadoutNoise
+from scopesim.effects.electronic import OnChipBinning, UnequalBinnedImage, BasicReadoutNoise
 
 
 def detector(nx=120, ny=80):
@@ -56,3 +56,20 @@ def test_ccd_bin_does_not_multiply_amplifier_noise():
     OnChipBinning(binx=2, biny=2).apply_to(det)
     BasicReadoutNoise(noise_std=3, ndit=1, random_seed=17).apply_to(det)
     assert det.data.std() == pytest.approx(3, rel=.02)
+
+
+def test_software_sum_accumulates_independent_read_noise():
+    det = detector(600, 400)
+    BasicReadoutNoise(noise_std=3, ndit=1, random_seed=17).apply_to(det)
+    UnequalBinnedImage(binx=2, biny=2).apply_to(det)
+    assert det.data.std() == pytest.approx(6, rel=.02)
+    assert det.header['CDELT1D'] == pytest.approx(.03)
+    assert det.header['CDELT2D'] == pytest.approx(.03)
+
+
+def test_header_projection_matches_applied_binning():
+    det = detector()
+    binning = OnChipBinning(binx=1, biny=2)
+    expected = binning.bin_header(det.header)
+    binning.apply_to(det)
+    assert det.header == expected

@@ -23,6 +23,8 @@ from scopesim.effects import (
     Effect,
     SpectralTraceList,
     UnequalBinnedImage,
+    OnChipBinning,
+    BasicReadoutNoise,
 )
 from scopesim.utils import find_file
 
@@ -205,8 +207,8 @@ class TestTraceDetectorCoordinates:
 
         assert coordinates["trace_id"][0] == "linear"
         assert coordinates["readout_index"][0] == 0
-        assert coordinates["detector_x"][0].to_value(u.pixel) == approx(49)
-        assert coordinates["detector_y"][0].to_value(u.pixel) == approx(39)
+        assert coordinates['detector_x'][0].to_value(u.pixel) == approx(49.5)
+        assert coordinates['detector_y'][0].to_value(u.pixel) == approx(39.5)
 
     def test_includes_renderer_endpoint_sampling(self):
         train, _ = spectral_geometry_train()
@@ -214,12 +216,9 @@ class TestTraceDetectorCoordinates:
         coordinates = train.trace_detector_coordinates(
             wavelengths={"linear": [1.25] * u.um})
 
-        # The rendered subimage samples -0.65..0.65 mm at 13 inclusive
-        # positions. The trace's -0.25 mm point therefore lands here, rather
-        # than at the ideal detector-WCS coordinate x=47.
-        expected_x = 43 + (-0.25 + 0.65) / (0.65 + 0.65) * 12
-        assert coordinates["detector_x"][0].to_value(u.pixel) == approx(
-            expected_x)
+        # The upstream renderer now uses native detector centers, excluding
+        # the next pixel beyond the subimage's last column.
+        assert coordinates['detector_x'][0].to_value(u.pixel) == approx(47.)
 
     def test_returns_all_trace_wavelengths_and_requested_slit_positions(self):
         train, _ = spectral_geometry_train()
@@ -247,8 +246,8 @@ class TestTraceDetectorCoordinates:
             wavelengths={"linear": [1.5] * u.um})
 
         trace = trace_list.spectral_traces["linear"]
-        trace.meta["offset_y"] = 0.1
-        trace.compute_interpolation_functions()
+        trace.xilam2y.posttransform = (lambda y: y + .1, {})
+        trace.xy2lam.pretransform_y = (lambda y: y - .1, {})
         after = train.trace_detector_coordinates(
             wavelengths={"linear": [1.5] * u.um})
 
@@ -261,14 +260,19 @@ class TestTraceDetectorCoordinates:
         with pytest.raises(NotImplementedError, match="multiple detectors"):
             train.trace_detector_coordinates()
 
-    def test_rejects_post_extraction_binning(self):
+    @pytest.mark.parametrize('binning_class', [UnequalBinnedImage, OnChipBinning])
+    def test_binned_coordinates_match_before_and_after_readout_geometry(self, binning_class):
         train, _ = spectral_geometry_train()
-        train.optics_manager.detector_effects = [
-            UnequalBinnedImage(binx=2, biny=1),
-        ]
-
-        with pytest.raises(NotImplementedError, match="binning"):
-            train.trace_detector_coordinates()
+        native = train.trace_detector_coordinates()
+        binning = binning_class(binx=2, biny=1)
+        train.optics_manager.detector_effects = [binning]
+        before = train.trace_detector_coordinates()
+        np.testing.assert_allclose(before['detector_x'], (native['detector_x'] + .5*u.pixel)/2 - .5*u.pixel)
+        np.testing.assert_allclose(before['detector_y'], native['detector_y'])
+        binning.apply_to(train.detector_managers[0][0])
+        after = train.trace_detector_coordinates()
+        np.testing.assert_array_equal(before['detector_x'], after['detector_x'])
+        np.testing.assert_array_equal(before['detector_y'], after['detector_y'])
 
 
 @pytest.mark.slow
@@ -381,6 +385,18 @@ class TestObserve:
 
 @pytest.mark.usefixtures("patch_mock_path")
 class TestReadout:
+    def test_successive_noise_realizations_can_be_replayed(self, unity_cmds, unity_src):
+        commands = deepcopy(unity_cmds)
+        commands['!SIM.random.seed'] = 17
+        opt = OpticalTrain(commands)
+        opt.optics_manager.add_effect(BasicReadoutNoise(noise_std=3., ndit=1, cmds=opt.cmds))
+        opt.observe(unity_src)
+        first = opt.readout()[0][1].data
+        second = opt.readout()[0][1].data
+        replay = opt.readout(roid=0)[0][1].data
+        assert not np.array_equal(first, second)
+        np.testing.assert_array_equal(first, replay)
+
     def test_readout_works_when_source_observed(self, unity_cmds, unity_src):
 
         opt = OpticalTrain(unity_cmds)
