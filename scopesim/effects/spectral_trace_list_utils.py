@@ -16,6 +16,7 @@ import numpy as np
 
 from scipy.interpolate import RectBivariateSpline
 from scipy.interpolate import interp1d
+from scipy.ndimage import gaussian_filter1d
 
 from astropy.table import Table, vstack
 from astropy.modeling import fitting
@@ -105,6 +106,7 @@ class SpectralTrace:
         "pixel_size": None,
         "description": "<no description>",
         "trace_flux_jacobian": "!SIM.spectral.trace_flux_jacobian",
+        "fit_degree": 4,
     }
 
     def __init__(self, trace_tbl, cmds=None, **kwargs):
@@ -130,6 +132,9 @@ class SpectralTrace:
                 ("PLTSCALE", "plate_scale"),
                 ("DETPAD", "detector_pad"),
                 ("DETANG", "detector_angle"),
+                ("FITDEG", "fit_degree"),
+                ("LSFRES", "optical_resolving_power"),
+                ("SLITCOL", "slit_dispersion_colname"),
             ):
                 if header_key in trace_tbl.header:
                     self.meta[meta_key] = trace_tbl.header[header_key]
@@ -194,12 +199,19 @@ class SpectralTrace:
         self.wave_min = quantify(np.min(lam_arr), u.um).value
         self.wave_max = quantify(np.max(lam_arr), u.um).value
 
-        self.xy2xi = Transform2D.fit(x_arr, y_arr, xi_arr)
-        self.xy2lam = Transform2D.fit(x_arr, y_arr, lam_arr)
-        self.xilam2x = Transform2D.fit(xi_arr, lam_arr, x_arr)
-        self.xilam2y = Transform2D.fit(xi_arr, lam_arr, y_arr)
-        self._xiy2x = Transform2D.fit(xi_arr, y_arr, x_arr)
-        self._xiy2lam = Transform2D.fit(xi_arr, y_arr, lam_arr)
+        degree = self.meta["fit_degree"]
+        self.xy2xi = Transform2D.fit(x_arr, y_arr, xi_arr, degree=degree)
+        self.xy2lam = Transform2D.fit(x_arr, y_arr, lam_arr, degree=degree)
+        self.xilam2x = Transform2D.fit(xi_arr, lam_arr, x_arr, degree=degree)
+        self.xilam2y = Transform2D.fit(xi_arr, lam_arr, y_arr, degree=degree)
+        self._xiy2x = Transform2D.fit(xi_arr, y_arr, x_arr, degree=degree)
+        self._xiy2lam = Transform2D.fit(xi_arr, y_arr, lam_arr, degree=degree)
+        if "slit_dispersion_colname" in self.meta:
+            center = xi_arr == 0
+            derivative = self.table[self.meta["slit_dispersion_colname"]].quantity.to_value(u.um / u.arcsec)
+            # FOVs are restricted to this trace; allow unit-conversion roundoff
+            # at the wavelength endpoints when interpolating the derivative.
+            self.slit_dispersion = interp1d(lam_arr[center], derivative[center], bounds_error=False, fill_value="extrapolate")
 
         if self.dispersion_axis == "unknown":
             dlam_dx, dlam_dy = self.xy2lam.gradient()
@@ -293,11 +305,13 @@ class SpectralTrace:
         image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float32)
 
         self._set_dispersion(wave_min, wave_max, pixsize=pixsize)
-        try:
-            xilam = XiLamImage(fov, self.dlam_per_pix)
-            self._xilamimg = xilam   # ..todo: remove or make available with a debug flag?
-        except ValueError:
-            logger.warning(" ---> %s gave ValueError", self.trace_id)
+        slit_dispersion = None
+        if "slit_dispersion_colname" in self.meta:
+            slit_dispersion = self.slit_dispersion
+        xilam = XiLamImage(fov, self.dlam_per_pix, slit_dispersion=slit_dispersion)
+        if "optical_resolving_power" in self.meta:
+            xilam.convolve_lsf(self.meta["optical_resolving_power"])
+        self._xilamimg = xilam
 
         npix_xi, npix_lam = xilam.npix_xi, xilam.npix_lam
         xilam_wcs = xilam.wcs
@@ -848,9 +862,13 @@ class XiLamImage():
     dlam_per_pix : a 1-D interpolation function from wavelength (in um) to
           dispersion (in um/pixel); alternatively a number giving an average
           dispersion
+    slit_dispersion : callable, optional
+          Physical cross-slit derivative d(lambda)/d(eta) in um/arcsec as a
+          function of wavelength in um. When supplied, this replaces the
+          legacy coupling between sky-grid sampling and detector dispersion.
     """
 
-    def __init__(self, fov, dlam_per_pix):
+    def __init__(self, fov, dlam_per_pix, slit_dispersion=None):
         # ..todo: we assume that we always have a cube. We use SpecCADO's
         #         add_cube_layer method
         cube_wcs = WCS(fov.cube.header, key=" ")
@@ -883,8 +901,11 @@ class XiLamImage():
             logger.warning("Using scalar dlam_per_pix = %.2g",
                            dlam_per_pix_val)
 
+        dlam_per_arcsec = dlam_per_pix_val / d_eta if slit_dispersion is None else slit_dispersion(self.lam)
         for i, eta in enumerate(cube_eta):
-            lam0 = self.lam + dlam_per_pix_val * eta / d_eta
+            # A positive calibrated derivative moves an input line to a larger
+            # apparent wavelength: sample the source at lambda_out - shift.
+            lam0 = self.lam + dlam_per_arcsec * eta if slit_dispersion is None else self.lam - dlam_per_arcsec * eta
 
             # lam0 is the target wavelength. We need to check that this
             # overlaps with the wavelength range covered by the cube
@@ -928,6 +949,24 @@ class XiLamImage():
         self.interp = RectBivariateSpline(self.xi, self.lam, self.image,
                                           kx=spline_order[0],
                                           ky=spline_order[1])
+
+    def convolve_lsf(self, resolving_power):
+        """Apply an optical Gaussian LSF at constant R, preserving photon density.
+
+        This is the optical blur alone; slit illumination is integrated above.
+        Convolving lambda * I_lambda on a uniform log(lambda) grid preserves
+        integrated flux rather than treating I_lambda as a log-bin count.
+        """
+        if resolving_power <= 0:
+            raise ValueError("Optical resolving power must be positive")
+        log_wave = np.log(self.lam)
+        n = int(np.ceil((log_wave[-1] - log_wave[0]) / np.min(np.diff(log_wave)))) + 1
+        log_grid = np.linspace(log_wave[0], log_wave[-1], n)
+        sigma = 1 / (resolving_power * np.sqrt(8 * np.log(2)) * (log_grid[1] - log_grid[0]))
+        density = interp1d(log_wave, self.image * self.lam, axis=1)(log_grid)
+        blurred = gaussian_filter1d(density, sigma, axis=1, mode="nearest")
+        self.image = interp1d(log_grid, blurred, axis=1)(log_wave) / self.lam
+        self.interp = RectBivariateSpline(self.xi, self.lam, self.image, kx=1, ky=1)
 
 
 class Transform2D():

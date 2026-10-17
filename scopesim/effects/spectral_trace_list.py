@@ -259,11 +259,8 @@ class SpectralTraceList(Effect):
             #     self.update_meta()
 
             spt = self.spectral_traces[obj.trace_id]
-            try:
-                # If footprint is outside FOV, this will assign None to the hdu
-                obj.hdu = spt.map_spectra_to_focal_plane(obj)
-            except ValueError as err:  # xlim_mm is None
-                logger.error(err)
+            # If the footprint is outside the FOV, the mapper returns None.
+            obj.hdu = spt.map_spectra_to_focal_plane(obj)
             obj.image_plane_id = spt.meta["image_plane_id"]
 
         logger.debug("%s done", self.display_name)
