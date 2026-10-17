@@ -26,7 +26,7 @@ from .electrons import LinearityCurve, ADConversion, InterPixelCapacitance
 from .noise import (Bias, PoorMansHxRGReadoutNoise, BasicReadoutNoise,
                     PixelResponseNonUniformity, ShotNoise, DarkCurrent)
 from .exposure import AutoExposure, ExposureIntegration, ExposureOutput
-from .pixels import ReferencePixelBorder, BinnedImage, UnequalBinnedImage
+from .pixels import ReferencePixelBorder, BinnedImage, UnequalBinnedImage, OnChipBinning
 from .dmps import DetectorModePropertiesSetter
 
 

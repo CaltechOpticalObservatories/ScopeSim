@@ -226,6 +226,7 @@ class OpticalTrain:
         """
         from ..effects import (
             BinnedImage,
+            OnChipBinning,
             Rotate90CCD,
             SelectorWheel,
             SpectralTraceList,
@@ -333,7 +334,7 @@ class OpticalTrain:
                         raise NotImplementedError(
                             "Trace detector coordinates do not yet support "
                             "post-extraction detector binning.")
-                if isinstance(selected_effect, UnequalBinnedImage):
+                if isinstance(selected_effect, (UnequalBinnedImage, OnChipBinning)):
                     binx = from_currsys(
                         selected_effect.meta["binx"], self.cmds)
                     biny = from_currsys(
