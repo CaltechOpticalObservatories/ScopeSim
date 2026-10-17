@@ -767,7 +767,7 @@ class OpticalTrain:
                     hdul = effect.apply_to(hdul, optical_train=self)
             else:
                 try:
-                    hdul = self.write_header(hdul, detector_array)
+                    hdul = self.write_header(hdul, detector_manager)
                 except Exception:
                     logger.exception(
                         "Header update failed, data will be saved with "
@@ -817,10 +817,12 @@ class OpticalTrain:
 
         # Image HDUs
         for hdu in hdulist[1:]:
-            hdu.header["EXPTIME"] = from_currsys("!OBS.exptime", self.cmds), "[s]"
-            hdu.header["DIT"] = from_currsys("!OBS.dit", self.cmds), "[s]"
-            hdu.header["NDIT"] = from_currsys("!OBS.ndit", self.cmds)
-            hdu.header["DETECTOR"] = detector_array._detector_list.meta["detector"]
+            # Arm-specific integration effects already recorded their actual
+            # exposure. Global command values are only for minimal setups.
+            for key in ('EXPTIME', 'DIT', 'NDIT'):
+                if key not in hdu.header:
+                    hdu.header[key] = from_currsys(f'!OBS.{key.lower()}', self.cmds)
+            hdu.header['DETECTOR'] = detector_array._detector_list.display_name
         return hdulist
 
     def shutdown(self):
