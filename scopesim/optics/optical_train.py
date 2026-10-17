@@ -234,6 +234,7 @@ class OpticalTrain:
         explicit definition of which output image owns each trace coordinate.
         """
         from ..effects import (
+            ImagePlaneBackground,
             Rotate90CCD,
             SelectorWheel,
             SpectralTraceList,
@@ -247,10 +248,10 @@ class OpticalTrain:
                 "SpectralTraceList.")
         trace_list = trace_lists[0]
 
-        if self.optics_manager.image_plane_effects:
-            raise NotImplementedError(
-                "Trace detector coordinates do not yet support image-plane "
-                "effects.")
+        for effect in self.optics_manager.image_plane_effects:
+            selected = effect.wheel_effects.values() if isinstance(effect, SelectorWheel) else [effect]
+            if any(not isinstance(item, ImagePlaneBackground) for item in selected):
+                raise NotImplementedError('Trace detector coordinates only support additive image-plane backgrounds.')
         if self.optics_manager.detector_array_effects:
             raise NotImplementedError(
                 "Trace detector coordinates do not yet support detector-array "

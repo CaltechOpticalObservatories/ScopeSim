@@ -25,6 +25,8 @@ from scopesim.effects import (
     UnequalBinnedImage,
     OnChipBinning,
     BasicReadoutNoise,
+    ImagePlaneBackground,
+    SelectorWheel,
 )
 from scopesim.utils import find_file
 
@@ -199,6 +201,22 @@ class TestInit:
 
 
 class TestTraceDetectorCoordinates:
+    @pytest.mark.parametrize('selected', [False, True])
+    def test_additive_background_preserves_trace_coordinates(self, selected):
+        train, _ = spectral_geometry_train()
+        before = train.trace_detector_coordinates()
+        background = SelectorWheel(selector_key='image_plane_id', wheel=[{'selector_value': [0], 'effect_class': 'ImagePlaneBackground', 'effect_kwargs': {'value': 1.}}]) if selected else ImagePlaneBackground(value=1.)
+        train.optics_manager.image_plane_effects = [background]
+        after = train.trace_detector_coordinates()
+        np.testing.assert_array_equal(before['detector_x'], after['detector_x'])
+        np.testing.assert_array_equal(before['detector_y'], after['detector_y'])
+
+    def test_unsupported_image_plane_transform_is_not_silently_ignored(self):
+        train, _ = spectral_geometry_train()
+        train.optics_manager.image_plane_effects = [Effect()]
+        with pytest.raises(NotImplementedError, match='additive'):
+            train.trace_detector_coordinates()
+
     def test_maps_live_trace_to_zero_origin_detector_pixels(self):
         train, _ = spectral_geometry_train()
 
