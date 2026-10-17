@@ -131,7 +131,7 @@ class ShiftFoV3D(Effect):
     def map_coords_shift(data, dx, dy, chunk_w: int=8, order: int=3):
         """
         Shift each wavelength plane data[w, :, :] by (dx[w], dy[w]) using
-        scipy.ndimage.map_coordinates with chunked processing.
+        scipy.ndimage.map_coordinates independently on each spatial plane.
 
         Parameters
         ----------
@@ -142,7 +142,7 @@ class ShiftFoV3D(Effect):
         dy : np.ndarray, shape (nwave,)
             Shift along y (axis=0) in pixels. Positive moves content toward +y.
         chunk_w : int
-            Number of wavelength planes to process per chunk. Default 8.
+            Retained for call compatibility; planes are now processed separately.
         order : int
             Spline interpolation order. Default 3.
 
@@ -156,35 +156,14 @@ class ShiftFoV3D(Effect):
         if dx.shape != (nw,) or dy.shape != (nw,):
             raise ValueError("dx and dy must have shape (nwave,)")
 
-        # Base grids for a single chunk (will be broadcast)
-        yi = np.arange(ny, dtype=np.float32)[None, :, None]  # (1, ny, 1)
-        xi = np.arange(nx, dtype=np.float32)[None, None, :]  # (1, 1, nx)
-
+        yi, xi = np.indices((ny, nx), dtype=np.float32)
         out = np.empty_like(data)
-        prefilter = (order > 1)
-
-        for w0 in range(0, nw, chunk_w):
-            w1 = min(w0 + chunk_w, nw)
-            k = w1 - w0
-
-            # wave index grid for this chunk: (k, 1, 1)
-            wi = np.arange(w0, w1, dtype=np.float32)[:, None, None]
-
-            # To shift content by +dx/+dy, sample input at (x - dx, y - dy)
-            xcoords = xi - dx[w0:w1][:, None, None]  # (k, 1, nx) -> broadcast to (k, ny, nx)
-            ycoords = yi - dy[w0:w1][:, None, None]  # (k, ny, 1) -> broadcast to (k, ny, nx)
-
-            # Broadcast to full chunk volume
-            xcoords = np.broadcast_to(xcoords, (k, ny, nx))
-            ycoords = np.broadcast_to(ycoords, (k, ny, nx))
-            wcoords = np.broadcast_to(wi,      (k, ny, nx))
-
-            # Axis order in coords must match axis order of data: (wave, y, x)
-            coords = np.array([wcoords, ycoords, xcoords], dtype=np.float32)  # (3, k, ny, nx)
-
-            out[w0:w1, :, :] = map_coordinates(
-                data, coords, order=order, mode='nearest', prefilter=prefilter
-            )
+        # Atmospheric refraction shifts sky positions without mixing wavelengths.
+        # Filtering the full cube once per small output chunk scales quadratically
+        # with the spectral grid; spatial-plane interpolation is linear in nw.
+        for wave in range(nw):
+            coords = [yi - dy[wave], xi - dx[wave]]
+            out[wave] = map_coordinates(data[wave], coords, order=order, mode='nearest', prefilter=order > 1)
         return out
 
 
