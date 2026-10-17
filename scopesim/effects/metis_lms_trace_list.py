@@ -395,7 +395,7 @@ class MetisLMSSpectralTrace(SpectralTrace):
 
         lam0 = from_currsys(self.meta["wavelen"], self.cmds)
         xi0 = 0.
-        ymid = self.xilam2y(xi0, lam0)[0]   # estimate y level of trace
+        ymid = self.xilam2y(xi0, lam0)   # scalar input gives a scalar trace coordinate
         waverange = self.xy2lam(np.array([xmin, xmax]), np.array([ymid, ymid]),
                                 grid=False)
 

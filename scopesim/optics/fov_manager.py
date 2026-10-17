@@ -189,7 +189,10 @@ class FOVManager:
         for vol in self.volumes_list:
             image_plane_id = vol["meta"].get("image_plane_id")
             det_eff = None
-            if image_plane_id is not None:
+            if image_plane_id is None and len(detector_effects) == 1:
+                # Single-plane fibre/imaging packages need no arm-routing key.
+                det_eff, = detector_effects
+            elif image_plane_id is not None:
                 for candidate in detector_effects:
                     if (from_currsys(candidate.meta["image_plane_id"], self.cmds)
                             == image_plane_id):
@@ -201,10 +204,9 @@ class FOVManager:
                 "plate_scale": self.meta["plate_scale"],
             }
             if det_eff is not None:
-                scale_meta["pixel_scale"] = det_eff.meta.get(
-                    "pixel_scale", scale_meta["pixel_scale"])
-                scale_meta["plate_scale"] = det_eff.meta.get(
-                    "plate_scale", scale_meta["plate_scale"])
+                for key in ('pixel_scale', 'plate_scale'):
+                    if det_eff.meta[key] != f'!INST.{key}':
+                        scale_meta[key] = det_eff.meta[key]
             scales = from_currsys(scale_meta, self.cmds)
             pixel_scale = scales["pixel_scale"]
             plate_scale = scales["plate_scale"]
@@ -228,11 +230,14 @@ class FOVManager:
             fov_dethdr, _ = ipu.det_wcs_from_sky_wcs(
                 WCS(skyhdr), pixel_scale, plate_scale)
             skyhdr.update(fov_dethdr.to_header())
-            dethdr = fov_dethdr
+            dethdr = fov_dethdr.to_header()
+            dethdr.update(NAXIS=2, NAXIS1=skyhdr['NAXIS1'], NAXIS2=skyhdr['NAXIS2'])
 
             # useful for spectroscopy mode where slit dimensions is not the same
             # as detector dimensions
-            if decouple and det_eff is not None:
+            if decouple:
+                if det_eff is None:
+                    raise ValueError('A decoupled FOV needs an image-plane ID or one unambiguous detector layout.')
                 dethdr = det_eff.image_plane_header
                 # TODO: Why is this .image_plane_header and not
                 #       .detector_headers()[0] or something?

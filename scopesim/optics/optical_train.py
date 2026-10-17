@@ -583,7 +583,9 @@ class OpticalTrain:
                         foveffs.append(effect)
 
                 for effect in foveffs:
-                    if isinstance(effect, SpectralTraceList):
+                    # Slit shear needs spectral support before extraction.
+                    # Fibre bundles have no single FOV trace and map separately.
+                    if isinstance(effect, SpectralTraceList) and isinstance(fov, FieldOfView3D) and fov.trace_id is not None:
                         fov.meta['spectral_padding'] = effect.spectral_traces[fov.trace_id].spectral_padding(fov)
 
                 # Render at the PSF stage when preceding effects only multiply
