@@ -164,123 +164,6 @@ class TestExtractFrom:
 
 
 class TestMakeCube:
-    @pytest.mark.xfail(reason="cube flux is broken")
-    def test_makes_cube_from_table(self):
-        src_table = so._table_source()            # 10x10" @ 0.2"/pix, [0.5, 2.5]m @ 0.02µm
-        fov = _fov_190_210_um(ndim=3)
-        fov.extract_from(src_table)
-
-        cube = fov.make_hdu()
-
-        in_sum = 0
-        waveset = fov.spectra[0].waveset
-        for x, y, ref, weight in src_table.fields[0]:
-            flux = src_table.spectra[ref](waveset).to(u.ph/u.s/u.m**2/u.um).value
-            in_sum += np.sum(flux) * weight
-
-        out_sum = np.sum(cube.data)
-
-        assert out_sum == approx(in_sum, rel=0.01)
-
-        if PLOTS:
-            plt.imshow(cube.data[0, :, :], origin="lower")
-            plt.show()
-
-    @pytest.mark.xfail(reason="cube flux is broken")
-    def test_makes_cube_from_imagehdu(self):
-        src_image = so._image_source()            # 10x10" @ 0.2"/pix, [0.5, 2.5]m @ 0.02µm
-        fov = _fov_190_210_um(ndim=3)
-        fov.extract_from(src_image)
-
-        cube = fov.make_hdu()
-
-        waveset = np.linspace(1.9, 2.1, np.shape(cube)[0]) * u.um
-        spec = fov.spectra[0](waveset).to(u.ph/u.s/u.m**2/u.um).value
-        in_sum = np.sum(src_image.fields[0].data) * np.sum(spec)
-        out_sum = np.sum(cube.data)
-
-        assert out_sum == approx(in_sum, rel=0.01)
-
-        if PLOTS:
-            plt.imshow(cube.data[0, :, :], origin="lower")
-            plt.show()
-
-    @pytest.mark.xfail(reason="cube flux is broken")
-    def test_makes_cube_from_other_cube_imagehdu(self):
-        import scopesim as sim
-        sim.rc.__currsys__["!SIM.spectral.spectral_bin_width"] = 0.01
-        src_cube = so._cube_source()            # 10x10" @ 0.2"/pix, [0.5, 2.5]m @ 0.02µm
-        fov = _fov_197_202_um(ndim=3)
-        fov.extract_from(src_cube)
-
-        cube = fov.make_hdu()
-
-        # layer 74 to 77 are extracted by FOV
-        in_sum = np.sum(src_cube.fields[0].data[74:77, :, :])
-
-        out_sum = np.sum(cube.data)
-
-        assert out_sum == approx(in_sum)
-
-        if PLOTS:
-            plt.imshow(cube.data[0, :, :], origin="lower")
-            plt.show()
-
-    @pytest.mark.xfail(reason="cube flux is broken")
-    def test_makes_cube_from_two_similar_cube_imagehdus(self):
-        src_cube = so._cube_source() + so._cube_source(dx=1)            # 2 cubes 10x10" @ 0.2"/pix, [0.5, 2.5]m @ 0.02µm
-        fov = _fov_197_202_um(ndim=3)
-        fov.extract_from(src_cube)
-
-        cube = fov.make_hdu()
-
-        # layer 74 to 77 are extracted by FOV
-        bin_widths = np.array([0.01, 0.02, 0.01])[:, None, None] * 1e4      # um -> AA
-        in_sum = 2 * np.sum(src_cube.fields[0].data[74:77, :, :] * bin_widths)
-
-        out_sum = np.sum(cube.data)
-
-        assert out_sum == approx(in_sum, rel=1e-3)
-
-        if PLOTS:
-            plt.imshow(cube.data[0, :, :], origin="lower")
-            plt.show()
-
-    @pytest.mark.xfail(reason="cube flux is broken")
-    def test_makes_cube_from_all_types_of_source_object(self):
-        src_all = so._table_source() + \
-                  so._image_source(dx=-4, dy=-4) + \
-                  so._cube_source(weight=1e-8, dx=4)
-
-        fov = _fov_190_210_um(ndim=3)
-        fov.extract_from(src_all)
-
-        cube = fov.make_hdu()
-
-        # sum up the expected flux in the output cube
-        # bin_width * half width edge bin * PHOTLAM -> SI
-        waveset = fov.spectra[0].waveset
-
-        table_sum = 0
-        for x, y, ref, weight in src_all.fields[0]:
-            flux = src_all.spectra[ref](waveset).value
-            table_sum += np.sum(flux) * weight
-
-        ref = src_all.fields[1].header["SPEC_REF"]
-        spec = fov.spectra[ref](waveset).value
-        image_sum = np.sum(src_all.fields[1].data) * np.sum(spec)
-
-        cube_sum = np.sum(src_all.fields[2].data[70:81, :, :]) * 0.02 * 0.95
-
-        in_sum = table_sum + image_sum + cube_sum
-        out_sum = np.sum(cube.data)
-
-        assert out_sum == approx(in_sum, rel=0.02)
-
-        if PLOTS:
-            im = cube.data[0, :, :]
-            plt.imshow(im, origin="lower", norm="log", vmin=1e-8)
-            plt.show()
 
     @pytest.mark.parametrize("src", [so._table_source(),
                                      so._image_source(),
@@ -498,49 +381,50 @@ class TestMakeSpectrum:
             plt.show()
 
 
-@pytest.mark.skip(reason="needs split FOVs after subclass refactor")
 class TestMakeSpectrumImageCubeAllPlayNicely:
-    def test_make_cube_and_make_spectrum_return_the_same_fluxes(self):
-        src_all = so._table_source() + \
-                  so._image_source(dx=-4, dy=-4) + \
-                  so._cube_source(weight=1e-8, dx=4)
+    @pytest.mark.parametrize("kind", ["table", "image", "cube", "two_cubes", "mixed"])
+    @pytest.mark.parametrize("spectral_step", [.01, .005])
+    def test_photon_integrals_agree_between_representations(self, kind, spectral_step):
+        from synphot import SourceSpectrum, Empirical1D
+        from scopesim.commands import UserCommands
+        from scopesim.optics.optical_train import OpticalTrain
 
-        fov = _fov_190_210_um(ndim=3)
-        fov.extract_from(src_all)
+        # A line fully inside the band isolates representation and grid errors
+        # from partial end bins. Its integral is the native trapezoidal integral.
+        wave = np.linspace(1.5, 2.5, 101)*u.um
+        profile = np.exp(-.5*((wave.to_value(u.um)-2.)/.02)**2)
+        spectrum = SourceSpectrum(Empirical1D, points=wave, lookup_table=profile*u.ph/u.s/u.m**2/u.um)
+        table = so._table_source()
+        table.fields[0].spectra = {ref: spectrum for ref in table.fields[0].spectra}
+        image = so._image_source()
+        image.fields[0].spectra = {0: spectrum}
+        cube = so._cube_source()
+        cube.fields[0].data = cube.fields[0].data[-1][None, :, :]/4 * profile[:, None, None]
+        cube.fields[0].header['CRVAL3'] = 2.
+        cube.fields[0].header['CDELT3'] = .01
+        cube.fields[0].header['CUNIT3'] = 'um'
+        sources = {'table': table, 'image': image, 'cube': cube, 'two_cubes': cube+cube, 'mixed': table+image+cube}
+        source = sources[kind]
+        spatial_weight = {'table': table.fields[0].field['weight'].sum(), 'image': image.fields[0].data.sum(), 'cube': cube.fields[0].data[50].sum()}
+        spatial_weight['two_cubes'] = 2*spatial_weight['cube']
+        spatial_weight['mixed'] = spatial_weight['table']+spatial_weight['image']+spatial_weight['cube']
+        expected = spatial_weight[kind]*np.trapezoid(profile, wave.to_value(u.um))
+        source = OpticalTrain().prepare_source(source)
 
-        # if photlam, units of ph / s / cm2 / AA, else units of ph / s / voxel
-        cube = fov.make_hdu()
-        # cube_waves = get_cube_waveset(cube.header)
-        cube_spectrum = cube.data.sum(axis=2).sum(axis=1)
-
-        # always units of ph / s / cm-2 / AA-1
-        waves = fov.waveset
-        spectrum = fov.make_hdu()(waves).value
-
-        bin_width = 0.02        # um
-        photlam_to_si = 1e8     # cm-2 AA-1 --> m-2 um-1
-        edge_compensation = 0.91
-
-        spectrum *= bin_width * photlam_to_si * edge_compensation
-
-        if PLOTS:
-            plt.plot(waves, spectrum, "k")
-            # plt.plot(cube_waves, cube_spectrum, "r")
-            plt.show()
-
-        assert np.sum(cube.data) == approx(np.sum(spectrum), rel=0.001)
-
-    def test_make_cube_and_make_image_return_the_same_fluxes(self):
-        src_all = so._cube_source(weight=1e-8, dx=4)
-                  # so._image_source(dx=-4, dy=-4) #
-                  # so._table_source()# + \
-
-        fov = _fov_190_210_um()
-        fov.extract_from(src_all)
-
-        # if photlam, units of ph / s / cm2 / AA, else units of ph / s / voxel
-        cube_sum = np.sum(fov.make_hdu().data)
-        # if photlam, units of ph / s / cm2 / AA, else units of ph / s / pixel
-        image_sum = np.sum(fov.make_hdu().data)
-
-        assert cube_sum == approx(image_sum, rel=0.05)
+        commands = UserCommands(properties={'!SIM.spectral.spectral_bin_width': spectral_step})
+        rates = []
+        for cls in (FieldOfView1D, FieldOfView2D, FieldOfView3D):
+            fov = cls(ho._fov_header(), [1.9, 2.1]*u.um, area=1*u.m**2, cmds=commands)
+            fov.extract_from(source)
+            product = fov.make_hdu()
+            if cls is FieldOfView1D:
+                samples = product(fov.waveset).to(u.ph/u.s/u.m**2/u.um)
+                rate = np.trapezoid(samples, fov.waveset.to(u.um))*fov.area
+                rates.append(rate.to_value(u.ph/u.s))
+            elif cls is FieldOfView2D:
+                rates.append(product.data.sum())
+            else:
+                rate = product.data.sum()*u.Unit(product.header['BUNIT'])*fov.pixel_area*product.header['CDELT3']*u.um
+                rates.append(rate.to_value(u.ph/u.s))
+        # The line tails outside the band contain less than 10^-6 of its flux.
+        assert rates == approx([expected]*3, rel=2e-5)

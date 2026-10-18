@@ -652,14 +652,10 @@ class FieldOfView1D(FieldOfView):
         * yield scaled flux to be added to canvas flux
         """
         for field in self._get_cube_fields():
-            fluxes = field.data.sum(axis=(1, 2))
-            fov_waveset_fluxes = np.interp(self.waveset, field.waveset, fluxes)
-
-            # .lower() is needed because astropy doesn't recognize PHOTLAM
-            field_unit = field.header.get("BUNIT", PHOTLAM).lower()
-            flux_scale_factor = u.Unit(field_unit).to(PHOTLAM)
-
-            yield fov_waveset_fluxes * flux_scale_factor
+            fluxes = field.data.sum(axis=(1, 2))*u.Unit(field.header['BUNIT'].lower())
+            if field.is_bunit_spatially_differential:
+                fluxes *= field.pixel_area
+            yield np.interp(self.waveset, field.waveset, fluxes.to_value(PHOTLAM))
 
     def _make_imagefields(self):
         """
