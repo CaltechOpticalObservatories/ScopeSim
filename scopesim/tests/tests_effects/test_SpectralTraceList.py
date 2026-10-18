@@ -197,6 +197,13 @@ class TestEchelleSpectralTraceList:
         assert trace.meta["detector_angle"] == 25
         assert trace.meta["detector_pad"] == 10
 
+        model = spt._spectrographs['b']
+        order = int(trace.meta['trace_id'].split('_')[1])
+        wave = u.Quantity(trace.table['wavelength'][:n_wave])
+        model_x, model_y = model._detector_pixels(wave, order)
+        np.testing.assert_allclose(model_x, xpix, atol=1e-8, rtol=0)
+        np.testing.assert_allclose(model_y, ypix, atol=1e-8, rtol=0)
+
         padded_file = tmp_path / "echelle_trace_parameters_more_padding.dat"
         _write_echelle_trace_params(
             padded_file,
