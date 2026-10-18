@@ -224,7 +224,8 @@ class TestEchelleSpectralTraceList:
         )
         unrotated_trace = next(iter(unrotated.spectral_traces.values()))
 
-        assert trace.wave_min == pytest.approx(unrotated_trace.wave_min)
-        assert trace.wave_max == pytest.approx(unrotated_trace.wave_max)
+        # Rotation changes which wavelengths intersect the detector rectangle.
+        assert trace.wave_min < trace.wave_max
+        assert not np.allclose([trace.wave_min, trace.wave_max], [unrotated_trace.wave_min, unrotated_trace.wave_max])
         assert not np.allclose(trace.table["x"], unrotated_trace.table["x"])
         assert not np.allclose(trace.table["y"], unrotated_trace.table["y"])
