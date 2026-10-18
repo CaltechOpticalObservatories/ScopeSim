@@ -1034,50 +1034,12 @@ class FieldOfView3D(FieldOfView):
             yield spec[:, None, None].value
 
     def make_hdu(self, spatial_psf=None):
-        """
-        TBA.
+        """Render spectral surface-brightness density in ph/s/um/arcsec2.
 
-        Used for IFUs, slit spectrographs, and coherent MOSs (e.g.KMOS)
-
-        Returned cube units are ``ph s-1 voxel-1``
-
-        .. note:: ``self.make_cube()`` does NOT store anything in ``self.cube``
-
-            self.cube and self.make_cube() are deliberately kept seperately
-            so that self.cube will not be accidently overwritten by a rogue
-            call from an Effect object.
-
-            All Effect objects should specifically test whether
-            ``self.cube is None`` before assigning a new cube it
-
-        The cube is made with these steps:
-
-        1. Make waveset and canvas cube::
-
-            if at least one cube:
-                set waveset to equal largest cube waveset
-            else:
-                make waveset from self.meta values
-            make canvas cube based on waveset of largest cube and NAXIS1,2 from fov.header
-
-        2. Find Cube fields (see ``FieldOfView._make_cube_cubefields()``).
-        3. Find Image fields (see ``FieldOfView._make_cube_imagefields()``).
-        4. Find Table fields (see ``FieldOfView._make_cube_tablefields()``).
-
-        ``PHOTLAM = ph / (cm2 * s * AA)``.
-        Original source fields are in units of:
-
-        - tables: (PHOTLAM in spectrum)
-        - images: arcsec-2 (PHOTLAM in spectrum)
-        - cubes: PHOTLAM arcsec-2
-
-        .. warning:: Input Images and Cubes should have units of PHOTLAM arcsec-2
-
-        Returns
-        -------
-        canvas_cube_hdu : fits.ImageHDU
-            [ph s-1 um-1 arcsec-2]      # as needed by SpectralTrace
-
+        Native spectra are integrated into the cube wavelength cells. Point
+        sources use cell-integrated PSF illumination; resolved fields are
+        convolved before the physical aperture is clipped. Collecting area is
+        applied here. Slit and detector cell integrals are applied by the trace.
         """
         # 1. Make waveset and canvas cube (area, bin_width are applied at end)
         # TODO: Why is this not self.waveset? What's different?
@@ -1092,7 +1054,7 @@ class FieldOfView3D(FieldOfView):
         canvas_cube_hdu = fits.ImageHDU(
             data=np.zeros((len(fov_waveset),
                            self.header["NAXIS2"],
-                           self.header["NAXIS1"])),
+                           self.header["NAXIS1"]), dtype=np.float32),
             header=self.header)
         # set BUNIT initially to PHOTLAM / arcsec**2
         canvas_cube_hdu.header["BUNIT"] = "ph cm-2 s-1 AA-1 arcsec-2"
@@ -1130,10 +1092,8 @@ class FieldOfView3D(FieldOfView):
                     data = fftconvolve(data, kernel, mode='same', axes=(-2, -1))
                     canvas_cube_hdu.data[start:start + 64] += data[:, py:py + self.header['NAXIS2'], px:px + self.header['NAXIS1']]
 
-        canvas_cube_hdu.data = sum(
-            self._make_imagefields(fov_waveset, self.spline_order, spatial_psf),
-            start=canvas_cube_hdu.data,
-        )
+        for image in self._make_imagefields(fov_waveset, self.spline_order, spatial_psf):
+            canvas_cube_hdu.data += image
 
         if spatial_psf is None:
             for flux, x, y in self._make_tablefields(fov_waveset):
@@ -1141,13 +1101,13 @@ class FieldOfView3D(FieldOfView):
                     canvas_cube_hdu.data[:, y, x] += flux
         else:
             for field in self._get_table_fields():
-                spectra = {ref: average_spectrum(spec, fov_waveset).value for ref, spec in field.spectra.items()}
+                spectra = {ref: average_spectrum(spec, fov_waveset).value.astype(np.float32) for ref, spec in field.spectra.items()}
                 for row in field.field:
-                    image = spatial_psf.point_source_image(self, row['x'], row['y'])/self.pixel_area.value
+                    image = (spatial_psf.point_source_image(self, row['x'], row['y'])/self.pixel_area.value).astype(np.float32)
                     canvas_cube_hdu.data += spectra[row['ref']][:, None, None]*image[None, :, :]*row['weight']
 
-        canvas_cube_hdu.data = sum(self._make_backfields(fov_waveset),
-                                   start=canvas_cube_hdu.data)
+        for background in self._make_backfields(fov_waveset):
+            canvas_cube_hdu.data += background
 
         # SpectralTrace wants ph/s/um/arcsec2 --> get rid of m2, leave um
         canvas_cube_hdu.data *= self.area.to(u.cm ** 2).value

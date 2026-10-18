@@ -3,10 +3,25 @@ from pytest import approx
 
 import numpy as np
 
+from scopesim.effects.atmo_dispersion import ADCShift
+
 from scopesim.effects.shifts import AtmosphericDispersion, \
                                     get_pixel_border_waves_from_atmo_disp
 
 from ..mocks.py_objects.yaml_objects import _atmo_yaml_dict
+
+
+def test_repeated_integer_adc_shifts_preserve_positions_and_clip_edges():
+    cube = np.zeros((10, 5, 7))
+    cube[:, 2, 3] = 1
+    dx = np.array([-1.2, -1.2, 0., 0., .9, .9, 8., -8., 0., 0.])
+    dy = np.array([1., 1., 0., 0., -1., -1., 0., 0., 6., -6.])
+    shifted = ADCShift.roll_shift(cube, dx, dy)
+    expected = np.zeros_like(cube)
+    expected[:2, 3, 2] = 1
+    expected[2:4, 2, 3] = 1
+    expected[4:6, 1, 4] = 1
+    np.testing.assert_array_equal(shifted, expected)
 
 
 @pytest.fixture(scope="function")

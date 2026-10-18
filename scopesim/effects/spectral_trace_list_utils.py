@@ -330,15 +330,6 @@ class SpectralTrace:
         image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float32)
 
         self._set_dispersion(wave_min, wave_max, pixsize=pixsize)
-        quadrature_order = self._pixel_quadrature_order
-        if 'effective_psf_fwhm' in fov.meta:
-            middle = (wave_min + wave_max)/2
-            dx_dxi, _ = self.xilam2x.gradient()
-            dy_dxi, _ = self.xilam2y.gradient()
-            along_step = pixsize/np.hypot(dx_dxi(0., middle), dy_dxi(0., middle))
-            across_step = abs(self.dlam_per_pix(middle)/self.slit_dispersion(middle)) if 'slit_dispersion_colname' in self.meta else pixscale
-            psf_width = fov.meta['effective_psf_fwhm'].to_value(u.arcsec)
-            quadrature_order = max(quadrature_order, int(np.ceil(8*max(along_step, across_step)/psf_width)))
         slit_dispersion = None
         if "slit_dispersion_colname" in self.meta:
             slit_dispersion = self.slit_dispersion
@@ -367,9 +358,21 @@ class SpectralTrace:
                                      lam_x=bx*matrix[0, 0] + by*matrix[1, 0], lam_y=bx*matrix[0, 1] + by*matrix[1, 1],
                                      scale=self._trace_flux_scale(ximg_fpa, yimg_fpa, pixsize, pixscale, det_header))
         geometry = self._pixel_cache
-        nodes, weights = np.polynomial.legendre.leggauss(quadrature_order)
-        for nx, wx in zip(nodes/2, weights/2):
-            for ny, wy in zip(nodes/2, weights/2):
+        quadrature = np.full(2, self._pixel_quadrature_order)
+        if 'effective_psf_fwhm' in fov.meta:
+            middle = (wave_min + wave_max)/2
+            xm, ym = self.xilam2x(0., middle), self.xilam2y(0., middle)
+            dxidx, dxidy = self.xy2xi.gradient()
+            dlamdx, dlamdy = self.xy2lam.gradient()
+            angular_dispersion = self.slit_dispersion(middle) if slit_dispersion is not None else -self.dlam_per_pix(middle)/pixscale
+            angular_map = np.array([[dxidx(xm, ym), dxidy(xm, ym)], [dlamdx(xm, ym)/angular_dispersion, dlamdy(xm, ym)/angular_dispersion]])
+            angular_steps = np.linalg.norm(angular_map @ det_wcs.pixel_scale_matrix, axis=0)
+            psf_width = fov.meta['effective_psf_fwhm'].to_value(u.arcsec)
+            quadrature = np.maximum(quadrature, np.ceil(8*angular_steps/psf_width).astype(int))
+        xnodes, xweights = np.polynomial.legendre.leggauss(quadrature[0])
+        ynodes, yweights = np.polynomial.legendre.leggauss(quadrature[1])
+        for nx, wx in zip(xnodes/2, xweights/2):
+            for ny, wy in zip(ynodes/2, yweights/2):
                 xi = geometry['xi'] + nx*geometry['xi_x'] + ny*geometry['xi_y']
                 lam = geometry['lam'] + nx*geometry['lam_x'] + ny*geometry['lam_y']
                 inside = (xi >= xi_min) & (xi < xi_max) & (lam >= wave_min) & (lam < wave_max)
@@ -949,7 +952,6 @@ class XiLamImage:
         cube_lam *= u.Unit(wcs_lam.wcs.cunit[0]).to(u.um)
 
         # Initialise the array to hold the xi-lambda image
-        self.image = np.zeros((n_xi, n_lam), dtype=np.float32)
         self.lam = cube_lam
         try:
             dlam_per_pix_val = dlam_per_pix(np.asarray(self.lam))
@@ -965,10 +967,15 @@ class XiLamImage:
             _cache = {}
         if _cache.get('key') != key:
             _cache.clear()
-            _cache['operators'] = [_slit_cell_operator(cube_lam, derivative, eta, d_eta) for eta in cube_eta]
+            operators = [_slit_cell_operator(cube_lam, derivative, eta, d_eta).tocoo() for eta in cube_eta]
+            rows = np.concatenate([operator.row for operator in operators])
+            columns = np.concatenate([operator.col*n_eta+i for i, operator in enumerate(operators)])
+            weights = np.concatenate([operator.data for operator in operators])*abs(d_eta)
+            # Interleaved wavelength/slit cells match the contiguous cube layout,
+            # avoiding a separate strided dense copy for every across-slit row.
+            _cache['operator'] = csr_matrix((weights, (rows, columns)), shape=(n_lam, n_lam*n_eta), dtype=np.float32)
             _cache['key'] = key
-        for i, operator in enumerate(_cache['operators']):
-            self.image += (operator @ fov.cube.data[:, i, :]).T * abs(d_eta)
+        self.image = (_cache['operator'] @ fov.cube.data.reshape(n_lam*n_eta, n_xi)).T.astype(np.float32, copy=False)
 
         # WCS for the xi-lambda image, i.e. the rectified 2D spectrum
         # Default WCS with xi in arcsec

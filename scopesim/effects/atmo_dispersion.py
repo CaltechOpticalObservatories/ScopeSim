@@ -120,15 +120,22 @@ class ShiftFoV3D(Effect):
             raise ValueError("dx and dy must have shape (nwave,)")
 
         out = np.empty_like(data)
-        for w in range(nw):
-            out[w] = np.roll(data[w], (dy[w], dx[w]), axis=(0, 1))
-            # zero out the rolled in part, select the correct slice based on sign of dxint, dyint
-            if dx[w] != 0:
-                xslice = slice(0, dx[w]) if dx[w] > 0 else slice(nx + dx[w], nx)
-                out[w, :, xslice] = 0
-            if dy[w] != 0:
-                yslice = slice(0, dy[w]) if dy[w] > 0 else slice(ny + dy[w], ny)
-                out[w, yslice, :] = 0
+        boundaries = np.r_[0, np.flatnonzero((np.diff(dx) != 0) | (np.diff(dy) != 0))+1, nw]
+        for start, stop in zip(boundaries[:-1], boundaries[1:]):
+            xshift, yshift = dx[start], dy[start]
+            if abs(xshift) >= nx or abs(yshift) >= ny:
+                out[start:stop] = 0
+                continue
+            if xshift == 0 and yshift == 0:
+                out[start:stop] = data[start:stop]
+                continue
+            out[start:stop] = np.roll(data[start:stop], (yshift, xshift), axis=(1, 2))
+            if xshift != 0:
+                xslice = slice(0, xshift) if xshift > 0 else slice(nx + xshift, nx)
+                out[start:stop, :, xslice] = 0
+            if yshift != 0:
+                yslice = slice(0, yshift) if yshift > 0 else slice(ny + yshift, ny)
+                out[start:stop, yslice, :] = 0
         return out
 
     @staticmethod

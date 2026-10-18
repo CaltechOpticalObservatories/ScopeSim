@@ -588,7 +588,8 @@ class OpticalTrain:
                     psf_index = psf_indices[0]
                     defer_render = all(isinstance(effect, (TERCurve, SpectralEfficiency, EchelleSpectralEfficiency, TaperedQuantumEfficiency)) for effect in foveffs[:psf_index])
                 if defer_render:
-                    fov.extract_from(source, spatial_header=foveffs[psf_index].padded_header(fov))
+                    point_sources = not (source.image_fields or source.cube_fields)
+                    fov.extract_from(source, spatial_header=foveffs[psf_index].padded_header(fov, point_sources=point_sources))
                 else:
                     fov.extract_from(source)
                     fov.view()

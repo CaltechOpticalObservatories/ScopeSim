@@ -405,11 +405,21 @@ class MoffatPSF(AnalyticalPSF):
         else:
             super()._apply_convolution(obj)
 
-    def padded_header(self, fov):
+    def padded_header(self, fov, point_sources=False):
         """Spatial support needed to illuminate this FOV through the PSF."""
-        kernel = self.get_kernel(fov)
+        if point_sources:
+            # Points use analytic cell integrals, so constructing a convolution
+            # kernel merely to determine source-selection bounds is redundant.
+            wave = self._sample_kernel_wavelengths(fov.waveset)
+            gamma = self.fwhm2gamma(self.fwhm(wave), self.alpha).to_value(u.arcsec).max()
+            radius = gamma*np.sqrt((1-self._target_enclosed_energy())**(1/(1-self.alpha))-1)
+            padding_x = int(np.ceil(radius/(abs(fov.header['CDELT1'])*3600)))
+            padding_y = int(np.ceil(radius/(abs(fov.header['CDELT2'])*3600)))
+        else:
+            kernel = self.get_kernel(fov)
+            padding_y, padding_x = kernel.shape[0]//2, kernel.shape[1]//2
         header = fov.header.copy()
-        for axis, padding in ((1, kernel.shape[1]//2), (2, kernel.shape[0]//2)):
+        for axis, padding in ((1, padding_x), (2, padding_y)):
             header[f'NAXIS{axis}'] += 2*padding
             header[f'CRPIX{axis}'] += padding
         return header
