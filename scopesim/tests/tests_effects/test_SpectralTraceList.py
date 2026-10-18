@@ -139,23 +139,32 @@ def _echelle_cmds():
 
 class TestEchelleSpectralTraceList:
     @pytest.mark.parametrize('angle', [-25, 0, 25])
-    def test_centers_full_fsr_and_keeps_translated_detector_intersections(self, tmp_path, angle):
+    @pytest.mark.parametrize('offset', [(0., 0.), (1.5, -1.2)])
+    def test_fixed_placement_and_detector_intersections(self, tmp_path, angle, offset):
         params_file = tmp_path / 'echelle_trace_parameters.dat'
         _write_echelle_trace_params(params_file, detector_angle=angle)
         params = Table.read(params_file, format='ascii')
-        for key, value in {'m0': 62, 'n': 6, 'min_wave': 960, 'max_wave': 1340, 'n_disp': 2048, 'n_xdisp': 1024, 'disp_freq': 24., 'xdisp_freq': 350.}.items():
+        for key, value in {'m0': 75, 'n': 6, 'min_wave': 960, 'max_wave': 1340, 'n_disp': 2048, 'n_xdisp': 1024, 'disp_freq': 24., 'xdisp_freq': 350.}.items():
             params[key][0] = value
         params['xbeta_center'] = [10.9]
+        params['detector_offset_x'], params['detector_offset_y'] = [offset[0]], [offset[1]]
+        params.meta['comments'].extend(['detector_offset_x_unit : mm', 'detector_offset_y_unit : mm'])
         params.write(params_file, format='ascii', overwrite=True)
         effect = EchelleSpectralTraceList(cmds=_echelle_cmds(), filename=str(params_file), wave_colname='wavelength', s_colname='s')
         model = effect._spectrographs['b']
         nx, ny = model.detector.n_pix_x, model.detector.n_pix_y
-        bounds = []
         raw_grid = np.linspace(-2*nx, 3*nx, 50001)
         for order, edges in zip(model.orders, model.edge_wave(fsr=True)):
             wave = np.linspace(edges[0], edges[1], 4*nx + 1)
             x, y = model._detector_pixels(wave, order)
-            bounds.append([x.min(), x.max(), y.min(), y.max()])
+            # Rotate about the camera origin, then translate in detector axes.
+            xraw = model.wavelength_to_x_pixel(wave, order).value - nx/2
+            yraw = model.wavelength_to_y_pixel(wave).value[None, :] - ny/2 + model._slit_offset_pix[:, None]
+            c, s = np.cos(np.deg2rad(angle)), np.sin(np.deg2rad(angle))
+            expected_x = c*xraw - s*yraw + nx/2 + offset[0]/.015
+            expected_y = s*xraw + c*yraw + ny/2 + offset[1]/.015
+            np.testing.assert_allclose(x, expected_x, atol=1e-9, rtol=0)
+            np.testing.assert_allclose(y, expected_y, atol=1e-9, rtol=0)
             # Translation changes placement, not dispersion or slit length.
             xrot, yrot = model._rotated_detector_pixels(wave, order)
             np.testing.assert_allclose(np.diff(x), np.diff(xrot), atol=1e-9, rtol=0)
@@ -177,9 +186,44 @@ class TestEchelleSpectralTraceList:
             expected = raw_grid[inside][[0, -1]]
             # The generator locates each edge on a roughly one-pixel grid.
             np.testing.assert_allclose([actual.min(), actual.max()], expected, atol=3, rtol=0)
-        bounds = np.array(bounds)
-        envelope_center = [(bounds[:, 0].min() + bounds[:, 1].max())/2, (bounds[:, 2].min() + bounds[:, 3].max())/2]
-        np.testing.assert_allclose(envelope_center, [nx/2, ny/2], atol=.01, rtol=0)
+
+    @pytest.mark.parametrize('missing', ['detector_offset_x', 'detector_offset_y', 'detector_offset_x_unit', 'detector_offset_y_unit'])
+    def test_incomplete_placement_fails(self, tmp_path, missing):
+        path = tmp_path / 'echelle_trace_parameters.dat'
+        _write_echelle_trace_params(path)
+        params = Table.read(path, format='ascii')
+        for axis in ['x', 'y']:
+            key = f'detector_offset_{axis}'
+            if missing != key:
+                params[key] = [0.]
+            if missing != f'{key}_unit':
+                params.meta['comments'].append(f'{key}_unit : mm')
+        params.write(path, format='ascii', overwrite=True)
+        with pytest.raises(KeyError, match=missing):
+            EchelleSpectralTraceList(cmds=_echelle_cmds(), filename=str(path))
+
+    @pytest.mark.parametrize('missing_value', ['detector_offset_x', 'detector_offset_y'])
+    def test_blank_placement_value_does_not_become_zero(self, tmp_path, missing_value):
+        path = tmp_path / 'echelle_trace_parameters.dat'
+        _write_echelle_trace_params(path)
+        params = Table.read(path, format='ascii')
+        for axis in ['x', 'y']:
+            key = f'detector_offset_{axis}'
+            params[key] = np.ma.array([0.], mask=[key == missing_value])
+            params.meta['comments'].append(f'{key}_unit : mm')
+        params.write(path, format='ascii', overwrite=True)
+        with pytest.raises(ValueError, match='Both detector offsets must have values'):
+            EchelleSpectralTraceList(cmds=_echelle_cmds(), filename=str(path))
+
+    def test_placement_requires_length_units(self, tmp_path):
+        path = tmp_path / 'echelle_trace_parameters.dat'
+        _write_echelle_trace_params(path)
+        params = Table.read(path, format='ascii')
+        params['detector_offset_x'], params['detector_offset_y'] = [0.], [0.]
+        params.meta['comments'].extend(['detector_offset_x_unit : arcsec', 'detector_offset_y_unit : mm'])
+        params.write(path, format='ascii', overwrite=True)
+        with pytest.raises(u.UnitConversionError):
+            EchelleSpectralTraceList(cmds=_echelle_cmds(), filename=str(path))
 
     def test_does_not_write_generated_hdulist_by_default(self, tmp_path):
         params_file = tmp_path / "echelle_trace_parameters.dat"

@@ -614,6 +614,13 @@ class EchelleSpectralTraceList(SpectralTraceList):
     nIR        2              0                40    24    970         2500         20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        45           175           10           x
     ----------------------------------------------------------------
 
+    Optional ``detector_offset_x`` and ``detector_offset_y`` columns specify
+    the rotated analytical camera origin relative to detector center, positive
+    right/up. Both columns and their ``*_unit`` metadata are required together;
+    values must have length units. Explicit zeros place that origin at detector
+    center. Offsets are applied after rotation, before detector clipping, with
+    no automatic recentering. Omitting both columns retains automatic placement.
+
     The calculated traces are stored in the same HDUList format as required by SpectralTraceList,
     and supplied to the parent class through hdulist kwarg.
 
@@ -716,26 +723,43 @@ class EchelleSpectralTraceList(SpectralTraceList):
             ss._detector_cos, ss._detector_sin = cang, sang
             ss._slit_offset_pix = slit_offset_pix
             self._spectrographs[prefix] = ss
-            rotated_x_min = rotated_y_min = np.inf
-            rotated_x_max = rotated_y_max = -np.inf
-            # Place the complete FSR/slit envelope, including portions outside
-            # the detector. Rotation and translation must not redefine the FSR.
-            for order, edges in zip(ss.orders, ss.edge_wave(fsr=True)):
-                wave = np.linspace(edges[0], edges[1], disp_npix + 1)
-                xrot, yrot = ss._rotated_detector_pixels(wave, order)
-                rotated_x_min = min(rotated_x_min, xrot.min())
-                rotated_x_max = max(rotated_x_max, xrot.max())
-                rotated_y_min = min(rotated_y_min, yrot.min())
-                rotated_y_max = max(rotated_y_max, yrot.max())
-            rotated_x_center = (rotated_x_min + rotated_x_max) / 2
-            rotated_y_center = (rotated_y_min + rotated_y_max) / 2
-            ss._detector_center = (rotated_x_center, rotated_y_center)
+            if 'detector_offset_x' in trace_params.table.colnames or 'detector_offset_y' in trace_params.table.colnames:
+                # Multiplying an ASCII table's masked cell by a Unit yields
+                # zero, so reject missing values before attaching units.
+                if np.ma.is_masked(row['detector_offset_x']) or np.ma.is_masked(row['detector_offset_y']):
+                    raise ValueError('Both detector offsets must have values.')
+                offset_x = row['detector_offset_x'] * u.Unit(trace_params.meta['detector_offset_x_unit'])
+                offset_y = row['detector_offset_y'] * u.Unit(trace_params.meta['detector_offset_y_unit'])
+                # Offsets locate the rotated camera origin relative to detector
+                # center. The raw mapping includes the unrotated pixel origin.
+                rotated_x_center = cang*disp_npix/2 - sang*xdisp_npix/2 - (offset_x/pix_size).to_value(u.dimensionless_unscaled)
+                rotated_y_center = sang*disp_npix/2 + cang*xdisp_npix/2 - (offset_y/pix_size).to_value(u.dimensionless_unscaled)
 
-            # Project the placed detector rectangle back onto the unrotated
-            # model x axis. This includes every slit node: its offset is in y.
-            raw_x_center = cang*rotated_x_center + sang*rotated_y_center
-            raw_x_halfspan = (abs(cang)*disp_npix + abs(sang)*xdisp_npix) / 2
-            candidate_raw_x = np.linspace(raw_x_center - raw_x_halfspan, raw_x_center + raw_x_halfspan, disp_npix + 1)
+                # Project the translated detector rectangle back onto model x;
+                # slit offsets are in model y and cancel in this projection.
+                raw_x_center = cang*rotated_x_center + sang*rotated_y_center
+                raw_x_halfspan = (abs(cang)*disp_npix + abs(sang)*xdisp_npix)/2
+                candidate_raw_x = np.linspace(raw_x_center - raw_x_halfspan, raw_x_center + raw_x_halfspan, disp_npix + 1)
+            else:
+                # Preserve the original automatic placement and sampling for
+                # parameter files that do not specify a detector position.
+                detector_x_padding = max(0., (disp_npix*abs(cang) + xdisp_npix*abs(sang) - disp_npix)/2)
+                slit_x_padding = abs(np.tan(np.deg2rad(detector_angle))) * np.max(np.abs(slit_offset_pix))
+                raw_x_min = .5 - detector_x_padding - slit_x_padding
+                raw_x_max = disp_npix - .5 + detector_x_padding + slit_x_padding
+                candidate_raw_x = np.linspace(raw_x_min, raw_x_max, num=max(disp_npix, 2))
+                rotated_x_min = rotated_y_min = np.inf
+                rotated_x_max = rotated_y_max = -np.inf
+                for order in ss.orders:
+                    wave = ss.x_pixel_to_wavelength(candidate_raw_x, order)
+                    xrot, yrot = ss._rotated_detector_pixels(wave, order)
+                    rotated_x_min = min(rotated_x_min, xrot.min())
+                    rotated_x_max = max(rotated_x_max, xrot.max())
+                    rotated_y_min = min(rotated_y_min, yrot.min())
+                    rotated_y_max = max(rotated_y_max, yrot.max())
+                rotated_x_center = rotated_x_min + (rotated_x_max - rotated_x_min)/2
+                rotated_y_center = rotated_y_min + (rotated_y_max - rotated_y_min)/2
+            ss._detector_center = (rotated_x_center, rotated_y_center)
 
             def on_detector(wave, order):
                 xpix, ypix = ss._detector_pixels(wave, order)
