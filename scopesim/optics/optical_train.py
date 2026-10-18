@@ -746,7 +746,7 @@ class OpticalTrain:
         #     self.cmds["!OBS.ndit"] = None
         # TODO: This is still hacky but seems to work for now...
         params = {"exptime": None, "roid": roid}
-        params.update(kwargs)
+        params.update({key.removeprefix('!OBS.'): value for key, value in kwargs.items()})
         if params["exptime"] is not None and params.get("dit") is None:
             params.update(
                 dit=None,
@@ -761,8 +761,8 @@ class OpticalTrain:
 
         for key, value in params.items():
             if is_bangkey(key):
-                # skip if already explicitly !ABC.xyz
                 logger.debug("%s: %s given in kwargs", key, value)
+                self.cmds[key] = value
                 continue
             # otherwise fallback to !OBS
             logger.debug("%s: %s given in kwargs, put in !OBS", key, value)

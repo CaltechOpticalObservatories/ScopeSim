@@ -415,6 +415,16 @@ class TestObserve:
 
 @pytest.mark.usefixtures("patch_mock_path")
 class TestReadout:
+    def test_explicit_readout_keys_and_reset(self, unity_cmds):
+        opt = OpticalTrain(deepcopy(unity_cmds))
+        for seconds in (3600., 300., 3600.):
+            opt.readout(**{'!OBS.dit': seconds, '!OBS.ndit': 1, '!OBS.dit_blue': seconds / 2})
+            assert opt.cmds['!OBS.dit'] == seconds
+            assert opt.cmds['!OBS.dit_blue'] == seconds / 2
+        opt.readout(dit=17., ndit=2)
+        assert opt.cmds['!OBS.dit'] == 17.
+        assert opt.cmds['!OBS.ndit'] == 2
+
     def test_successive_noise_realizations_can_be_replayed(self, unity_cmds, unity_src):
         commands = deepcopy(unity_cmds)
         commands['!SIM.random.seed'] = 17
