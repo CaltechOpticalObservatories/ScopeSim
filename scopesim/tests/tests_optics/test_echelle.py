@@ -55,10 +55,10 @@ def test_free_frequency_endpoints_fill_camera():
     np.testing.assert_allclose(pixels.value, [0, 2048], atol=1e-7, rtol=0)
 
 
-def test_fsr_is_centered_on_the_optical_axis():
+def test_fsr_retains_the_central_pixel_wavelength_convention():
     instrument = spectrograph_factory(1990, 2450, 225, 18000, 65.6, 31, 38, 1/24, 4.46,
                                      2048, 2048, .015, xdisp_groove_length=1/270, dispersion_focal_len=270)
     edges = instrument.edge_wave(fsr=True)
-    center = instrument.central_wave(instrument.orders)
+    center = instrument.x_pixel_to_wavelength(instrument.detector.n_pix_x//2 + .5, instrument.orders)
     np.testing.assert_allclose(edges.mean(axis=1).to_value(u.nm), center.to_value(u.nm), rtol=1e-12)
-    np.testing.assert_allclose(np.diff(edges, axis=1).ravel().to_value(u.nm), instrument.fsr(instrument.orders).to_value(u.nm), rtol=1e-12)
+    np.testing.assert_allclose(np.diff(edges, axis=1).ravel().to_value(u.nm), (center/instrument.orders).to_value(u.nm), rtol=1e-12)

@@ -565,11 +565,13 @@ class SpectrographSetup:
         :param fsr: True to return the FSR edge wavelengths, False to return the detector edges
         :return: the two endpoint wavelengths for each order
         """
-        if fsr:
-            center = self.x_pixel_to_wavelength(self.detector.n_pix_x/2, self.orders)
-            return center[:, None] * (1 + np.array([-.5, .5])/self.orders[:, None])
-        pixels = np.array([.5, self.detector.n_pix_x - .5])
-        return self.x_pixel_to_wavelength(pixels, self.orders[:, None])
+        pixels = np.array([0, self.detector.n_pix_x//2, self.detector.n_pix_x - 1]) + .5
+        fiducial_waves = self.x_pixel_to_wavelength(pixels, self.orders[:, None])
+        if not fsr:
+            return fiducial_waves[:, [0, -1]]
+        # Retain the original central-pixel wavelength convention for the FSR.
+        central_fsr = fiducial_waves[:, 1] / self.orders
+        return (u.Quantity([-central_fsr/2, central_fsr/2]) + fiducial_waves[:, 1]).T
 
     def central_wave(self, order):
         """
