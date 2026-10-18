@@ -16,9 +16,12 @@
 """
 
 import pytest
+from types import SimpleNamespace
 
 import numpy as np
 from numpy import testing as npt
+from astropy import units as u
+from astropy.io import fits
 
 import matplotlib.pyplot as plt
 
@@ -76,6 +79,22 @@ class TestInit:
 
 
 class TestGetKernel:
+    def test_spectral_kernel_follows_current_grid_and_units(self, const_psf):
+        const_psf.cmds = {'!SIM.computing.psf_maxsize': 21}
+        header = fits.Header({'CDELT1': .004/3600, 'CDELT2': .004/3600, 'CUNIT1': 'deg', 'CUNIT2': 'deg', 'CDELT3': .01, 'CRPIX3': 1., 'CRVAL3': 1.55, 'CUNIT3': 'um'})
+        first = fits.ImageHDU(np.zeros((3, 15, 15)), header)
+        fov = SimpleNamespace(header=first.header, hdu=first, wavelength=1.6*u.um)
+        initial = const_psf.get_kernel(fov).copy()
+        second = fits.ImageHDU(np.zeros((5, 15, 15)), header)
+        fov.header, fov.hdu = second.header, second
+        expanded = const_psf.get_kernel(fov).copy()
+        assert expanded.shape[0] == 5
+        npt.assert_allclose(expanded[:3], initial)
+        second.header['CUNIT3'] = 'nm'
+        second.header['CDELT3'] *= 1000
+        second.header['CRVAL3'] *= 1000
+        npt.assert_allclose(const_psf.get_kernel(fov), expanded, rtol=1e-6)
+
     @pytest.mark.parametrize("waves, max_pixel",
                              [([1.1, 1.3], 1 / 3.),
                               ([1.5, 1.7], 1 / 3.),
