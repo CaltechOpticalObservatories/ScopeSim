@@ -191,16 +191,21 @@ class GratingSetup:
         if not isinstance(d, u.Quantity):
             d = d * u.mm
 
-        # assume we want a dispersion at the midpoint that matches the range to the detector length
-        t = detector_length / focal_length
-        k = (l_max - l_min) / d
-        x = k * (1 + np.sqrt(1 + t ** 2)) / 2 / t
-        beta_center_guess = np.arccos(np.sqrt(x))
-        beta_half_range = np.arcsin(k / 2 / np.sqrt(x))
-        beta_max = beta_center_guess + beta_half_range
-        beta_min = beta_center_guess - beta_half_range
-        alpha = np.arcsin(l_max / d - np.sin(beta_max))
-        return alpha.to(u.rad), ((beta_min + beta_max) / 2).to(u.rad)
+        # The camera maps beta_center +/- half_angle to +/- detector_length/2.
+        # Subtracting the two grating equations eliminates the incidence angle:
+        # (l_max - l_min)/d = 2*cos(beta_center)*sin(half_angle).
+        if l_max <= l_min or detector_length <= 0 * u.mm or focal_length <= 0 * u.mm or d <= 0 * u.mm:
+            raise ValueError("Wavelength range, detector length, focal length and groove spacing must be positive.")
+        half_angle = np.arctan(detector_length / (2 * focal_length))
+        cos_center = (l_max - l_min) / (2 * d * np.sin(half_angle))
+        if not 0 < cos_center <= 1:
+            raise ValueError("The wavelength range cannot fit this detector with the specified groove spacing.")
+        beta_center = np.arccos(cos_center)
+        sin_alpha = l_min / d - np.sin(beta_center - half_angle)
+        if beta_center + half_angle >= 90 * u.deg or not -1 <= sin_alpha <= 1:
+            raise ValueError("The requested detector span requires a non-propagating grating angle.")
+        alpha = np.arcsin(sin_alpha)
+        return alpha.to(u.rad), beta_center.to(u.rad)
 
     @staticmethod
     def estimate_xdisp_freq_and_angle(l_min: float | u.Quantity,
