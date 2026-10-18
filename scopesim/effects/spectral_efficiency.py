@@ -168,13 +168,17 @@ class EchelleSpectralEfficiency(Effect):
             xdisp_groove_length = u.Unit(trace_params.meta["xdisp_freq_unit"]) / row['xdisp_freq']
             echelle_groove_length = u.Unit(trace_params.meta["disp_freq_unit"]) / row['disp_freq']
             pix_per_res_elem = row['fwhm']
+            prescription = {}
+            if 'collimator1_focal_length' in trace_params.colnames:
+                for key in ('collimator1_focal_length', 'collimator2_focal_length', 'entrance_slit_scale'):
+                    prescription[key] = row[key] * u.Unit(trace_params.meta[key + '_unit'])
 
             spectrographs[prefix] = echelle.spectrograph_factory(min_wave, max_wave, focal_len,
                                                         design_res, echelle_angle, min_order, max_order,
                                                         echelle_groove_length, pix_per_res_elem, disp_npix, xdisp_npix,
                                                         pix_size, xdisp_groove_length=xdisp_groove_length,
                                                         xdisp_beta_center=xdisp_beta_center,
-                                                        dispersion_focal_len=dispersion_focal_len)
+                                                        dispersion_focal_len=dispersion_focal_len, **prescription)
         self._spectrographs = spectrographs
 
         def efficiency_curve(trace_id, wavelength):

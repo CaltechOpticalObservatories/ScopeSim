@@ -12,6 +12,34 @@ CHANNELS = [(310, 430, 2000, 4096), (430, 650, 1100, 4096), (650, 980, 625, 4096
             (960, 1340, 350, 2048), (1470, 1830, 300, 2048), (1990, 2450, 270, 2048)]
 
 
+def test_asymmetric_pupil_slit_dispersion_and_anamorphism():
+    instrument = spectrograph_factory(960, 1340, 225, 18000, 65.6, 58, 80, 1/24, 4.46,
+                                     2048, 2048, .015, xdisp_groove_length=1/350, xdisp_beta_center=10.9,
+                                     collimator1_focal_length=1500*u.mm, collimator2_focal_length=1250*u.mm, entrance_slit_scale=.5306*u.mm/u.arcsec)
+    assert instrument.dispersion_focal_length == 270*u.mm
+    center = instrument.central_wave(65)
+    derivative = instrument.slit_dispersion(center, 65)
+    assert derivative < 0*u.um/u.arcsec
+    for slit, expected in ((.7, 17800), (.33, 37800)):
+        resolution = (center / abs(derivative * slit*u.arcsec)).to_value(u.dimensionless_unscaled)
+        assert resolution == pytest.approx(expected, rel=.01)
+    width = instrument.projected_slit_width(center, 65, .7*u.arcsec)
+    assert width.to_value(u.pixel) == pytest.approx(4.45704, rel=1e-5)
+    wavelengths = center * np.array([.99, 1., 1.01])
+    widths = instrument.projected_slit_width(wavelengths, 65, .7*u.arcsec)
+    assert np.all(np.diff(widths) > 0*u.pixel)
+    eta = .0825*u.arcsec
+    dalpha = (eta * instrument.entrance_slit_scale / instrument.collimator1_focal_length).to_value(u.dimensionless_unscaled) * u.rad
+    exact = instrument.grating.d / 65 * (np.sin(instrument.grating.alpha) - np.sin(instrument.grating.alpha + dalpha))
+    assert (derivative * eta).to_value(u.nm) == pytest.approx(exact.to_value(u.nm), rel=1e-4)
+
+
+def test_incomplete_physical_prescription_fails():
+    with pytest.raises(AttributeError):
+        spectrograph_factory(960, 1340, 225, 18000, 65.6, 58, 80, 1/24, 4.46, 2048, 2048, .015,
+                             xdisp_groove_length=1/350, collimator1_focal_length=1500*u.mm)
+
+
 @pytest.mark.parametrize("low,high,density,height", CHANNELS)
 def test_fixed_groove_endpoints_fill_camera(low, high, density, height):
     instrument = spectrograph_factory(low, high, 225, 18000, 65.6, 40, 50, 1/24, 4.46,

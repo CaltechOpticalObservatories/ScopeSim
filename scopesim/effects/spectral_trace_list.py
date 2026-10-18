@@ -685,6 +685,12 @@ class EchelleSpectralTraceList(SpectralTraceList):
     center. Offsets are applied after rotation, before detector clipping, with
     no automatic recentering. Omitting both columns retains automatic placement.
 
+    With ``physical_slit_dispersion=True``, supply ``collimator1_focal_length``,
+    ``collimator2_focal_length`` and ``entrance_slit_scale`` columns with their
+    ``*_unit`` metadata. The entrance scale is length per on-sky arcsecond.
+    These determine the illumination angle and asymmetric pupil relay;
+    the along-slit plate scale is not used for across-slit dispersion.
+
     The calculated traces are stored in the same HDUList format as required by SpectralTraceList,
     and supplied to the parent class through hdulist kwarg.
 
@@ -749,13 +755,19 @@ class EchelleSpectralTraceList(SpectralTraceList):
             xdisp_groove_length = u.Unit(trace_params.meta["xdisp_freq_unit"]) / row['xdisp_freq']
             echelle_groove_length = u.Unit(trace_params.meta["disp_freq_unit"]) / row['disp_freq']
             pix_per_res_elem = row['fwhm']
+            prescription = {}
+            if 'collimator1_focal_length' in trace_params.table.colnames:
+                for key in ('collimator1_focal_length', 'collimator2_focal_length', 'entrance_slit_scale'):
+                    prescription[key] = row[key] * u.Unit(trace_params.meta[key + '_unit'])
+                nominal_width = row['nominal_slit_width'] * u.Unit(trace_params.meta['nominal_slit_width_unit'])
+                pix_per_res_elem = (nominal_width * prescription['entrance_slit_scale'] * focal_len / prescription['collimator2_focal_length'] / pix_size).to_value(u.dimensionless_unscaled)
 
             ss = echelle.spectrograph_factory(min_wave, max_wave, focal_len,
                                               design_res, echelle_angle, min_order, max_order,
                                               echelle_groove_length, pix_per_res_elem, disp_npix, xdisp_npix,
                                               pix_size, xdisp_groove_length=xdisp_groove_length,
                                               xdisp_beta_center=xdisp_beta_center,
-                                              dispersion_focal_len=dispersion_focal_len)
+                                              dispersion_focal_len=dispersion_focal_len, **prescription)
             _warn_if_echelle_design_res_inconsistent(
                 prefix,
                 design_res,
@@ -869,14 +881,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
                      'y': yval})
 
                 if self.physical_slit_dispersion:
-                    # The analytical prescription assumes equal slit magnification
-                    # along and across the slit. Use its native, unrotated echelle
-                    # mapping; neither the sky raster nor detector rotation changes
-                    # this physical wavelength displacement. Preserve the legacy sign.
-                    native_angle = row['plate_scale'] * u.Unit(trace_params.meta['plate_scale_unit']) * pix_size
-                    raw_pixel = ss.wavelength_to_x_pixel(w, order)
-                    delta_wave = ss.x_pixel_to_wavelength(raw_pixel + .5, order) - ss.x_pixel_to_wavelength(raw_pixel - .5, order)
-                    order_table['dlam_deta'] = (-delta_wave / native_angle).to(u.um / u.arcsec)
+                    order_table['dlam_deta'] = ss.slit_dispersion(w, order)
 
                 trace_hdu = fits.BinTableHDU(order_table)
                 if self.physical_slit_dispersion:

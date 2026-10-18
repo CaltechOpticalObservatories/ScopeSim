@@ -11,7 +11,10 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
                          echelle_groove_length: float|u.Quantity,
                          pix_per_res_elem: float, disp_npix: int, xdisp_npix: int, pix_size: float|u.Quantity,
                          xdisp_groove_length: float|u.Quantity = 0.0, xdisp_beta_center: float|u.Quantity = 0.0,
-                         dispersion_focal_len: float|u.Quantity = None):
+                         dispersion_focal_len: float|u.Quantity = None,
+                         collimator1_focal_length: u.Quantity = None,
+                         collimator2_focal_length: u.Quantity = None,
+                         entrance_slit_scale: u.Quantity = None):
     """
     
     Parameters
@@ -47,6 +50,11 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
     dispersion_focal_len: float|u.Quantity
         Effective focal length for the echelle/main-dispersion detector
         coordinate. If float, assumed to be in mm. Defaults to focal_len.
+    collimator1_focal_length, collimator2_focal_length: u.Quantity
+        Physical collimator lengths. When supplied together, derive the
+        dispersion focal length from focal_len times their ratio.
+    entrance_slit_scale: u.Quantity
+        Entrance-slit length per on-sky angle, required with the collimators.
 
     Returns
     -------
@@ -98,6 +106,9 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
                                    pixels_per_res_elem=pix_per_res_elem,
                                    focal_length=focal_len,
                                    dispersion_focal_length=dispersion_focal_len,
+                                   collimator1_focal_length=collimator1_focal_length,
+                                   collimator2_focal_length=collimator2_focal_length,
+                                   entrance_slit_scale=entrance_slit_scale,
                                    grating=echelle_grating,
                                    detector=Detector(disp_npix, xdisp_npix, pix_size),
                                    cross_disperser=cross_disperser)
@@ -369,6 +380,9 @@ class SpectrographSetup:
             detector: Detector,
             cross_disperser: GratingSetup = None,
             dispersion_focal_length: u.Quantity = None,
+            collimator1_focal_length: u.Quantity = None,
+            collimator2_focal_length: u.Quantity = None,
+            entrance_slit_scale: u.Quantity = None,
     ):
         """
 
@@ -403,6 +417,12 @@ class SpectrographSetup:
             if dispersion_focal_length is None
             else dispersion_focal_length.to(u.mm)
         )
+        if collimator1_focal_length is not None:
+            self.collimator1_focal_length = collimator1_focal_length.to(u.mm)
+            self.collimator2_focal_length = collimator2_focal_length.to(u.mm)
+            self.entrance_slit_scale = entrance_slit_scale.to(u.mm / u.arcsec)
+            # Angular dispersion is amplified by the asymmetric pupil relay.
+            self.dispersion_focal_length = self.focal_length * self.collimator1_focal_length / self.collimator2_focal_length
         self.pixel_scale = np.arctan(
             self.detector.pixel_size / self.dispersion_focal_length)
         self.beta_central_pixel = self.grating.beta_center
@@ -436,6 +456,22 @@ class SpectrographSetup:
         self.beta_central_pixel = beta
         if littrow:
             self.grating.alpha = beta
+
+    def slit_dispersion(self, wavelength, order):
+        """Apparent wavelength shift per across-slit arcsecond at fixed incident wavelength.
+
+        m*lambda = d*(sin(alpha) + sin(beta)); increasing entrance-slit eta
+        increases alpha and reduces the wavelength inferred at nominal alpha.
+        The first collimator sets this angle; the pupil relay is already in
+        the camera's dispersion focal length and must not enter a second time.
+        """
+        derivative = -self.grating.d * np.cos(self.grating.alpha) * self.entrance_slit_scale / (order * self.collimator1_focal_length)
+        return np.ones(np.shape(wavelength)) * derivative.to(u.um / u.arcsec)
+
+    def projected_slit_width(self, wavelength, order, slit_width):
+        """Unrotated echelle-coordinate slit width, including local anamorphism."""
+        half_shift = self.slit_dispersion(wavelength, order) * slit_width / 2
+        return abs(self.wavelength_to_x_pixel(wavelength + half_shift, order) - self.wavelength_to_x_pixel(wavelength - half_shift, order)) * u.pixel
 
     @property
     def orders(self):
