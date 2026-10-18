@@ -6,6 +6,18 @@ from astropy.io import fits
 from scopesim.effects.spectral_trace_list_utils import XiLamImage, SpectralTrace
 
 
+def test_single_precision_cube_is_integrated_in_double_precision():
+    fov = line_cube(.05)
+    fov.cube.data = np.zeros(fov.cube.data.shape, dtype=np.float32)
+    fov.cube.data[1000, :, :] = 1.
+    fov.cube.data[1000, 0, :] = 1e8
+    image = XiLamImage(fov, lambda wave: .00001, slit_dispersion=lambda wave: .002)
+    # Integration across eta must retain the 19 faint cells beside the bright
+    # cell. The remapped line lies well inside the spectral boundaries.
+    expected = (1e8 + 19)*.05
+    np.testing.assert_allclose(image.image.sum(axis=1), expected, rtol=1e-12)
+
+
 def line_cube(step, offset=0):
     wave = np.linspace(.995, 1.005, 2001)
     eta = np.arange(-.5+step/2, .5, step)

@@ -653,7 +653,7 @@ class OpticalTrain:
 
             # Need to check whether BUNIT is per arcsec2 or per pixel
             inunit = u.Unit(header["BUNIT"])
-            data = data.astype(np.float32) * inunit
+            data = data.astype(np.float64, copy=False) * inunit
             factor = 1
             for base, power in zip(inunit.bases, inunit.powers):
                 if (base**power).is_equivalent(u.arcsec**(-2)):

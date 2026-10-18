@@ -52,3 +52,15 @@ def test_prepare_source_keeps_native_line_sampling():
     train = OpticalTrain()
     prepared = train.prepare_source(source)
     np.testing.assert_array_equal(prepared.spectra[0].waveset, spectrum.waveset)
+
+
+def test_prepare_cube_retains_faint_contrast_in_double_precision():
+    from scopesim.tests.mocks.py_objects.source_objects import _cube_source
+    source = _cube_source()
+    field = source.cube_fields[0]
+    field.data.fill(1e8)
+    field.data[:, 0, 0] += 1.
+    prepared = OpticalTrain().prepare_source(source)
+    data = prepared.cube_fields[0].data
+    contrast = (data[:, 0, 0] - data[:, 0, 1])/data[:, 0, 1]
+    np.testing.assert_allclose(contrast, 1e-8, rtol=1e-6)

@@ -327,7 +327,7 @@ class SpectralTrace:
         sub_naxis2 = len(y_mm)
         xmax = xmin + sub_naxis1
         ymax = ymin + sub_naxis2
-        image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float32)
+        image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float64)
 
         self._set_dispersion(wave_min, wave_max, pixsize=pixsize)
         slit_dispersion = None
@@ -381,8 +381,8 @@ class SpectralTrace:
         detector_qe = fov.meta.get("detector_qe")
         if detector_qe is not None:
             xpix_img, ypix_img = np.meshgrid(
-                np.arange(xmin, xmax, dtype=np.float32),
-                np.arange(ymin, ymax, dtype=np.float32),
+                np.arange(xmin, xmax, dtype=np.float64),
+                np.arange(ymin, ymax, dtype=np.float64),
             )
             image = apply_detector_qe_to_trace_image(
                 image,
@@ -973,9 +973,10 @@ class XiLamImage:
             weights = np.concatenate([operator.data for operator in operators])*abs(d_eta)
             # Interleaved wavelength/slit cells match the contiguous cube layout,
             # avoiding a separate strided dense copy for every across-slit row.
-            _cache['operator'] = csr_matrix((weights, (rows, columns)), shape=(n_lam, n_lam*n_eta), dtype=np.float32)
+            _cache['operator'] = csr_matrix((weights, (rows, columns)), shape=(n_lam, n_lam*n_eta))
             _cache['key'] = key
-        self.image = (_cache['operator'] @ fov.cube.data.reshape(n_lam*n_eta, n_xi)).T.astype(np.float32, copy=False)
+        cells = fov.cube.data.reshape(n_lam*n_eta, n_xi)
+        self.image = (_cache['operator'] @ cells).T
 
         # WCS for the xi-lambda image, i.e. the rectified 2D spectrum
         # Default WCS with xi in arcsec

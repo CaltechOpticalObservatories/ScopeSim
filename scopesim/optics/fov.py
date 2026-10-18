@@ -255,7 +255,7 @@ class FieldOfView:
     def flatten(self):
         """If cube, collapse along first axis."""
         if self.hdu and self.hdu.header["NAXIS"] == 3:
-            image = np.sum(self.hdu.data, axis=0)
+            image = np.sum(self.hdu.data, axis=0, dtype=np.float64)
             self.hdu.data = image
 
     def get_fields_in_fov(self, fields: Iterable[SourceField], fov_corners=None) -> Generator:
@@ -652,7 +652,7 @@ class FieldOfView1D(FieldOfView):
         * yield scaled flux to be added to canvas flux
         """
         for field in self._get_cube_fields():
-            fluxes = field.data.sum(axis=(1, 2))*u.Unit(field.header['BUNIT'].lower())
+            fluxes = field.data.sum(axis=(1, 2), dtype=np.float64)*u.Unit(field.header['BUNIT'].lower())
             if field.is_bunit_spatially_differential:
                 fluxes *= field.pixel_area
             yield np.interp(self.waveset, field.waveset, fluxes.to_value(PHOTLAM))
@@ -666,7 +666,7 @@ class FieldOfView1D(FieldOfView):
         * yield spectrum multiply by sum to be added to canvas flux
         """
         for field in self._get_image_fields():
-            weight = np.sum(field.data)  # Shouldn't that be 1 by convention?
+            weight = np.sum(field.data, dtype=np.float64)  # Shouldn't that be 1 by convention?
             yield field.spectrum(self.waveset).value * weight
 
     def _make_tablefields(self):
@@ -757,7 +757,7 @@ class FieldOfView2D(FieldOfView):
                 u.Unit(field.header["CUNIT3"])
             ).to(u.Angstrom)
             # First collapse to image, then convert units
-            image = np.sum(field.data, axis=0) * PHOTLAM/u.arcsec**2
+            image = np.sum(field.data, axis=0, dtype=np.float64) * PHOTLAM/u.arcsec**2
             image = (image * self.area * field.pixel_area *
                      spectral_bin_width).to(u.ph/u.s)
             logger.debug("2D FOV make_cubefields: image.mean() = %f %s",
@@ -1049,13 +1049,10 @@ class FieldOfView3D(FieldOfView):
         # -> Perhaps change that??
         fov_waveset = self.cube_waveset.to(u.um)
 
-        # make canvas cube based on waveset of largest cube and NAXIS1,2
-        # from fov.header
-        canvas_cube_hdu = fits.ImageHDU(
-            data=np.zeros((len(fov_waveset),
-                           self.header["NAXIS2"],
-                           self.header["NAXIS1"]), dtype=np.float32),
-            header=self.header)
+        # Retain double precision when combining faint sources with sky and
+        # thermal backgrounds; subtraction can expose storage-rounding error.
+        shape = (len(fov_waveset), self.header['NAXIS2'], self.header['NAXIS1'])
+        canvas_cube_hdu = fits.ImageHDU(data=np.zeros(shape, dtype=np.float64), header=self.header)
         # set BUNIT initially to PHOTLAM / arcsec**2
         canvas_cube_hdu.header["BUNIT"] = "ph cm-2 s-1 AA-1 arcsec-2"
 
@@ -1101,10 +1098,12 @@ class FieldOfView3D(FieldOfView):
                     canvas_cube_hdu.data[:, y, x] += flux
         else:
             for field in self._get_table_fields():
-                spectra = {ref: average_spectrum(spec, fov_waveset).value.astype(np.float32) for ref, spec in field.spectra.items()}
+                spectra = {ref: average_spectrum(spec, fov_waveset).value for ref, spec in field.spectra.items()}
                 for row in field.field:
-                    image = (spatial_psf.point_source_image(self, row['x'], row['y'])/self.pixel_area.value).astype(np.float32)
-                    canvas_cube_hdu.data += spectra[row['ref']][:, None, None]*image[None, :, :]*row['weight']
+                    image = spatial_psf.point_source_image(self, row['x'], row['y'])/self.pixel_area.value
+                    for start in range(0, len(fov_waveset), 64):
+                        spectrum = spectra[row['ref']][start:start + 64]
+                        canvas_cube_hdu.data[start:start + 64] += spectrum[:, None, None]*image[None, :, :]*row['weight']
 
         for background in self._make_backfields(fov_waveset):
             canvas_cube_hdu.data += background
