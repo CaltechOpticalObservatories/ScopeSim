@@ -33,6 +33,18 @@ def test_flat_ab_continuum_bin_integral():
     np.testing.assert_allclose(average_spectrum(spectrum, wave).to_value(PHOTLAM), expected, rtol=1e-6)
 
 
+def test_mutating_spectrum_redshift_updates_native_sampling():
+    points = np.array([4999., 4999.99, 5000., 5000.01, 5001.])*u.AA
+    spectrum = SourceSpectrum(Empirical1D, points=points, lookup_table=[0., 0., 1., 0., 0.])
+    average_spectrum(spectrum, np.arange(4998., 5002., .1)*u.AA)
+    spectrum.z = .01
+    fresh = SourceSpectrum(Empirical1D, points=points, lookup_table=[0., 0., 1., 0., 0.], z=.01)
+    wave = np.arange(5048., 5052., .1)*u.AA
+    actual = average_spectrum(spectrum, wave)
+    np.testing.assert_allclose(actual, average_spectrum(fresh, wave), rtol=1e-12)
+    assert actual.sum() > 0
+
+
 @pytest.mark.parametrize('descending', [False, True])
 def test_cube_rebinning_preserves_flux_spatial_weights_and_support(descending):
     wave = np.array([1., 2., 3.])

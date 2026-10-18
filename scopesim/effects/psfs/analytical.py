@@ -3,6 +3,7 @@
 
 from typing import ClassVar, Any
 from functools import partial, lru_cache
+from pathlib import Path
 
 import numpy as np
 from astropy import units as u
@@ -19,6 +20,12 @@ from ...utils import (from_currsys, quantify, quantity_from_table, figure_factor
 from . import PSF, PoorMansFOV
 
 logger = get_logger(__name__)
+
+
+def _psf_table_key(filename, cmds):
+    path = Path(find_file(from_currsys(filename, cmds)))
+    return str(path), path.read_bytes()
+
 
 class AnalyticalPSF(PSF):
     """Base class for analytical PSFs."""
@@ -257,7 +264,6 @@ class MoffatPSF(AnalyticalPSF):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._fwhm_interp = None
-        self._kernel_cache = {}
 
     def fwhm(self, wavelengths):
         fwhm = self.meta["fwhm"]
@@ -268,6 +274,8 @@ class MoffatPSF(AnalyticalPSF):
             key = tuple(fwhm.items()), get_zenith_angle(target, location, time)
         elif isinstance(fwhm, dict):
             key = tuple(fwhm.items())
+        elif isinstance(fwhm, str):
+            key = _psf_table_key(fwhm, self.cmds)
         else:
             key = fwhm
 
@@ -333,9 +341,6 @@ class MoffatPSF(AnalyticalPSF):
         if max_ksize is not None:
             ksize = min(ksize, max_ksize)
 
-        key = (tuple(gammas), alpha, ystep, target, max_ksize, ksize, self.meta["rounded_edges"], self._renormalize_clipped_kernel())
-        if key in self._kernel_cache:
-            return self._kernel_cache[key].copy()
         kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize, ystep)
         while norm < target and (max_ksize is None or ksize < max_ksize):
             ksize = self._next_kernel_size(ksize, max_ksize)
@@ -360,9 +365,6 @@ class MoffatPSF(AnalyticalPSF):
 
         if self._renormalize_clipped_kernel() and norm > 0:
             kernel /= norm
-        if len(self._kernel_cache) >= 256:
-            self._kernel_cache.pop(next(iter(self._kernel_cache)))
-        self._kernel_cache[key] = kernel
         return kernel
 
     def point_source_image(self, fov, x, y):
@@ -510,7 +512,9 @@ class MoffatPSF(AnalyticalPSF):
 
 @lru_cache(maxsize=16)
 def _legendre_rule(order):
-    return np.polynomial.legendre.leggauss(order)
+    nodes, weights = np.polynomial.legendre.leggauss(order)
+    nodes.flags.writeable = weights.flags.writeable = False
+    return nodes, weights
 
 
 def moffat_cell_integrals(x, y, dx, dy, gammas, alpha):
@@ -587,9 +591,10 @@ class AOEnhanceablePSF(MoffatPSF):
 
     @property
     def ao_alpha(self):
-        if self._ao_alpha is None or self._ao_alpha[1] != self.meta['ao_table']:
+        key = _psf_table_key(self.meta['ao_table'], self.cmds), self.meta['alpha']
+        if self._ao_alpha is None or self._ao_alpha[1] != key:
             _, alpha = self.ao_table_data()
-            self._ao_alpha = alpha, self.meta['ao_table']
+            self._ao_alpha = alpha, key
         return self._ao_alpha[0]
 
     @property
@@ -612,9 +617,10 @@ class AOEnhanceablePSF(MoffatPSF):
 
     @property
     def ao_scale(self):
-        if self._ao_interp is None or self._ao_interp[1] != self.meta['ao_table']:
+        key = _psf_table_key(self.meta['ao_table'], self.cmds)
+        if self._ao_interp is None or self._ao_interp[1] != key:
             ao_table, _ = self.ao_table_data()
-            self._ao_interp = self.fwhm_from_table(ao_table), self.meta['ao_table']
+            self._ao_interp = self.fwhm_from_table(ao_table), key
         return self._ao_interp[0]
 
     def ao_fwhm(self, wavelengths):

@@ -4,7 +4,6 @@
 from warnings import warn
 from itertools import chain
 from collections.abc import Iterable, Generator
-from weakref import WeakKeyDictionary
 
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
@@ -44,7 +43,6 @@ from ..source.source import Source
 
 logger = get_logger(__name__)
 
-_SPECTRUM_WAVESET_AA_CACHE = WeakKeyDictionary()
 
 
 class FieldOfView:
@@ -136,7 +134,7 @@ class FieldOfView:
             self.meta["pixel_area"] = pixel_area(self.header)
         return self.meta["pixel_area"]
 
-    def extract_from(self, src, spatial_header=None) -> None:
+    def extract_from(self, src, spatial_header=None, _spectral_wavesets=None) -> None:
         """
         Extract relevent fields from source object.
 
@@ -185,7 +183,7 @@ class FieldOfView:
                 new_fld = TableSourceField(
                     field=extracted,
                     spectra={
-                        ref: extract_range_from_spectrum(spec, source_range)
+                        ref: extract_range_from_spectrum(spec, source_range, _waveset=None if _spectral_wavesets is None else _spectral_wavesets[spec])
                         for ref, spec in field.spectra.items()
                         if ref in extracted["ref"]
                     },
@@ -199,7 +197,7 @@ class FieldOfView:
                 new_fld = ImageSourceField(
                     field=extracted,
                     spectra={
-                        ref: extract_range_from_spectrum(spec, source_range)
+                        ref: extract_range_from_spectrum(spec, source_range, _waveset=None if _spectral_wavesets is None else _spectral_wavesets[spec])
                         for ref, spec in field.spectra.items()
                     },
                 )
@@ -217,7 +215,7 @@ class FieldOfView:
                     field=None,
                     header=field.header,
                     spectra={
-                        ref: extract_range_from_spectrum(spec, source_range)
+                        ref: extract_range_from_spectrum(spec, source_range, _waveset=None if _spectral_wavesets is None else _spectral_wavesets[spec])
                         for ref, spec in field.spectra.items()
                     },
                 )
@@ -1145,12 +1143,12 @@ def replace_nans(field, cmds) -> None:
             "set in '!SIM.computing.nan_fill_value'.")
 
 
-def extract_range_from_spectrum(spectrum, waverange):
+def extract_range_from_spectrum(spectrum, waverange, _waveset=None):
     assert isinstance(spectrum, SourceSpectrum), (
         f"spectrum must be of type synphot.SourceSpectrum: {type(spectrum)}")
 
     wave_min, wave_max = quantify(waverange, u.um).to(u.AA).value
-    spec_waveset = _spectrum_waveset_aa_value(spectrum)
+    spec_waveset = _spectrum_waveset_aa_value(spectrum) if _waveset is None else _waveset
     if spec_waveset is None:
         return spectrum
     mask = (spec_waveset > wave_min) & (spec_waveset < wave_max)
@@ -1175,15 +1173,9 @@ def extract_range_from_spectrum(spectrum, waverange):
 
 
 def _spectrum_waveset_aa_value(spectrum):
-    """Return cached spectrum waveset values in Angstrom."""
-    spec_waveset = _SPECTRUM_WAVESET_AA_CACHE.get(spectrum)
-    if spec_waveset is None:
-        waveset = spectrum.waveset
-        if waveset is None:
-            return None
-        spec_waveset = waveset.to_value(u.AA)
-        _SPECTRUM_WAVESET_AA_CACHE[spectrum] = spec_waveset
-    return spec_waveset
+    # A spectrum can change its sampling in place, including through redshift.
+    waveset = spectrum.waveset
+    return None if waveset is None else waveset.to_value(u.AA)
 
 
 def spectral_bin_edges(centers):

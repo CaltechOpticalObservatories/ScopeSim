@@ -149,7 +149,6 @@ class SpectralTrace:
         # Declaration of other attributes
         self._xilamimg = None
         self._slit_cache = {}
-        self._pixel_cache = {}
         self.dlam_per_pix = None
         self.fit_inverse = True
 
@@ -339,25 +338,20 @@ class SpectralTrace:
         self._xilamimg = xilam
 
         # Integrate the density over each detector pixel. The inverse optical
-        # map is locally affine within a pixel; its exact center and Jacobian
-        # are cached, while quadrature samples are streamed to bound memory.
+        # map is locally affine within a pixel. Recompute centers and gradients:
+        # configured transforms can be edited in place between observations.
         xx, yy = np.meshgrid(np.arange(sub_naxis1), np.arange(sub_naxis2))
         ximg_fpa, yimg_fpa = det_wcs.all_pix2world(xx, yy, 0)
         lam_fpa = self.xy2lam(ximg_fpa, yimg_fpa)
-        jacobian = from_currsys(self.meta['trace_flux_jacobian'], self.cmds)
-        key = (det_header.tostring(), xmin, ymin, image.shape, wave_min, wave_max, xi_min, xi_max, pixscale, jacobian)
-        if self._pixel_cache.get('key') != key:
-            self._pixel_cache.clear()
-            matrix = det_wcs.pixel_scale_matrix
-            dxidx, dxidy = self.xy2xi.gradient()
-            dlamdx, dlamdy = self.xy2lam.gradient()
-            ax, ay = dxidx(ximg_fpa, yimg_fpa), dxidy(ximg_fpa, yimg_fpa)
-            bx, by = dlamdx(ximg_fpa, yimg_fpa), dlamdy(ximg_fpa, yimg_fpa)
-            self._pixel_cache.update(key=key, xi=self.xy2xi(ximg_fpa, yimg_fpa), lam=lam_fpa,
-                                     xi_x=ax*matrix[0, 0] + ay*matrix[1, 0], xi_y=ax*matrix[0, 1] + ay*matrix[1, 1],
-                                     lam_x=bx*matrix[0, 0] + by*matrix[1, 0], lam_y=bx*matrix[0, 1] + by*matrix[1, 1],
-                                     scale=self._trace_flux_scale(ximg_fpa, yimg_fpa, pixsize, pixscale, det_header))
-        geometry = self._pixel_cache
+        matrix = det_wcs.pixel_scale_matrix
+        dxidx, dxidy = self.xy2xi.gradient()
+        dlamdx, dlamdy = self.xy2lam.gradient()
+        ax, ay = dxidx(ximg_fpa, yimg_fpa), dxidy(ximg_fpa, yimg_fpa)
+        bx, by = dlamdx(ximg_fpa, yimg_fpa), dlamdy(ximg_fpa, yimg_fpa)
+        xi_fpa = self.xy2xi(ximg_fpa, yimg_fpa)
+        xi_x, xi_y = ax*matrix[0, 0] + ay*matrix[1, 0], ax*matrix[0, 1] + ay*matrix[1, 1]
+        lam_x, lam_y = bx*matrix[0, 0] + by*matrix[1, 0], bx*matrix[0, 1] + by*matrix[1, 1]
+        scale = self._trace_flux_scale(ximg_fpa, yimg_fpa, pixsize, pixscale, det_header)
         quadrature = np.full(2, self._pixel_quadrature_order)
         if 'effective_psf_fwhm' in fov.meta:
             middle = (wave_min + wave_max)/2
@@ -373,10 +367,10 @@ class SpectralTrace:
         ynodes, yweights = np.polynomial.legendre.leggauss(quadrature[1])
         for nx, wx in zip(xnodes/2, xweights/2):
             for ny, wy in zip(ynodes/2, yweights/2):
-                xi = geometry['xi'] + nx*geometry['xi_x'] + ny*geometry['xi_y']
-                lam = geometry['lam'] + nx*geometry['lam_x'] + ny*geometry['lam_y']
+                xi = xi_fpa + nx*xi_x + ny*xi_y
+                lam = lam_fpa + nx*lam_x + ny*lam_y
                 inside = (xi >= xi_min) & (xi < xi_max) & (lam >= wave_min) & (lam < wave_max)
-                image[inside] += xilam.interp(xi[inside], lam[inside], grid=False) * geometry['scale'][inside] * wx * wy
+                image[inside] += xilam.interp(xi[inside], lam[inside], grid=False) * scale[inside] * wx * wy
 
         detector_qe = fov.meta.get("detector_qe")
         if detector_qe is not None:
@@ -962,7 +956,9 @@ class XiLamImage:
 
         derivative = -dlam_per_pix_val / d_eta if slit_dispersion is None else slit_dispersion(self.lam)
         derivative = np.broadcast_to(derivative, self.lam.shape)
-        key = (cube_lam[0], d_lam, n_lam, cube_eta[0], d_eta, n_eta, derivative.tobytes())
+        # The operator depends only on these evaluated physical arrays. Include
+        # every element, so direct WCS/table/callable changes cannot alias it.
+        key = (cube_lam.tobytes(), cube_eta.tobytes(), d_eta, derivative.tobytes())
         if _cache is None:
             _cache = {}
         if _cache.get('key') != key:

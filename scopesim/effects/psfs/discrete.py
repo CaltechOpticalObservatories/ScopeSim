@@ -192,7 +192,6 @@ class FieldConstantPSF(DiscretePSF):
         self.current_ext = None
         self.current_data = None
         self.kernel = None
-        self._kernel_grid_key = None
 
     def get_kernel(self, fov):
         """Find nearest wavelength and build PSF kernel from file."""
@@ -206,22 +205,13 @@ class FieldConstantPSF(DiscretePSF):
             logger.warning("PSF parameter interp_order not found, using 1 (linear interpolation).")
             spline_order = 1
 
-        # A reference PSF layer can serve FOVs with different wavelength and
-        # spatial grids. Reusing its sampled cube solely by layer is invalid.
-        key = (ext, spline_order, fov.hdu.header['NAXIS'], fov.header['NAXIS1'], fov.header['NAXIS2'], fov.header['CDELT1'])
-        if fov.hdu.header['NAXIS'] == 3:
-            key += tuple(fov.hdu.header[name] for name in ('NAXIS1', 'NAXIS2', 'CDELT1', 'CUNIT1', 'NAXIS3', 'CDELT3', 'CRPIX3', 'CRVAL3', 'CUNIT3'))
-            key += (self.meta.get('interp_psf', True), self.cmds.get('!SIM.computing.psf_maxsize'))
-        if key == self._kernel_grid_key:
-            return self.kernel
-
         if fov.hdu.header["NAXIS"] == 3:
             self.current_layer_id = ext
             self.make_psf_cube(fov, spline_order)
-            self._kernel_grid_key = key
             return self.kernel
 
-        self.kernel = self._file[ext].data
+        # Keep the loaded reference independent of callers modifying a kernel.
+        self.kernel = self._file[ext].data.copy()
         self.current_layer_id = ext
         hdr = self._file[ext].header
 
@@ -248,7 +238,6 @@ class FieldConstantPSF(DiscretePSF):
             self.kernel = _cutout_kernel(
                 self.kernel, fov.header, kernel_header=hdr)
 
-        self._kernel_grid_key = key
         return np.atleast_2d(self.kernel.squeeze())
 
     def make_psf_cube(self, fov, spline_order=1):

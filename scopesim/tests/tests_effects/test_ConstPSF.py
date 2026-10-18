@@ -79,6 +79,21 @@ class TestInit:
 
 
 class TestGetKernel:
+    def test_returned_kernel_does_not_alias_reference_or_next_call(self, const_psf, centre_fov):
+        centre_fov.view()
+        initial = const_psf.get_kernel(centre_fov)
+        expected = initial.copy()
+        initial.fill(0.)
+        npt.assert_array_equal(const_psf.get_kernel(centre_fov), expected)
+
+    def test_reference_image_edits_reach_next_kernel(self, const_psf, centre_fov):
+        centre_fov.view()
+        first = const_psf.get_kernel(centre_fov).copy()
+        ext = const_psf.current_layer_id
+        const_psf._file[ext].data[:] = np.roll(const_psf._file[ext].data, 3, axis=0)
+        second = const_psf.get_kernel(centre_fov)
+        assert not np.allclose(first, second)
+
     def test_spectral_kernel_follows_current_grid_and_units(self, const_psf):
         const_psf.cmds = {'!SIM.computing.psf_maxsize': 21}
         header = fits.Header({'CDELT1': .004/3600, 'CDELT2': .004/3600, 'CUNIT1': 'deg', 'CUNIT2': 'deg', 'CDELT3': .01, 'CRPIX3': 1., 'CRVAL3': 1.55, 'CUNIT3': 'um'})

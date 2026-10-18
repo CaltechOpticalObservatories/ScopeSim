@@ -537,6 +537,15 @@ class OpticalTrain:
         for effect in self.optics_manager.source_effects:
             source = effect.apply_to(source)
 
+        # This source is a private copy, after all source effects. FOV extraction
+        # copies native-sampled spectra before FOV effects can modify them. Evaluate
+        # native sampling once for this observation; retain no cache on the
+        # source, spectrum, FOV or train, and never reuse it on the next call.
+        spectral_wavesets = {}
+        for spectrum in source.spectra.values():
+            waveset = spectrum.waveset
+            spectral_wavesets[spectrum] = None if waveset is None else waveset.to_value(u.AA)
+
         # [3D - Atmospheric shifts, PSF, NCPAs, Grating shift/distortion]
 
         # START OF MULTIPROCESSING
@@ -589,9 +598,9 @@ class OpticalTrain:
                     defer_render = all(isinstance(effect, (TERCurve, SpectralEfficiency, EchelleSpectralEfficiency, TaperedQuantumEfficiency)) for effect in foveffs[:psf_index])
                 if defer_render:
                     point_sources = not (source.image_fields or source.cube_fields)
-                    fov.extract_from(source, spatial_header=foveffs[psf_index].padded_header(fov, point_sources=point_sources))
+                    fov.extract_from(source, spatial_header=foveffs[psf_index].padded_header(fov, point_sources=point_sources), _spectral_wavesets=spectral_wavesets)
                 else:
-                    fov.extract_from(source)
+                    fov.extract_from(source, _spectral_wavesets=spectral_wavesets)
                     fov.view()
                 nobar = len(foveffs) <= 1
                 for effect in tqdm(foveffs, disable=nobar,

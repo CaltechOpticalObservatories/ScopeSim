@@ -208,3 +208,46 @@ def test_table_fwhm_reuses_interpolator_without_observation_commands(tmp_path):
     cached = psf._fwhm_interp[0]
     np.testing.assert_allclose(psf.fwhm(wave.to(u.um)).to_value(u.arcsec), [.5, 1.])
     assert psf._fwhm_interp[0] is cached
+
+
+def test_returned_kernel_mutation_does_not_change_later_psf():
+    psf = MoffatPSF(alpha=4.765, fwhm=.7)
+    first = psf.get_kernel(SimpleFov())
+    expected = first.copy()
+    first.fill(0.)
+    np.testing.assert_array_equal(psf.get_kernel(SimpleFov()), expected)
+
+
+def test_overwriting_fwhm_table_refreshes_interpolator(tmp_path):
+    path = tmp_path/'fwhm.dat'
+    table = Table({'wavelength': [.4, .5, 1., 2.5], 'fwhm': [.4, .5, 1., 2.5]}, meta={'comments': ['wavelength_unit : um']})
+    table.write(path, format='ascii')
+    psf = MoffatPSF(alpha=4.765, fwhm=str(path))
+    wave = np.array([.5, 1.])*u.um
+    first = psf.fwhm(wave)
+    table['fwhm'] *= 2
+    table.write(path, format='ascii', overwrite=True)
+    np.testing.assert_allclose(psf.fwhm(wave), 2*first)
+
+
+def test_ao_cache_tracks_resolved_path_contents_and_alpha(tmp_path):
+    first, second = tmp_path/'first.dat', tmp_path/'second.dat'
+    table = Table({'wavelength': [.4, .5, 1., 2.5], 'fwhm': [.3, .3, .3, .3]}, meta={'comments': ['wavelength_unit : um']})
+    table.write(first, format='ascii')
+    table['fwhm'] *= 2
+    table.write(second, format='ascii')
+    cmds = UserCommands(properties={'!INST.ao_file': str(first)})
+    psf = AOEnhanceablePSF(cmds=cmds, ao_table='!INST.ao_file', is_absolute=True, enable_ao=True, alpha=4.765)
+    # PSF construction resolves command references. Also exercise a reference
+    # assigned directly to the configured metadata after construction.
+    psf.meta['ao_table'] = '!INST.ao_file'
+    wave = np.array([.5, 1.])*u.um
+    np.testing.assert_allclose(psf.fwhm(wave).value, .3)
+    assert psf.alpha == 4.765
+    cmds['!INST.ao_file'] = str(second)
+    np.testing.assert_allclose(psf.fwhm(wave).value, .6)
+    table['fwhm'] /= 3
+    table.write(second, format='ascii', overwrite=True)
+    np.testing.assert_allclose(psf.fwhm(wave).value, .2)
+    psf.meta['alpha'] = 3.
+    assert psf.alpha == 3.
