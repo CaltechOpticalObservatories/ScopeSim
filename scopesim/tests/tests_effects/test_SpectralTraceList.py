@@ -6,6 +6,7 @@ from unittest.mock import patch
 import numpy as np
 from astropy import units as u
 from astropy.io import fits
+from astropy.table import Table
 
 
 from scopesim.effects.spectral_trace_list import SpectralTraceList, \
@@ -137,6 +138,49 @@ def _echelle_cmds():
 
 
 class TestEchelleSpectralTraceList:
+    @pytest.mark.parametrize('angle', [-25, 0, 25])
+    def test_centers_full_fsr_and_keeps_translated_detector_intersections(self, tmp_path, angle):
+        params_file = tmp_path / 'echelle_trace_parameters.dat'
+        _write_echelle_trace_params(params_file, detector_angle=angle)
+        params = Table.read(params_file, format='ascii')
+        for key, value in {'m0': 62, 'n': 6, 'min_wave': 960, 'max_wave': 1340, 'n_disp': 2048, 'n_xdisp': 1024, 'disp_freq': 24., 'xdisp_freq': 350.}.items():
+            params[key][0] = value
+        params['xbeta_center'] = [10.9]
+        params.write(params_file, format='ascii', overwrite=True)
+        effect = EchelleSpectralTraceList(cmds=_echelle_cmds(), filename=str(params_file), wave_colname='wavelength', s_colname='s')
+        model = effect._spectrographs['b']
+        nx, ny = model.detector.n_pix_x, model.detector.n_pix_y
+        bounds = []
+        raw_grid = np.linspace(-2*nx, 3*nx, 50001)
+        for order, edges in zip(model.orders, model.edge_wave(fsr=True)):
+            wave = np.linspace(edges[0], edges[1], 4*nx + 1)
+            x, y = model._detector_pixels(wave, order)
+            bounds.append([x.min(), x.max(), y.min(), y.max()])
+            # Translation changes placement, not dispersion or slit length.
+            xrot, yrot = model._rotated_detector_pixels(wave, order)
+            np.testing.assert_allclose(np.diff(x), np.diff(xrot), atol=1e-9, rtol=0)
+            np.testing.assert_allclose(np.diff(y), np.diff(yrot), atol=1e-9, rtol=0)
+            slit_length = np.hypot(x[2] - x[0], y[2] - y[0])
+            np.testing.assert_allclose(slit_length, model._slit_offset_pix[2] - model._slit_offset_pix[0], atol=1e-9, rtol=0)
+
+            # A deliberately oversized wavelength search independently checks
+            # that the translated clipping search has not lost either edge.
+            wave = model.x_pixel_to_wavelength(raw_grid, order)
+            x, y = model._detector_pixels(wave, order)
+            inside = np.any((x >= 0) & (x <= nx) & (y >= 0) & (y <= ny), axis=0)
+            trace_id = f'b_{order}'
+            if not inside.any():
+                assert trace_id not in effect.spectral_traces
+                continue
+            trace = effect.spectral_traces[trace_id]
+            actual = model.wavelength_to_x_pixel(u.Quantity(trace.table['wavelength']), order).value
+            expected = raw_grid[inside][[0, -1]]
+            # The generator locates each edge on a roughly one-pixel grid.
+            np.testing.assert_allclose([actual.min(), actual.max()], expected, atol=3, rtol=0)
+        bounds = np.array(bounds)
+        envelope_center = [(bounds[:, 0].min() + bounds[:, 1].max())/2, (bounds[:, 2].min() + bounds[:, 3].max())/2]
+        np.testing.assert_allclose(envelope_center, [nx/2, ny/2], atol=.01, rtol=0)
+
     def test_does_not_write_generated_hdulist_by_default(self, tmp_path):
         params_file = tmp_path / "echelle_trace_parameters.dat"
         _write_echelle_trace_params(params_file)
