@@ -648,6 +648,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
         hdul[0].header["EDATA"] = 2
 
         trace_ids, ap_ids, im_ids = [], [], []
+        self._spectrographs = {}
         for row in trace_params.table:
             prefix = row["prefix"]
             min_order = row['m0'] - row['n'] + 1
@@ -712,6 +713,9 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 ).to_value(u.deg)
             cang = np.cos(np.deg2rad(detector_angle))
             sang = np.sin(np.deg2rad(detector_angle))
+            ss._detector_cos, ss._detector_sin = cang, sang
+            ss._slit_offset_pix = slit_offset_pix
+            self._spectrographs[prefix] = ss
             detector_x_padding = max(
                 0.0,
                 (
@@ -727,17 +731,6 @@ class EchelleSpectralTraceList(SpectralTraceList):
             raw_x_min = 0.5 - detector_x_padding - slit_x_padding
             raw_x_max = disp_npix - 0.5 + detector_x_padding + slit_x_padding
 
-            def raw_detector_pixels(wave, order):
-                x = ss.wavelength_to_x_pixel(wave, order)
-                y = ss.wavelength_to_y_pixel(wave)
-                x = u.Quantity(x, copy=False).to_value(
-                    u.dimensionless_unscaled)
-                y = u.Quantity(y, copy=False).to_value(
-                    u.dimensionless_unscaled)
-                xpix = np.broadcast_to(x, (slit_offset_pix.size, wave.size))
-                ypix = y[None, :] + slit_offset_pix[:, None]
-                return xpix, ypix
-
             rotated_x_min = rotated_y_min = np.inf
             rotated_x_max = rotated_y_max = -np.inf
             # The analytical echelle layout is relative, not yet detector
@@ -749,27 +742,17 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 raw_x = np.linspace(
                     raw_x_min, raw_x_max, num=max(disp_npix, 2))
                 wave = ss.x_pixel_to_wavelength(raw_x, order)
-                xpix, ypix = raw_detector_pixels(wave, order)
-                xrot = cang * xpix - sang * ypix
-                yrot = sang * xpix + cang * ypix
+                xrot, yrot = ss._rotated_detector_pixels(wave, order)
                 rotated_x_min = min(rotated_x_min, float(np.nanmin(xrot)))
                 rotated_x_max = max(rotated_x_max, float(np.nanmax(xrot)))
                 rotated_y_min = min(rotated_y_min, float(np.nanmin(yrot)))
                 rotated_y_max = max(rotated_y_max, float(np.nanmax(yrot)))
             rotated_x_center = rotated_x_min + (rotated_x_max - rotated_x_min) / 2
             rotated_y_center = rotated_y_min + (rotated_y_max - rotated_y_min) / 2
-
-            def rotated_detector_pixels(wave, order):
-                xpix, ypix = raw_detector_pixels(wave, order)
-                xrot = cang * xpix - sang * ypix
-                yrot = sang * xpix + cang * ypix
-                return (
-                    xrot - rotated_x_center + disp_npix / 2,
-                    yrot - rotated_y_center + xdisp_npix / 2,
-                )
+            ss._detector_center = (rotated_x_center, rotated_y_center)
 
             def on_detector(wave, order):
-                xpix, ypix = rotated_detector_pixels(wave, order)
+                xpix, ypix = ss._detector_pixels(wave, order)
                 return (
                     (xpix >= 0)
                     & (xpix <= disp_npix)
@@ -808,7 +791,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
                     continue
                 s = np.tile(slit_pos, wave.size).reshape(wave.size, slit_pos.size).T.ravel()
                 w = np.tile(wave, slit_offset_pix.size)
-                xpix, ypix = rotated_detector_pixels(wave, order)
+                xpix, ypix = ss._detector_pixels(wave, order)
                 xval = (xpix.ravel() - disp_npix / 2) * pix_size.to(u.mm)
                 yval = (ypix.ravel() - xdisp_npix / 2) * pix_size.to(u.mm)
 

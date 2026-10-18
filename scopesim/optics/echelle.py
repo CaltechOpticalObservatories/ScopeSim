@@ -563,17 +563,13 @@ class SpectrographSetup:
     def edge_wave(self, fsr=True):
         """
         :param fsr: True to return the FSR edge wavelengths, False to return the detector edges
-        :return: wavelengths at the edges of the detector (or FSR) for each order, always include central pixel wavelength
+        :return: the two endpoint wavelengths for each order
         """
-        pix = np.array([0, self.detector.n_pix_x // 2, self.detector.n_pix_x-1]) + .5
-        fiducial_waves = self.x_pixel_to_wavelength(pix, self.orders[:, None])
-        if not fsr:
-            return fiducial_waves[:, [0, -1]]
-
-        central_fsr = fiducial_waves[:, 1] / self.orders
-        fsr_edges = (u.Quantity([-central_fsr / 2, central_fsr / 2]) + fiducial_waves[:, 1]).T
-
-        return fsr_edges
+        if fsr:
+            center = self.x_pixel_to_wavelength(self.detector.n_pix_x/2, self.orders)
+            return center[:, None] * (1 + np.array([-.5, .5])/self.orders[:, None])
+        pixels = np.array([.5, self.detector.n_pix_x - .5])
+        return self.x_pixel_to_wavelength(pixels, self.orders[:, None])
 
     def central_wave(self, order):
         """
@@ -620,6 +616,22 @@ class SpectrographSetup:
 
     def wavelength_to_y_pixel(self, wave):
         return self.y_pixel_for_beta(self.cross_disperser.beta(wave, 1))
+
+    def _rotated_detector_pixels(self, wave, order):
+        x = self.wavelength_to_x_pixel(wave, order).to_value(u.dimensionless_unscaled)
+        y = self.wavelength_to_y_pixel(wave).to_value(u.dimensionless_unscaled)
+        xpix = np.broadcast_to(x, (self._slit_offset_pix.size, wave.size))
+        ypix = y[None, :] + self._slit_offset_pix[:, None]
+        return self._detector_cos*xpix - self._detector_sin*ypix, self._detector_sin*xpix + self._detector_cos*ypix
+
+    def _detector_pixels(self, wave, order):
+        """The trace generator's placed coordinates for all configured slit nodes.
+
+        Unlike the clipped trace table, this mapping can also inspect the full
+        FSR outside the detector. It uses the same rotation and placement.
+        """
+        x, y = self._rotated_detector_pixels(wave, order)
+        return x - self._detector_center[0] + self.detector.n_pix_x/2, y - self._detector_center[1] + self.detector.n_pix_y/2
 
     def y_pixel_to_wavelength(self, pixel, m):
         """
