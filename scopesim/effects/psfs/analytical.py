@@ -377,6 +377,30 @@ class MoffatPSF(AnalyticalPSF):
 
     def _apply_convolution(self, obj):
         if isinstance(obj, FieldOfView3D) and obj.hdu is None:
+            if obj.trace_id is not None:
+                # Finite cross-slit cells carry a uniform illumination density.
+                # Resolve the effective PSF before shearing those cells in
+                # wavelength. Refine only as needed to resolve this effective PSF.
+                wave = self._sample_kernel_wavelengths(obj.waveset)
+                width = (obj.meta['eta_max'] - obj.meta['eta_min']).to_value(u.arcsec)
+                fwhm = self.fwhm(wave).to_value(u.arcsec).min()
+                obj.meta['effective_psf_fwhm'] = fwhm*u.arcsec
+                step = fwhm / 10
+                rows = max(obj.header['NAXIS2'], int(np.ceil(width / step)))
+                obj.header['NAXIS2'] = rows
+                obj.header['CDELT2'] = np.copysign(width / rows / 3600, obj.header['CDELT2'])
+                obj.header['CRPIX2'] = (rows + 1) / 2
+                obj.header['CRVAL2'] = ((obj.meta['eta_min'] + obj.meta['eta_max']) / 2).to_value(u.deg)
+                length = (obj.meta['xi_max'] - obj.meta['xi_min']).to_value(u.arcsec)
+                columns = max(obj.header['NAXIS1'], int(np.ceil(6*length/fwhm)))
+                obj.header['NAXIS1'] = columns
+                obj.header['CDELT1'] = np.copysign(length/columns/3600, obj.header['CDELT1'])
+                obj.header['CRPIX1'] = (columns+1)/2
+                obj.header['CRVAL1'] = ((obj.meta['xi_min'] + obj.meta['xi_max'])/2).to_value(u.deg)
+                obj.meta['pixel_area'] = None
+                obj._volume = None
+                if 'slit_spectral_width' in obj.meta:
+                    obj.meta['slit_spectral_width'] *= min(1., fwhm / width)
             obj.hdu = obj.make_hdu(spatial_psf=self)
         else:
             super()._apply_convolution(obj)

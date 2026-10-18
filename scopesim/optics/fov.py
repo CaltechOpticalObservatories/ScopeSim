@@ -935,6 +935,8 @@ class FieldOfView3D(FieldOfView):
     def cube_waveset(self):
         wave_unit = u.Unit(from_currsys('!SIM.spectral.wave_unit', self.cmds))
         step = from_currsys('!SIM.spectral.spectral_bin_width', self.cmds)
+        if 'slit_spectral_width' in self.meta:
+            step = min(step, self.meta['slit_spectral_width'].to_value(wave_unit)/20)
         start, stop = self.meta['wave_min'].value, self.meta['wave_max'].value
         padding = int(np.ceil(self.meta['spectral_padding'].to_value(wave_unit)/step))
         return (start + np.arange(-padding, int((stop - start)/step) + padding)*step)*wave_unit

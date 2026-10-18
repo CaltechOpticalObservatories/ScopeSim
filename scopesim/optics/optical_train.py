@@ -432,16 +432,7 @@ class OpticalTrain:
 
                 x_mm = trace.xilam2x(xi_flat[in_fov], wave_flat[in_fov])
                 y_mm = trace.xilam2y(xi_flat[in_fov], wave_flat[in_fov])
-                subimage_x = (
-                    (x_mm - x_grid_mm[0])
-                    / (x_grid_mm[-1] - x_grid_mm[0])
-                    * (len(x_grid_mm) - 1)
-                )
-                subimage_y = (
-                    (y_mm - y_grid_mm[0])
-                    / (y_grid_mm[-1] - y_grid_mm[0])
-                    * (len(y_grid_mm) - 1)
-                )
+                subimage_x, subimage_y = subimage_wcs.all_world2pix(x_mm, y_mm, 0)
 
                 subimage_shape = np.array(
                     [len(x_grid_mm), len(y_grid_mm)])
