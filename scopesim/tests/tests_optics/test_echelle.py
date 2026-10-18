@@ -28,6 +28,16 @@ def test_asymmetric_pupil_slit_dispersion_and_anamorphism():
     wavelengths = center * np.array([.99, 1., 1.01])
     widths = instrument.projected_slit_width(wavelengths, 65, .7*u.arcsec)
     assert np.all(np.diff(widths) > 0*u.pixel)
+    half_angle = (.35*u.arcsec * instrument.entrance_slit_scale / instrument.collimator1_focal_length).value * u.rad
+    beta_low = np.arcsin(65*wavelengths/instrument.grating.d - np.sin(instrument.grating.alpha + half_angle))
+    beta_high = np.arcsin(65*wavelengths/instrument.grating.d - np.sin(instrument.grating.alpha - half_angle))
+    edge_width = abs(instrument.x_pixel_for_beta(beta_high) - instrument.x_pixel_for_beta(beta_low))
+    # Independent finite slit edges retain the same anamorphism as dispersion.
+    np.testing.assert_allclose(widths.to_value(u.pixel), edge_width.value, rtol=2e-7)
+    step = center*1e-7
+    dispersion = (instrument.wavelength_to_x_pixel(wavelengths+step, 65)-instrument.wavelength_to_x_pixel(wavelengths-step, 65))/(2*step)
+    measured_delta = widths.to_value(u.pixel)/dispersion
+    np.testing.assert_allclose(measured_delta.to_value(u.nm), abs(derivative*.7*u.arcsec).to_value(u.nm), rtol=2e-7)
     eta = .0825*u.arcsec
     dalpha = (eta * instrument.entrance_slit_scale / instrument.collimator1_focal_length).to_value(u.dimensionless_unscaled) * u.rad
     exact = instrument.grating.d / 65 * (np.sin(instrument.grating.alpha) - np.sin(instrument.grating.alpha + dalpha))
