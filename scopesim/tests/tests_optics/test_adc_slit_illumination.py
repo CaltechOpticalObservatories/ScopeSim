@@ -164,3 +164,27 @@ def test_observe_applies_shift_before_slit_through_wavelength_throughput(interve
         train.observe(source, update=False)
     for image in images[1:]:
         np.testing.assert_allclose(images[0], image, rtol=2e-6, atol=1e-12)
+
+
+@pytest.mark.parametrize('method', ['roll', 'map_coords'])
+@pytest.mark.parametrize('fraction', [1e-12, .04, .54, .56])
+def test_final_padding_uses_applied_displacement_but_source_support_is_conservative(method, fraction):
+    fov = physical_fov(.7)
+    cell_y = fov.header['CDELT2']*3600
+    shift = Displacement(1e-14, fraction*cell_y, method=method)
+    shifts = shift.get_shifts(fov)
+    source_support = shift._padded_header(fov.header, shifts)
+    final_support = shift._padded_header(fov.header, shifts, rounded=True)
+    assert source_support['NAXIS2'] > fov.header['NAXIS2']
+    assert final_support['NAXIS1'] == fov.header['NAXIS1']
+    applied = np.round(fraction, 1)
+    if method == 'roll':
+        applied = np.round(np.float32(applied))
+    padding = int(np.ceil(abs(applied))) + (4 if method == 'map_coords' else 0) if applied else 0
+    assert final_support['NAXIS2'] == fov.header['NAXIS2'] + 2*padding
+    if applied == 0:
+        psf = MoffatPSF(alpha=4.765, fwhm=.7)
+        source = Source(x=[.1], y=[.2], ref=[0], weight=[1.], spectra=[SourceSpectrum(ConstFlux1D, amplitude=1*PHOTLAM)])
+        actual = render(fov, source, psf, [shift])
+        expected = render(physical_fov(.7), source, psf, [])
+        np.testing.assert_array_equal(actual, expected)

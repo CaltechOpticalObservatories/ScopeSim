@@ -1048,7 +1048,9 @@ class FieldOfView3D(FieldOfView):
             padded = copy(self)
             padded.header = self.header.copy()
             for effect, displacement in shifts:
-                padded.header = effect._padded_header(padded.header, displacement)
+                # This is the final PSF grid. Earlier source selection keeps
+                # conservative support because its coarser grid can still change.
+                padded.header = effect._padded_header(padded.header, displacement, rounded=True)
             padded.hdu = padded.make_hdu(spatial_psf=spatial_psf)
             for effect, displacement in shifts:
                 effect.apply_to(padded, _shifts=displacement)

@@ -87,13 +87,17 @@ class ShiftFoV3D(Effect):
         wave = _cube_wavelengths(obj)
         return dx(wave), dy(wave)
 
-    def _padded_header(self, header, shifts):
+    def _padded_header(self, header, shifts, rounded=False):
         """Spatial support needed before applying this displacement."""
         header = header.copy()
         # Cubic interpolation needs neighboring samples as well as the shift.
         guard = 0 if self.meta['method'] == 'roll' else 4
         for axis, displacement in enumerate(shifts, start=1):
             cells = (displacement/(abs(header[f'CDELT{axis}'])*u.deg)).decompose().value
+            if rounded:
+                cells = np.round(cells, 1)
+                if self.meta['method'] == 'roll':
+                    cells = np.round(np.asarray(cells, dtype=np.float32))
             padding = int(np.ceil(np.max(np.abs(cells)))) + guard if np.any(cells) else 0
             header[f'NAXIS{axis}'] += 2*padding
             header[f'CRPIX{axis}'] += padding
@@ -184,6 +188,8 @@ class ShiftFoV3D(Effect):
         # along wavelength or filtering the same profile thousands of times.
         shifted = data
         for axis, displacement, length in ((2, dx, nx), (1, dy, ny)):
+            if not np.any(displacement):
+                continue
             out = np.empty(data.shape, dtype=float)
             for offset in np.unique(displacement):
                 operator = _spatial_shift_operator(length, float(offset), order)
