@@ -24,7 +24,8 @@ from .fov import FieldOfView3D
 from ..commands.user_commands import UserCommands
 from ..detector import DetectorManager
 from ..effects import ExtraFitsKeywords, SelectorWheel, MoffatPSF, TERCurve, SpectralEfficiency, EchelleSpectralEfficiency, SpectralTraceList
-from ..effects.ter_curves import FilterWheelBase, TaperedQuantumEfficiency
+from ..effects.ter_curves import DichroicTree, FilterWheelBase, TaperedQuantumEfficiency
+from ..effects.atmo_dispersion import ShiftFoV3D
 from ..utils import from_currsys, top_level_catch, get_logger
 from ..source.source_templates import empty_sky
 from .. import __version__
@@ -573,6 +574,10 @@ class OpticalTrain:
             fovs = self.fov_manager.fovs
             nobar = len(fovs) <= 1
             for fov in tqdm(fovs, desc=" FOVs", position=0, disable=nobar):
+                # FOVManager can reuse a FOV whose previous observation is
+                # already mapped to detector coordinates. Prepare new sky
+                # illumination from its physical header, not that old HDU.
+                fov.hdu = None
                 foveffs = []
                 for effect in self.optics_manager.fov_effects:
                     if isinstance(effect, SelectorWheel):
@@ -596,16 +601,32 @@ class OpticalTrain:
                 if defer_render:
                     psf_index = psf_indices[0]
                     defer_render = all(isinstance(effect, (TERCurve, SpectralEfficiency, EchelleSpectralEfficiency, TaperedQuantumEfficiency)) for effect in foveffs[:psf_index])
+                spatial_shifts = []
                 if defer_render:
+                    for effect in foveffs[psf_index + 1:]:
+                        if isinstance(effect, ShiftFoV3D):
+                            spatial_shifts.append(effect)
+                        elif not isinstance(effect, (TERCurve, DichroicTree, SpectralEfficiency, EchelleSpectralEfficiency, TaperedQuantumEfficiency)):
+                            break
+                    # Wavelength-only multipliers commute with a displacement
+                    # within each spectral plane; stop before other spatial effects.
                     point_sources = not (source.image_fields or source.cube_fields)
-                    fov.extract_from(source, spatial_header=foveffs[psf_index].padded_header(fov, point_sources=point_sources), _spectral_wavesets=spectral_wavesets)
+                    spatial_header = foveffs[psf_index].padded_header(fov, point_sources=point_sources)
+                    for effect in spatial_shifts:
+                        spatial_header = effect._padded_header(spatial_header, effect.get_shifts(fov))
+                    fov.extract_from(source, spatial_header=spatial_header, _spectral_wavesets=spectral_wavesets)
                 else:
                     fov.extract_from(source, _spectral_wavesets=spectral_wavesets)
                     fov.view()
                 nobar = len(foveffs) <= 1
                 for effect in tqdm(foveffs, disable=nobar,
                                    desc=" FOV effects", position=1):#, leave=False):
-                    fov = effect.apply_to(fov)
+                    if effect in spatial_shifts:
+                        continue  # Applied to incoming illumination at the PSF stage.
+                    if defer_render and effect is foveffs[psf_index] and spatial_shifts:
+                        effect._apply_convolution(fov, spatial_shifts=spatial_shifts)
+                    else:
+                        fov = effect.apply_to(fov)
 
                 if fov.hdu is None:
                     logger.info("  Skipping empty FOV")

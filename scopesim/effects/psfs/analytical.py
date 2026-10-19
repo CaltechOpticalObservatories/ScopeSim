@@ -377,7 +377,7 @@ class MoffatPSF(AnalyticalPSF):
         gammas = self.fwhm2gamma(self.fwhm(wave), self.alpha).to_value(u.arcsec)
         return moffat_cell_integrals(xx, yy, dx, dy, gammas, self.alpha)
 
-    def _apply_convolution(self, obj):
+    def _apply_convolution(self, obj, spatial_shifts=()):
         if isinstance(obj, FieldOfView3D) and obj.hdu is None:
             if obj.trace_id is not None:
                 # Finite cross-slit cells carry a uniform illumination density.
@@ -403,7 +403,7 @@ class MoffatPSF(AnalyticalPSF):
                 obj._volume = None
                 if 'slit_spectral_width' in obj.meta:
                     obj.meta['slit_spectral_width'] *= min(1., fwhm / width)
-            obj.hdu = obj.make_hdu(spatial_psf=self)
+            obj.hdu = obj.make_hdu(spatial_psf=self, spatial_shifts=spatial_shifts)
         else:
             super()._apply_convolution(obj)
 

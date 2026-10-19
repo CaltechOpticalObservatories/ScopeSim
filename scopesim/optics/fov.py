@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Defines FieldOfView class."""
 
+from copy import copy
 from warnings import warn
 from itertools import chain
 from collections.abc import Iterable, Generator
@@ -1031,7 +1032,7 @@ class FieldOfView3D(FieldOfView):
             spec = average_spectrum(field.spectrum, fov_waveset)
             yield spec[:, None, None].value
 
-    def make_hdu(self, spatial_psf=None):
+    def make_hdu(self, spatial_psf=None, spatial_shifts=()):
         """Render spectral surface-brightness density in ph/s/um/arcsec2.
 
         Native spectra are integrated into the cube wavelength cells. Point
@@ -1039,6 +1040,25 @@ class FieldOfView3D(FieldOfView):
         convolved before the physical aperture is clipped. Collecting area is
         applied here. Slit and detector cell integrals are applied by the trace.
         """
+        if spatial_shifts:
+            # Keep incoming illumination outside the aperture until every
+            # atmospheric displacement is applied. The physical slit metadata
+            # and cell sizes stay unchanged; only temporary spatial support grows.
+            shifts = [(effect, effect.get_shifts(self)) for effect in spatial_shifts]
+            padded = copy(self)
+            padded.header = self.header.copy()
+            for effect, displacement in shifts:
+                padded.header = effect._padded_header(padded.header, displacement)
+            padded.hdu = padded.make_hdu(spatial_psf=spatial_psf)
+            for effect, displacement in shifts:
+                effect.apply_to(padded, _shifts=displacement)
+            px = (padded.header['NAXIS1'] - self.header['NAXIS1'])//2
+            py = (padded.header['NAXIS2'] - self.header['NAXIS2'])//2
+            header = padded.hdu.header.copy()
+            header.update(CRPIX1=self.header['CRPIX1'], CRPIX2=self.header['CRPIX2'])
+            data = padded.hdu.data[:, py:py + self.header['NAXIS2'], px:px + self.header['NAXIS1']].copy()
+            return fits.ImageHDU(data=data, header=header)
+
         # 1. Make waveset and canvas cube (area, bin_width are applied at end)
         # TODO: Why is this not self.waveset? What's different?
         # -> For non-cube input but cube output (e.g. 2D image in spec mode),

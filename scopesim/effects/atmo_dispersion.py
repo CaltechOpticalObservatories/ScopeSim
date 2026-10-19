@@ -62,15 +62,17 @@ class ShiftFoV3D(Effect):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.meta.setdefault("method", None)
 
-        if self.meta.get("method", None) not in [None, "roll", "map_coords"]:
+        if self.meta["method"] not in [None, "roll", "map_coords"]:
             raise ValueError("Method must be 'roll' or 'map_coords' if provided.")
 
     def get_shifts(self, obj):
         """
         Shifts calculated from obj (FoV3D) properties or from init data.
         Overwrite this function when sub-classing.
-        Should return interp spline values for dx and dy at data wavelength bins in arcsec
+        Return dx and dy at cube wavelength bins in arcsec. The FOV can be
+        unrendered when its incoming illumination needs spatial padding.
         """
         if self.data is not None:
             if isinstance(self.data, Table):
@@ -82,14 +84,24 @@ class ShiftFoV3D(Effect):
             logger.warning("No shifts as a function of wavelength provided in init.")
             raise NotImplementedError
 
-        swcs = WCS(obj.hdu.header).spectral
-        with u.set_enabled_equivalencies(u.spectral()):
-            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
-            return dx(wave), dy(wave)
+        wave = _cube_wavelengths(obj)
+        return dx(wave), dy(wave)
+
+    def _padded_header(self, header, shifts):
+        """Spatial support needed before applying this displacement."""
+        header = header.copy()
+        # Cubic interpolation needs neighboring samples as well as the shift.
+        guard = 0 if self.meta['method'] == 'roll' else 4
+        for axis, displacement in enumerate(shifts, start=1):
+            cells = (displacement/(abs(header[f'CDELT{axis}'])*u.deg)).decompose().value
+            padding = int(np.ceil(np.max(np.abs(cells)))) + guard if np.any(cells) else 0
+            header[f'NAXIS{axis}'] += 2*padding
+            header[f'CRPIX{axis}'] += padding
+        return header
 
     def apply_to(self, obj, **kwargs):
         if isinstance(obj, FieldOfView3D) and obj.hdu is not None and obj.hdu.header['NAXIS'] == 3:
-            dxs, dys = self.get_shifts(obj)
+            dxs, dys = kwargs['_shifts'] if '_shifts' in kwargs else self.get_shifts(obj)
 
             # get bin widths in spatial axis and divide to get dxs and dys in steps
             dxs = np.round((dxs / (obj.hdu.header["CDELT1"]*u.deg)).decompose().value, 1)
@@ -243,7 +255,7 @@ class ADShift(ShiftFoV3D):
     def get_shifts(self, obj: FieldOfView3D):
         shift_arcsec = self._get_shifts_arcsec(obj)
 
-        pos_angle_y = field_rotation_pa_y(obj.hdu.header)
+        pos_angle_y = field_rotation_pa_y(obj.header if obj.hdu is None else obj.hdu.header)
         par_angle = get_parallactic_angle(self.target, self.location, self.time)
         theta = np.deg2rad(par_angle - pos_angle_y) # angle of zenith direction from +y-axis counter-clockwise
         logger.info(f'Direction of zenith, measured counter-clockwise from +y axis is {int(par_angle - pos_angle_y)}.')
@@ -256,9 +268,7 @@ class ADShift(ShiftFoV3D):
         wave_ref = from_currsys(self.meta["wave_ref_um"], self.cmds) * u.um
         n_ref = self.n(wave_ref)
 
-        swcs = WCS(obj.hdu.header).spectral
-        with u.set_enabled_equivalencies(u.spectral()):
-            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
+        wave = _cube_wavelengths(obj)
         n_wave = self.n(wave)
         delta_n = n_wave - n_ref
         return 206265 * delta_n * np.tan(self.zenith_angle.to(u.rad).value) * u.arcsec
@@ -316,9 +326,7 @@ class ADCShift(ShiftFoV3D):
         """
         Computes an AD correction residual for a given zenith angle.
         """
-        swcs = WCS(obj.hdu.header).spectral
-        with u.set_enabled_equivalencies(u.spectral()):
-            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
+        wave = _cube_wavelengths(obj)
         shifts = np.zeros_like(wave.value) * u.arcsec
 
         if self.data is not None and isinstance(self.data, Table):
@@ -361,7 +369,7 @@ class ADCShift(ShiftFoV3D):
             shifts += ad_shift
             ad.zenith_angle = self.zenith_angle
 
-        pos_angle_y = field_rotation_pa_y(obj.hdu.header)
+        pos_angle_y = field_rotation_pa_y(obj.header if obj.hdu is None else obj.hdu.header)
         par_angle = get_parallactic_angle(self.target, self.location, self.time)
         theta = np.deg2rad(par_angle - pos_angle_y) # angle of zenith direction from +y-axis counter-clockwise
         logger.info(f'Direction of zenith, measured counter-clockwise from +y axis is {int(par_angle - pos_angle_y)}.')
@@ -408,12 +416,20 @@ class ADCShift(ShiftFoV3D):
 
 
 ########################### AD utils ###############################
+def _cube_wavelengths(obj):
+    if obj.hdu is None:
+        return obj.cube_waveset.to(u.um)
+    swcs = WCS(obj.hdu.header).spectral
+    with u.set_enabled_equivalencies(u.spectral()):
+        return swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])).to(u.um)
+
+
 def field_rotation_pa_y(header) -> float:
     """
     Returns PA of detector +Y axis on sky, in deg (N->E convention).
     0 deg = Y points north, 90 deg = Y points east
     """
-    w = WCS(header).dropaxis(-1)
+    w = WCS(header, naxis=2)
     # local anchor (image center)
     x0, y0 = w.wcs.crpix
     lon0, lat0 = w.pixel_to_world(x0, y0)
