@@ -212,6 +212,7 @@ def _effect_from_spec(spec, cmds=None):
 
 
 def _detector_qe_from_spec(spec, filename=None, cmds=None):
+    spec = from_currsys(spec, cmds)
     if spec is not None:
         if isinstance(spec, str):
             return SpectralQuantumEfficiency(filename=spec, cmds=cmds)

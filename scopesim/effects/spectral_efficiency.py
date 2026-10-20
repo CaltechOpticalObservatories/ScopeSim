@@ -11,7 +11,7 @@ from astropy.table import Table
 
 from .effects import Effect
 from .ter_curves import TERCurve
-from ..utils import figure_factory, get_logger, check_keys
+from ..utils import figure_factory, get_logger, check_keys, from_currsys
 from .data_container import DataContainer
 from ..optics import echelle
 
@@ -144,7 +144,7 @@ class EchelleSpectralEfficiency(Effect):
         self.efficiency_generator = self._generate_efficiency_curve_func()
 
     def _generate_efficiency_curve_func(self) -> Callable:
-        trace_params = self.table
+        trace_params = from_currsys(self.table, self.cmds)
         spectrographs = {}
         for row in trace_params:
             prefix = row["prefix"]  # note trance ids are assumed to be prefix_{order}

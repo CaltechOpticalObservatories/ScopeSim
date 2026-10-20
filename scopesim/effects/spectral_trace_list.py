@@ -704,10 +704,12 @@ class EchelleSpectralTraceList(SpectralTraceList):
 
         trace_param_filename = kwargs.pop("filename")
         self.physical_slit_dispersion = kwargs.pop("physical_slit_dispersion", False)
+        self.slit_samples = kwargs.pop("slit_samples", 3)
         save_generated_hdulist = kwargs.pop("save_generated_hdulist", False)
         generated_hdulist_filename = kwargs.pop(
             "generated_hdulist_filename", "analytical_echelle_traces.fits")
         trace_params = DataContainer(filename=trace_param_filename)
+        trace_params.table = from_currsys(trace_params.table, self.cmds)
         hdulist = self._generate_trace_hdulist(trace_params)
         if save_generated_hdulist:
             output_path = Path(generated_hdulist_filename).expanduser()
@@ -778,7 +780,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
             )
 
             slit_edge = (row['slitlength'] / 2) * u.Unit(trace_params.meta["slitlength_unit"])
-            slit_pos = np.linspace(-slit_edge, slit_edge, num=3)
+            slit_pos = np.linspace(-slit_edge, slit_edge, num=self.slit_samples)
             if "plate_scale" in trace_params.table.colnames:
                 plate_scale = row["plate_scale"] * u.Unit(
                     trace_params.meta["plate_scale_unit"])
