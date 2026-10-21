@@ -255,6 +255,9 @@ class MosaicOutputFormat(MosaicSpectralTraceList):
 
         image = det.data
         detwcs = WCS(det.header, key="D")
+        # ExposureIntegration has already recorded the actual accumulated time.
+        # New table HDUs need those cards, but not the detector-image WCS.
+        exposure_header = fits.Header(card for card in det.header.cards if card.keyword in ("DIT", "NDIT", "EXPTIME"))
 
         output_format = from_currsys(self.meta["format"], self.cmds)
 
@@ -309,6 +312,7 @@ class MosaicOutputFormat(MosaicSpectralTraceList):
         else:
             logger.error("Unknown output format: %s", output_format)
 
+        det.header.update(exposure_header)
         return det
 
 

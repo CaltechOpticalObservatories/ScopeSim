@@ -12,6 +12,7 @@ from scopesim.effects.mosaic_trace_list import (Transform1D,
                                                 MosaicSpectralTraceList,
                                                 MosaicSpectralTrace,
                                                 MosaicOutputFormat)
+from scopesim.effects.electronic.exposure import ExposureIntegration
 from scopesim.optics.image_plane_utils import header_from_list_of_xy
 from scopesim.detector import Detector
 
@@ -201,3 +202,25 @@ class TestImage:
 
     def test_image_detector_has_image(self, apply_image):
         assert isinstance(apply_image._hdu, fits.ImageHDU)
+
+
+@pytest.mark.usefixtures("patch_mock_path_mosaic")
+@pytest.mark.parametrize("output_format", ["collapse1d", "table", "image"])
+def test_output_format_preserves_accumulated_counts_and_exposure(output_format):
+    header = header_from_list_of_xy([-25, 25], [-2048, 2048], 1, "D")
+    detector = Detector(header)
+    rows = [2023, 2031, 2039, 2047, 2055, 2063, 2071]
+    detector.data[rows, :] = 1
+    rate_sum = detector.data.sum()
+    ExposureIntegration(dit=17., ndit=3).apply_to(detector)
+    output = MosaicOutputFormat(filename="TRACE_MOS-LR-J.fits", format=output_format).apply_to(detector)
+    assert output.header["DIT"] == 17.
+    assert output.header["NDIT"] == 3
+    assert output.header["EXPTIME"] == 51.
+    if output_format == "image":
+        counts = output.data.sum()
+        assert "CTYPE1D" in output.header
+    else:
+        counts = output.data["spectrum"].sum()
+        assert "CTYPE1D" not in output.header
+    assert counts == pytest.approx(rate_sum * 51.)
