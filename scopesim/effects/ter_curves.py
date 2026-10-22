@@ -4,6 +4,7 @@
 import warnings
 from typing import ClassVar
 from collections.abc import Collection, Iterable
+from numbers import Integral
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy import integrate
@@ -1564,6 +1565,7 @@ class DichroicTree(Effect):
     ```
 
     This effect creates a volume of FoVs, one for each row in the dichroic tree table.
+    For imaging, pass a Source with its fov context to apply the branch throughput before rendering.
     """
     required_keys = {"tree_filename", "dichroic_names", "filename_format"}
     z_order: ClassVar[tuple[int, ...]] = (117, 217, 617)
@@ -1571,6 +1573,9 @@ class DichroicTree(Effect):
     def __init__(self, cmds=None, **kwargs):
         check_keys(kwargs, self.required_keys, action="error")
         super().__init__(cmds=cmds, **kwargs)
+        if "z_order" in self.meta:
+            z_order = self.meta["z_order"]
+            self.z_order = (int(z_order),) if isinstance(z_order, Integral) else tuple(z_order)
 
         # Load all the dichroic TER curves
         self.dichroics = {}
@@ -1587,7 +1592,7 @@ class DichroicTree(Effect):
         tree = DataContainer(filename=tree_path)
         self.table = tree.table
 
-    def apply_to(self, obj, **kwargs):
+    def apply_to(self, obj, fov=None, **kwargs):
         """
         To the object, loop through each row of the table and apply the dichroics (defined by columns)
         with the corresponding action defined in the table cell.
@@ -1625,9 +1630,11 @@ class DichroicTree(Effect):
             obj.volumes = new_vols
 
         # 2. During observe
-        if isinstance(obj, FieldOfView):
+        if isinstance(obj, FieldOfView) or (isinstance(obj, Source) and fov is not None):
             logger.debug("Executing %s, observe", self.meta['name'])
-            obj_id = obj.meta.get(id_colname, None)
+            branch_fov = obj if isinstance(obj, FieldOfView) else fov
+            obj_id = branch_fov.meta[id_colname]
+            setattr(branch_fov, id_colname, obj_id)
             row = self.table[self.table[id_colname] == obj_id]
 
             if len(row) != 1:

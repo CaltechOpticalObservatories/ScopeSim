@@ -38,8 +38,14 @@ import multiprocessing as mp
 N_PROCESSES = mp.cpu_count() - 1
 USE_MULTIPROCESSING = False
 
-def extract_source(fov, source):
-    fov.extract_from(source)
+def extract_source(fov, source, source_effects=(), spatial_header=None, _spectral_wavesets=None):
+    if source_effects:
+        source = source.make_copy()
+        for effect in source_effects:
+            source = effect.apply_to(source, fov=fov)
+        # Branch filtering changes the spectrum and its native wavelength grid.
+        _spectral_wavesets = None
+    fov.extract_from(source, spatial_header=spatial_header, _spectral_wavesets=_spectral_wavesets)
     return fov
 
 def view_fov(fov, hdu_type):
@@ -535,7 +541,15 @@ class OpticalTrain:
         source = self.prepare_source(source)
 
         # [1D - transmission curves]
-        for effect in self.optics_manager.source_effects:
+        source_effects = self.optics_manager.source_effects
+        branch_effects = []
+        if not self.fov_manager.is_spectroscope:
+            for ii, effect in enumerate(source_effects):
+                if isinstance(effect, (DichroicTree, SelectorWheel)):
+                    # Attenuation and emission downstream of a split belong to each branch.
+                    source_effects, branch_effects = source_effects[:ii], source_effects[ii:]
+                    break
+        for effect in source_effects:
             source = effect.apply_to(source)
 
         # This source is a private copy, after all source effects. FOV extraction
@@ -558,7 +572,7 @@ class OpticalTrain:
 
             with mp.Pool(processes=N_PROCESSES) as pool:
                 fovs = pool.starmap(extract_source,
-                                    zip(fovs, [source] * len(fovs)))
+                                    zip(fovs, [source] * len(fovs), [branch_effects] * len(fovs)))
 
             with mp.Pool(processes=N_PROCESSES) as pool:
                 fovs = pool.starmap(view_fov,
@@ -614,9 +628,9 @@ class OpticalTrain:
                     spatial_header = foveffs[psf_index].padded_header(fov, point_sources=point_sources)
                     for effect in spatial_shifts:
                         spatial_header = effect._padded_header(spatial_header, effect.get_shifts(fov))
-                    fov.extract_from(source, spatial_header=spatial_header, _spectral_wavesets=spectral_wavesets)
+                    extract_source(fov, source, branch_effects, spatial_header=spatial_header, _spectral_wavesets=spectral_wavesets)
                 else:
-                    fov.extract_from(source, _spectral_wavesets=spectral_wavesets)
+                    extract_source(fov, source, branch_effects, _spectral_wavesets=spectral_wavesets)
                     fov.view()
                 nobar = len(foveffs) <= 1
                 for effect in tqdm(foveffs, disable=nobar,
