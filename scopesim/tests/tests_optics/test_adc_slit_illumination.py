@@ -157,7 +157,7 @@ def test_observe_applies_shift_before_slit_through_wavelength_throughput(interve
             effects.append(Displacement(0., displacement, method='roll'))
         train = OpticalTrain()
         train.cmds = fov.cmds
-        train.fov_manager = SimpleNamespace(fovs=[fov])
+        train.fov_manager = SimpleNamespace(fovs=[fov], is_spectroscope=True)
         train.optics_manager = SimpleNamespace(source_effects=[], fov_effects=effects, image_plane_effects=[])
         train.image_planes = [SimpleNamespace(add=lambda hdu, **kwargs: images.append(hdu.data.copy()))]
         train.observe(source, update=False)
