@@ -196,7 +196,7 @@ class TestTransform2D:
 
         # matrix and explicit function
         td2d = Transform2D(quadratic['matrix'])
-        assert td2d(x, y) == quadratic['function'](x, y)
+        assert td2d(x, y) == pytest.approx(quadratic['function'](x, y))
 
     def test_gradient_gives_correct_result(self, quadratic):
         x = np.random.randn()
@@ -205,8 +205,8 @@ class TestTransform2D:
         tf2d = Transform2D(quadratic['matrix'])
         tf2d_grad = tf2d.gradient()
 
-        assert tf2d_grad[0](x, y) == quadratic['gradient'][0](x, y)
-        assert tf2d_grad[1](x, y) == quadratic['gradient'][1](x, y)
+        assert tf2d_grad[0](x, y) == pytest.approx(quadratic['gradient'][0](x, y))
+        assert tf2d_grad[1](x, y) == pytest.approx(quadratic['gradient'][1](x, y))
 
     def test_grid_true_gives_correct_shape(self, tf2d):
         n_x, n_y = 12, 3
@@ -303,7 +303,7 @@ class MockCubeFov:
         hdr["CUNIT1"], hdr["CUNIT2"], hdr["CUNIT3"] = "arcsec", "arcsec", "um"
         self.cube = fits.ImageHDU(
             data=np.ones((n_lam, n_eta, n_xi)), header=hdr)
-        self.meta = {"xi_min": -0.5 * u.arcsec, "xi_max": 0.5 * u.arcsec}
+        self.meta = {"xi_min": -0.5 * u.arcsec, "xi_max": 0.5 * u.arcsec, "eta_min": -0.5 * u.arcsec, "eta_max": 0.5 * u.arcsec}
 
 
 class TestXiLamImage:

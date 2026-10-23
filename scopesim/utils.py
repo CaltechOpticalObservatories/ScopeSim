@@ -610,6 +610,9 @@ def from_currsys(item, cmds=None):
         item.meta = item_meta
 
     if isinstance(item, np.ndarray) and not isinstance(item, u.Quantity):
+        # Numeric calibration arrays cannot contain command references.
+        if item.dtype.kind in "biufc":
+            return item.copy()
         item = np.array([from_currsys(x, cmds) for x in item])
 
     if isinstance(item, list):

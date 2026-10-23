@@ -144,6 +144,8 @@ class MetisLMSSpectralTraceList(SpectralTraceList):
             slicefov.detector_header = obj.detector_header
             slicefov.meta["xi_min"] = obj.meta["xi_min"]
             slicefov.meta["xi_max"] = obj.meta["xi_max"]
+            slicefov.meta["eta_min"] = ymin * u.arcsec
+            slicefov.meta["eta_max"] = ymax * u.arcsec
             slicefov.meta["trace_id"] = sptid
             slicefov.cube = fits.ImageHDU(header=slicewcs.to_header(),
                                           data=slicecube)
@@ -322,6 +324,7 @@ class MetisLMSSpectralTrace(SpectralTrace):
     """SpectralTrace for the METIS LM spectrograph."""
 
     _class_params = {
+        **SpectralTrace._class_params,
         "naxis1": 122,
         "nslice": 28,
         "slicewidth": 0.0207,  # arcsec
@@ -393,7 +396,7 @@ class MetisLMSSpectralTrace(SpectralTrace):
 
         lam0 = from_currsys(self.meta["wavelen"], self.cmds)
         xi0 = 0.
-        ymid = self.xilam2y(xi0, lam0)[0]   # estimate y level of trace
+        ymid = self.xilam2y(xi0, lam0)   # scalar input gives a scalar trace coordinate
         waverange = self.xy2lam(np.array([xmin, xmax]), np.array([ymid, ymid]),
                                 grid=False)
 
