@@ -1,5 +1,5 @@
 from typing import ClassVar, Any
-from functools import partial
+from functools import partial, lru_cache
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord, EarthLocation
@@ -9,6 +9,7 @@ from astropy.time import Time
 from astropy.coordinates import SkyCoord, HADec
 from scipy.interpolate import make_interp_spline, RegularGridInterpolator
 from scipy.ndimage import map_coordinates
+from scipy.sparse import csr_array
 
 from .effects import Effect
 from ..optics.fov import FieldOfView3D
@@ -61,15 +62,17 @@ class ShiftFoV3D(Effect):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.meta.setdefault("method", None)
 
-        if self.meta.get("method", None) not in [None, "roll", "map_coords"]:
+        if self.meta["method"] not in [None, "roll", "map_coords"]:
             raise ValueError("Method must be 'roll' or 'map_coords' if provided.")
 
     def get_shifts(self, obj):
         """
         Shifts calculated from obj (FoV3D) properties or from init data.
         Overwrite this function when sub-classing.
-        Should return interp spline values for dx and dy at data wavelength bins in arcsec
+        Return dx and dy at cube wavelength bins in arcsec. The FOV can be
+        unrendered when its incoming illumination needs spatial padding.
         """
         if self.data is not None:
             if isinstance(self.data, Table):
@@ -81,14 +84,28 @@ class ShiftFoV3D(Effect):
             logger.warning("No shifts as a function of wavelength provided in init.")
             raise NotImplementedError
 
-        swcs = WCS(obj.hdu.header).spectral
-        with u.set_enabled_equivalencies(u.spectral()):
-            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
-            return dx(wave), dy(wave)
+        wave = _cube_wavelengths(obj)
+        return dx(wave), dy(wave)
+
+    def _padded_header(self, header, shifts, rounded=False):
+        """Spatial support needed before applying this displacement."""
+        header = header.copy()
+        # Cubic interpolation needs neighboring samples as well as the shift.
+        guard = 0 if self.meta['method'] == 'roll' else 4
+        for axis, displacement in enumerate(shifts, start=1):
+            cells = (displacement/(abs(header[f'CDELT{axis}'])*u.deg)).decompose().value
+            if rounded:
+                cells = np.round(cells, 1)
+                if self.meta['method'] == 'roll':
+                    cells = np.round(np.asarray(cells, dtype=np.float32))
+            padding = int(np.ceil(np.max(np.abs(cells)))) + guard if np.any(cells) else 0
+            header[f'NAXIS{axis}'] += 2*padding
+            header[f'CRPIX{axis}'] += padding
+        return header
 
     def apply_to(self, obj, **kwargs):
         if isinstance(obj, FieldOfView3D) and obj.hdu is not None and obj.hdu.header['NAXIS'] == 3:
-            dxs, dys = self.get_shifts(obj)
+            dxs, dys = kwargs['_shifts'] if '_shifts' in kwargs else self.get_shifts(obj)
 
             # get bin widths in spatial axis and divide to get dxs and dys in steps
             dxs = np.round((dxs / (obj.hdu.header["CDELT1"]*u.deg)).decompose().value, 1)
@@ -119,19 +136,29 @@ class ShiftFoV3D(Effect):
             raise ValueError("dx and dy must have shape (nwave,)")
 
         out = np.empty_like(data)
-        for w in range(nw):
-            out[w] = np.roll(data[w], (dy[w], dx[w]), axis=(0, 1))
-            # zero out the rolled in part, select the correct slice based on sign of dxint, dyint
-            xslice = slice(0, dx[w]) if dx[w] > 0 else slice(nx-dx[w], nx)
-            yslice = slice(0, dy[w]) if dy[w] > 0 else slice(ny-dy[w], ny)
-            out[w][yslice, xslice] = 0
+        boundaries = np.r_[0, np.flatnonzero((np.diff(dx) != 0) | (np.diff(dy) != 0))+1, nw]
+        for start, stop in zip(boundaries[:-1], boundaries[1:]):
+            xshift, yshift = dx[start], dy[start]
+            if abs(xshift) >= nx or abs(yshift) >= ny:
+                out[start:stop] = 0
+                continue
+            if xshift == 0 and yshift == 0:
+                out[start:stop] = data[start:stop]
+                continue
+            out[start:stop] = np.roll(data[start:stop], (yshift, xshift), axis=(1, 2))
+            if xshift != 0:
+                xslice = slice(0, xshift) if xshift > 0 else slice(nx + xshift, nx)
+                out[start:stop, :, xslice] = 0
+            if yshift != 0:
+                yslice = slice(0, yshift) if yshift > 0 else slice(ny + yshift, ny)
+                out[start:stop, yslice, :] = 0
         return out
 
     @staticmethod
-    def map_coords_shift(data, dx, dy, chunk_w: int=8, order: int=3):
+    def map_coords_shift(data, dx, dy, chunk_w: int=64, order: int=3):
         """
         Shift each wavelength plane data[w, :, :] by (dx[w], dy[w]) using
-        scipy.ndimage.map_coordinates with chunked processing.
+        scipy.ndimage.map_coordinates independently on each spatial plane.
 
         Parameters
         ----------
@@ -142,7 +169,7 @@ class ShiftFoV3D(Effect):
         dy : np.ndarray, shape (nwave,)
             Shift along y (axis=0) in pixels. Positive moves content toward +y.
         chunk_w : int
-            Number of wavelength planes to process per chunk. Default 8.
+            Number of independent wavelength planes processed together.
         order : int
             Spline interpolation order. Default 3.
 
@@ -156,36 +183,34 @@ class ShiftFoV3D(Effect):
         if dx.shape != (nw,) or dy.shape != (nw,):
             raise ValueError("dx and dy must have shape (nwave,)")
 
-        # Base grids for a single chunk (will be broadcast)
-        yi = np.arange(ny, dtype=np.float32)[None, :, None]  # (1, ny, 1)
-        xi = np.arange(nx, dtype=np.float32)[None, None, :]  # (1, 1, nx)
+        # The same rounded displacement recurs in many wavelength planes.
+        # Reuse its spatial interpolation operator, without ever interpolating
+        # along wavelength or filtering the same profile thousands of times.
+        shifted = data
+        for axis, displacement, length in ((2, dx, nx), (1, dy, ny)):
+            if not np.any(displacement):
+                continue
+            out = np.empty(data.shape, dtype=float)
+            for offset in np.unique(displacement):
+                operator = _spatial_shift_operator(length, float(offset), order)
+                planes = np.flatnonzero(displacement == offset)
+                for start in range(0, len(planes), chunk_w):
+                    selected = planes[start:start + chunk_w]
+                    block = np.moveaxis(shifted[selected], axis, 0)
+                    result = operator @ block.reshape(length, -1)
+                    out[selected] = np.moveaxis(result.reshape(block.shape), 0, axis)
+            shifted = out
+        return shifted.astype(data.dtype, copy=False)
 
-        out = np.empty_like(data)
-        prefilter = (order > 1)
 
-        for w0 in range(0, nw, chunk_w):
-            w1 = min(w0 + chunk_w, nw)
-            k = w1 - w0
-
-            # wave index grid for this chunk: (k, 1, 1)
-            wi = np.arange(w0, w1, dtype=np.float32)[:, None, None]
-
-            # To shift content by +dx/+dy, sample input at (x - dx, y - dy)
-            xcoords = xi - dx[w0:w1][:, None, None]  # (k, 1, nx) -> broadcast to (k, ny, nx)
-            ycoords = yi - dy[w0:w1][:, None, None]  # (k, ny, 1) -> broadcast to (k, ny, nx)
-
-            # Broadcast to full chunk volume
-            xcoords = np.broadcast_to(xcoords, (k, ny, nx))
-            ycoords = np.broadcast_to(ycoords, (k, ny, nx))
-            wcoords = np.broadcast_to(wi,      (k, ny, nx))
-
-            # Axis order in coords must match axis order of data: (wave, y, x)
-            coords = np.array([wcoords, ycoords, xcoords], dtype=np.float32)  # (3, k, ny, nx)
-
-            out[w0:w1, :, :] = map_coordinates(
-                data, coords, order=order, mode='nearest', prefilter=prefilter
-            )
-        return out
+@lru_cache(maxsize=128)
+def _spatial_shift_operator(length, shift, order):
+    # Apply scipy's interpolation to unit basis profiles once. Cubic spline
+    # coefficients decay exponentially; omit only weights below 1e-13.
+    row, column = np.indices((length, length), dtype=float)
+    response = map_coordinates(np.eye(length), [row, column - shift], order=order, mode='nearest', prefilter=order > 1)
+    response[abs(response) < 1e-13] = 0
+    return csr_array(response.T)
 
 
 class ADShift(ShiftFoV3D):
@@ -236,7 +261,7 @@ class ADShift(ShiftFoV3D):
     def get_shifts(self, obj: FieldOfView3D):
         shift_arcsec = self._get_shifts_arcsec(obj)
 
-        pos_angle_y = field_rotation_pa_y(obj.hdu.header)
+        pos_angle_y = field_rotation_pa_y(obj.header if obj.hdu is None else obj.hdu.header)
         par_angle = get_parallactic_angle(self.target, self.location, self.time)
         theta = np.deg2rad(par_angle - pos_angle_y) # angle of zenith direction from +y-axis counter-clockwise
         logger.info(f'Direction of zenith, measured counter-clockwise from +y axis is {int(par_angle - pos_angle_y)}.')
@@ -249,9 +274,7 @@ class ADShift(ShiftFoV3D):
         wave_ref = from_currsys(self.meta["wave_ref_um"], self.cmds) * u.um
         n_ref = self.n(wave_ref)
 
-        swcs = WCS(obj.hdu.header).spectral
-        with u.set_enabled_equivalencies(u.spectral()):
-            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
+        wave = _cube_wavelengths(obj)
         n_wave = self.n(wave)
         delta_n = n_wave - n_ref
         return 206265 * delta_n * np.tan(self.zenith_angle.to(u.rad).value) * u.arcsec
@@ -309,9 +332,7 @@ class ADCShift(ShiftFoV3D):
         """
         Computes an AD correction residual for a given zenith angle.
         """
-        swcs = WCS(obj.hdu.header).spectral
-        with u.set_enabled_equivalencies(u.spectral()):
-            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
+        wave = _cube_wavelengths(obj)
         shifts = np.zeros_like(wave.value) * u.arcsec
 
         if self.data is not None and isinstance(self.data, Table):
@@ -354,7 +375,7 @@ class ADCShift(ShiftFoV3D):
             shifts += ad_shift
             ad.zenith_angle = self.zenith_angle
 
-        pos_angle_y = field_rotation_pa_y(obj.hdu.header)
+        pos_angle_y = field_rotation_pa_y(obj.header if obj.hdu is None else obj.hdu.header)
         par_angle = get_parallactic_angle(self.target, self.location, self.time)
         theta = np.deg2rad(par_angle - pos_angle_y) # angle of zenith direction from +y-axis counter-clockwise
         logger.info(f'Direction of zenith, measured counter-clockwise from +y axis is {int(par_angle - pos_angle_y)}.')
@@ -401,12 +422,20 @@ class ADCShift(ShiftFoV3D):
 
 
 ########################### AD utils ###############################
+def _cube_wavelengths(obj):
+    if obj.hdu is None:
+        return obj.cube_waveset.to(u.um)
+    swcs = WCS(obj.hdu.header).spectral
+    with u.set_enabled_equivalencies(u.spectral()):
+        return swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])).to(u.um)
+
+
 def field_rotation_pa_y(header) -> float:
     """
     Returns PA of detector +Y axis on sky, in deg (N->E convention).
     0 deg = Y points north, 90 deg = Y points east
     """
-    w = WCS(header).dropaxis(-1)
+    w = WCS(header, naxis=2)
     # local anchor (image center)
     x0, y0 = w.wcs.crpix
     lon0, lat0 = w.pixel_to_world(x0, y0)

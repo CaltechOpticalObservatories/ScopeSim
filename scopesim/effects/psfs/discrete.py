@@ -197,8 +197,6 @@ class FieldConstantPSF(DiscretePSF):
         """Find nearest wavelength and build PSF kernel from file."""
         idx = _nearest_index(fov.wavelength, self._waveset)
         ext = self.kernel_indices[idx]
-        if ext == self.current_layer_id:
-            return self.kernel
 
         try:
             spline_order = from_currsys(self.meta["interp_order"], cmds=self.cmds)
@@ -207,13 +205,13 @@ class FieldConstantPSF(DiscretePSF):
             logger.warning("PSF parameter interp_order not found, using 1 (linear interpolation).")
             spline_order = 1
 
-
         if fov.hdu.header["NAXIS"] == 3:
             self.current_layer_id = ext
             self.make_psf_cube(fov, spline_order)
             return self.kernel
 
-        self.kernel = self._file[ext].data
+        # Keep the loaded reference independent of callers modifying a kernel.
+        self.kernel = self._file[ext].data.copy()
         self.current_layer_id = ext
         hdr = self._file[ext].header
 
@@ -265,6 +263,7 @@ class FieldConstantPSF(DiscretePSF):
             - fov.hdu.header["CRPIX3"])
             + fov.hdu.header["CRVAL3"]
         )
+        lam *= u.Unit(fov.hdu.header['CUNIT3']).to(u.um)
 
         if not self.meta.get("interp_psf", True):
             lam = np.array([lam[len(lam)//2]])
