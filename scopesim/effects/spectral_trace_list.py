@@ -678,6 +678,19 @@ class EchelleSpectralTraceList(SpectralTraceList):
     nIR        2              0                40    24    970         2500         20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        45           175           10           x
     ----------------------------------------------------------------
 
+    Optional ``detector_offset_x`` and ``detector_offset_y`` columns specify
+    the rotated analytical camera origin relative to detector center, positive
+    right/up. Both columns and their ``*_unit`` metadata are required together;
+    values must have length units. Explicit zeros place that origin at detector
+    center. Offsets are applied after rotation, before detector clipping, with
+    no automatic recentering. Omitting both columns retains automatic placement.
+
+    With ``physical_slit_dispersion=True``, supply ``collimator1_focal_length``,
+    ``collimator2_focal_length`` and ``entrance_slit_scale`` columns with their
+    ``*_unit`` metadata. The entrance scale is length per on-sky arcsecond.
+    These determine the illumination angle and asymmetric pupil relay;
+    the along-slit plate scale is not used for across-slit dispersion.
+
     The calculated traces are stored in the same HDUList format as required by SpectralTraceList,
     and supplied to the parent class through hdulist kwarg.
 
@@ -690,10 +703,13 @@ class EchelleSpectralTraceList(SpectralTraceList):
         self.cmds = cmds
 
         trace_param_filename = kwargs.pop("filename")
+        self.physical_slit_dispersion = kwargs.pop("physical_slit_dispersion", False)
+        self.slit_samples = kwargs.pop("slit_samples", 3)
         save_generated_hdulist = kwargs.pop("save_generated_hdulist", False)
         generated_hdulist_filename = kwargs.pop(
             "generated_hdulist_filename", "analytical_echelle_traces.fits")
         trace_params = DataContainer(filename=trace_param_filename)
+        trace_params.table = from_currsys(trace_params.table, self.cmds)
         hdulist = self._generate_trace_hdulist(trace_params)
         if save_generated_hdulist:
             output_path = Path(generated_hdulist_filename).expanduser()
@@ -712,6 +728,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
         hdul[0].header["EDATA"] = 2
 
         trace_ids, ap_ids, im_ids = [], [], []
+        self._spectrographs = {}
         for row in trace_params.table:
             prefix = row["prefix"]
             min_order = row['m0'] - row['n'] + 1
@@ -740,13 +757,19 @@ class EchelleSpectralTraceList(SpectralTraceList):
             xdisp_groove_length = u.Unit(trace_params.meta["xdisp_freq_unit"]) / row['xdisp_freq']
             echelle_groove_length = u.Unit(trace_params.meta["disp_freq_unit"]) / row['disp_freq']
             pix_per_res_elem = row['fwhm']
+            prescription = {}
+            if 'collimator1_focal_length' in trace_params.table.colnames:
+                for key in ('collimator1_focal_length', 'collimator2_focal_length', 'entrance_slit_scale'):
+                    prescription[key] = row[key] * u.Unit(trace_params.meta[key + '_unit'])
+                nominal_width = row['nominal_slit_width'] * u.Unit(trace_params.meta['nominal_slit_width_unit'])
+                pix_per_res_elem = (nominal_width * prescription['entrance_slit_scale'] * focal_len / prescription['collimator2_focal_length'] / pix_size).to_value(u.dimensionless_unscaled)
 
             ss = echelle.spectrograph_factory(min_wave, max_wave, focal_len,
                                               design_res, echelle_angle, min_order, max_order,
                                               echelle_groove_length, pix_per_res_elem, disp_npix, xdisp_npix,
                                               pix_size, xdisp_groove_length=xdisp_groove_length,
                                               xdisp_beta_center=xdisp_beta_center,
-                                              dispersion_focal_len=dispersion_focal_len)
+                                              dispersion_focal_len=dispersion_focal_len, **prescription)
             _warn_if_echelle_design_res_inconsistent(
                 prefix,
                 design_res,
@@ -757,7 +780,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
             )
 
             slit_edge = (row['slitlength'] / 2) * u.Unit(trace_params.meta["slitlength_unit"])
-            slit_pos = np.linspace(-slit_edge, slit_edge, num=3)
+            slit_pos = np.linspace(-slit_edge, slit_edge, num=self.slit_samples)
             if "plate_scale" in trace_params.table.colnames:
                 plate_scale = row["plate_scale"] * u.Unit(
                     trace_params.meta["plate_scale_unit"])
@@ -776,74 +799,52 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 ).to_value(u.deg)
             cang = np.cos(np.deg2rad(detector_angle))
             sang = np.sin(np.deg2rad(detector_angle))
-            detector_x_padding = max(
-                0.0,
-                (
-                    disp_npix * abs(cang)
-                    + xdisp_npix * abs(sang)
-                    - disp_npix
-                ) / 2,
-            )
-            slit_x_padding = (
-                abs(np.tan(np.deg2rad(detector_angle)))
-                * float(np.nanmax(np.abs(slit_offset_pix)))
-            )
-            raw_x_min = 0.5 - detector_x_padding - slit_x_padding
-            raw_x_max = disp_npix - 0.5 + detector_x_padding + slit_x_padding
+            ss._detector_cos, ss._detector_sin = cang, sang
+            ss._slit_offset_pix = slit_offset_pix
+            self._spectrographs[prefix] = ss
+            if 'detector_offset_x' in trace_params.table.colnames or 'detector_offset_y' in trace_params.table.colnames:
+                # Multiplying an ASCII table's masked cell by a Unit yields
+                # zero, so reject missing values before attaching units.
+                if np.ma.is_masked(row['detector_offset_x']) or np.ma.is_masked(row['detector_offset_y']):
+                    raise ValueError('Both detector offsets must have values.')
+                offset_x = row['detector_offset_x'] * u.Unit(trace_params.meta['detector_offset_x_unit'])
+                offset_y = row['detector_offset_y'] * u.Unit(trace_params.meta['detector_offset_y_unit'])
+                # Offsets locate the rotated camera origin relative to detector
+                # center. The raw mapping includes the unrotated pixel origin.
+                rotated_x_center = cang*disp_npix/2 - sang*xdisp_npix/2 - (offset_x/pix_size).to_value(u.dimensionless_unscaled)
+                rotated_y_center = sang*disp_npix/2 + cang*xdisp_npix/2 - (offset_y/pix_size).to_value(u.dimensionless_unscaled)
 
-            def raw_detector_pixels(wave, order):
-                x = ss.wavelength_to_x_pixel(wave, order)
-                y = ss.wavelength_to_y_pixel(wave)
-                x = u.Quantity(x, copy=False).to_value(
-                    u.dimensionless_unscaled)
-                y = u.Quantity(y, copy=False).to_value(
-                    u.dimensionless_unscaled)
-                xpix = np.broadcast_to(x, (slit_offset_pix.size, wave.size))
-                ypix = y[None, :] + slit_offset_pix[:, None]
-                return xpix, ypix
-
-            rotated_x_min = rotated_y_min = np.inf
-            rotated_x_max = rotated_y_max = -np.inf
-            # The analytical echelle layout is relative, not yet detector
-            # placed. Rotate the footprint first, then place that rotated
-            # footprint on the detector. Detector padding is not part of the
-            # optical trace geometry; downstream detector/FOV code is
-            # responsible for clipping padded display or extraction regions.
-            for i, order in enumerate(ss.orders):
-                raw_x = np.linspace(
-                    raw_x_min, raw_x_max, num=max(disp_npix, 2))
-                wave = ss.x_pixel_to_wavelength(raw_x, order)
-                xpix, ypix = raw_detector_pixels(wave, order)
-                xrot = cang * xpix - sang * ypix
-                yrot = sang * xpix + cang * ypix
-                rotated_x_min = min(rotated_x_min, float(np.nanmin(xrot)))
-                rotated_x_max = max(rotated_x_max, float(np.nanmax(xrot)))
-                rotated_y_min = min(rotated_y_min, float(np.nanmin(yrot)))
-                rotated_y_max = max(rotated_y_max, float(np.nanmax(yrot)))
-            rotated_x_center = rotated_x_min + (rotated_x_max - rotated_x_min) / 2
-            rotated_y_center = rotated_y_min + (rotated_y_max - rotated_y_min) / 2
-
-            def rotated_detector_pixels(wave, order):
-                xpix, ypix = raw_detector_pixels(wave, order)
-                xrot = cang * xpix - sang * ypix
-                yrot = sang * xpix + cang * ypix
-                return (
-                    xrot - rotated_x_center + disp_npix / 2,
-                    yrot - rotated_y_center + xdisp_npix / 2,
-                )
+                # Project the translated detector rectangle back onto model x;
+                # slit offsets are in model y and cancel in this projection.
+                raw_x_center = cang*rotated_x_center + sang*rotated_y_center
+                raw_x_halfspan = (abs(cang)*disp_npix + abs(sang)*xdisp_npix)/2
+                candidate_raw_x = np.linspace(raw_x_center - raw_x_halfspan, raw_x_center + raw_x_halfspan, disp_npix + 1)
+            else:
+                # Preserve the original automatic placement and sampling for
+                # parameter files that do not specify a detector position.
+                detector_x_padding = max(0., (disp_npix*abs(cang) + xdisp_npix*abs(sang) - disp_npix)/2)
+                slit_x_padding = abs(np.tan(np.deg2rad(detector_angle))) * np.max(np.abs(slit_offset_pix))
+                raw_x_min = .5 - detector_x_padding - slit_x_padding
+                raw_x_max = disp_npix - .5 + detector_x_padding + slit_x_padding
+                candidate_raw_x = np.linspace(raw_x_min, raw_x_max, num=max(disp_npix, 2))
+                rotated_x_min = rotated_y_min = np.inf
+                rotated_x_max = rotated_y_max = -np.inf
+                for order in ss.orders:
+                    wave = ss.x_pixel_to_wavelength(candidate_raw_x, order)
+                    xrot, yrot = ss._rotated_detector_pixels(wave, order)
+                    rotated_x_min = min(rotated_x_min, xrot.min())
+                    rotated_x_max = max(rotated_x_max, xrot.max())
+                    rotated_y_min = min(rotated_y_min, yrot.min())
+                    rotated_y_max = max(rotated_y_max, yrot.max())
+                rotated_x_center = rotated_x_min + (rotated_x_max - rotated_x_min)/2
+                rotated_y_center = rotated_y_min + (rotated_y_max - rotated_y_min)/2
+            ss._detector_center = (rotated_x_center, rotated_y_center)
 
             def on_detector(wave, order):
-                xpix, ypix = rotated_detector_pixels(wave, order)
-                return (
-                    (xpix >= 0)
-                    & (xpix <= disp_npix)
-                    & (ypix >= 0)
-                    & (ypix <= xdisp_npix)
-                )
+                xpix, ypix = ss._detector_pixels(wave, order)
+                return (xpix >= 0) & (xpix <= disp_npix) & (ypix >= 0) & (ypix <= xdisp_npix)
 
-            for i, order in enumerate(ss.orders):
-                candidate_raw_x = np.linspace(
-                    raw_x_min, raw_x_max, num=max(disp_npix, 2))
+            for order in ss.orders:
                 candidate_wave = ss.x_pixel_to_wavelength(candidate_raw_x, order)
                 valid_wave = np.any(
                     on_detector(candidate_wave, order), axis=0)
@@ -872,7 +873,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
                     continue
                 s = np.tile(slit_pos, wave.size).reshape(wave.size, slit_pos.size).T.ravel()
                 w = np.tile(wave, slit_offset_pix.size)
-                xpix, ypix = rotated_detector_pixels(wave, order)
+                xpix, ypix = ss._detector_pixels(wave, order)
                 xval = (xpix.ravel() - disp_npix / 2) * pix_size.to(u.mm)
                 yval = (ypix.ravel() - xdisp_npix / 2) * pix_size.to(u.mm)
 
@@ -881,7 +882,12 @@ class EchelleSpectralTraceList(SpectralTraceList):
                      'x': xval,
                      'y': yval})
 
+                if self.physical_slit_dispersion:
+                    order_table['dlam_deta'] = ss.slit_dispersion(w, order)
+
                 trace_hdu = fits.BinTableHDU(order_table)
+                if self.physical_slit_dispersion:
+                    trace_hdu.header['SLITCOL'] = 'dlam_deta'
                 trace_hdu.header['DISPDIR'] = row['dispdir']
                 trace_hdu.header["EXTNAME"] = f'{prefix}_{order:d}'
                 trace_hdu.header["DESIGNR"] = (
