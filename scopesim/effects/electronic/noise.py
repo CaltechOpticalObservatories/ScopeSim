@@ -54,7 +54,7 @@ class DarkCurrent(ElectronicEffect):
         return data + dark_level * dit * ndit
 
     def _get_dark_level(self, det_id: int) -> float:
-        dark_level = float(from_currsys(self.meta["value"], self.cmds))
+        dark_level = from_currsys(self.meta["value"], self.cmds)
         if isinstance(dark_level, Real):
             return dark_level
         if isinstance(dark_level, Mapping):
@@ -284,6 +284,23 @@ class PoorMansHxRGReadoutNoise(BasicReadoutNoise):
                 image[x:x+dx, y:y+dy] = batch[i:i+dx, j:j+dy]
 
         return image
+
+
+class ReadoutNoiseFromTable(BasicReadoutNoise):
+    """Interpolate measured read noise in electrons as a function of DIT [s]."""
+
+    required_keys = {"filename", "dit", "ndit"}
+
+    def apply_to(self, det, **kwargs):
+        if not isinstance(det, Detector):
+            return det
+        dit = from_currsys(self.meta["dit"], self.cmds)
+        times = self.table["dit"]
+        if not times[0] <= dit <= times[-1]:
+            raise ValueError(f"DIT {dit} s is outside the measured read-noise table")
+        self.meta["noise_std"] = np.interp(dit, times, self.table["read_noise"])
+        det.header["RDNOISE"] = (self.meta["noise_std"], "Read noise per integration [electron]")
+        return super().apply_to(det, **kwargs)
 
 
 class PixelResponseNonUniformity(RandomEffect):
