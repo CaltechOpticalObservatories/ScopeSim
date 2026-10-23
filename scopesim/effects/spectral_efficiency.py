@@ -11,7 +11,7 @@ from astropy.table import Table
 
 from .effects import Effect
 from .ter_curves import TERCurve
-from ..utils import figure_factory, get_logger, check_keys
+from ..utils import figure_factory, get_logger, check_keys, from_currsys
 from .data_container import DataContainer
 from ..optics import echelle
 
@@ -149,7 +149,7 @@ class EchelleSpectralEfficiency(Effect):
         self.efficiency_generator = self._generate_efficiency_curve_func()
 
     def _generate_efficiency_curve_func(self) -> Callable:
-        trace_params = self.table
+        trace_params = from_currsys(self.table, self.cmds)
         spectrographs = {}
         for row in trace_params:
             prefix = row["prefix"]  # note trance ids are assumed to be prefix_{order}
@@ -173,13 +173,17 @@ class EchelleSpectralEfficiency(Effect):
             xdisp_groove_length = u.Unit(trace_params.meta["xdisp_freq_unit"]) / row['xdisp_freq']
             echelle_groove_length = u.Unit(trace_params.meta["disp_freq_unit"]) / row['disp_freq']
             pix_per_res_elem = row['fwhm']
+            prescription = {}
+            if 'collimator1_focal_length' in trace_params.colnames:
+                for key in ('collimator1_focal_length', 'collimator2_focal_length', 'entrance_slit_scale'):
+                    prescription[key] = row[key] * u.Unit(trace_params.meta[key + '_unit'])
 
             spectrographs[prefix] = echelle.spectrograph_factory(min_wave, max_wave, focal_len,
                                                         design_res, echelle_angle, min_order, max_order,
                                                         echelle_groove_length, pix_per_res_elem, disp_npix, xdisp_npix,
                                                         pix_size, xdisp_groove_length=xdisp_groove_length,
                                                         xdisp_beta_center=xdisp_beta_center,
-                                                        dispersion_focal_len=dispersion_focal_len)
+                                                        dispersion_focal_len=dispersion_focal_len, **prescription)
         self._spectrographs = spectrographs
 
         def efficiency_curve(trace_id, wavelength):
@@ -197,9 +201,12 @@ class EchelleSpectralEfficiency(Effect):
         """Interface between FieldOfView and SpectralEfficiency."""
         trace_id = obj.trace_id
 
-        swcs = WCS(obj.hdu.header).spectral
-        with u.set_enabled_equivalencies(u.spectral()):
-            wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
+        if obj.hdu is None:
+            wave = obj.cube_waveset
+        else:
+            swcs = WCS(obj.hdu.header).spectral
+            with u.set_enabled_equivalencies(u.spectral()):
+                wave = swcs.pixel_to_world(np.arange(swcs.pixel_shape[0])) << u.um
 
         efficiency = self.efficiency_generator(trace_id, wave)
         params = {"description": trace_id}
@@ -207,8 +214,7 @@ class EchelleSpectralEfficiency(Effect):
         effic_curve = TERCurve(array_dict={"wavelength": wave, "transmission": efficiency}, **params)
         self.efficiencies[trace_id] = effic_curve
 
-        obj.hdu.data *= effic_curve.throughput(wave).value[:, None, None]
-        return obj
+        return effic_curve.apply_to(obj)
 
     def plot(self):
         """Plot the grating efficiencies."""
