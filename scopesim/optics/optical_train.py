@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from scipy.interpolate import interp1d
 from astropy import units as u
 from astropy.table import QTable
 from astropy.wcs import WCS
@@ -14,7 +13,6 @@ from astropy.io.fits import HDUList
 
 from tqdm.auto import tqdm
 
-from synphot import SourceSpectrum, Empirical1D
 from synphot.units import PHOTLAM
 
 from astar_utils.nested_mapping import RecursiveNestedMapping, is_bangkey, recursive_update
@@ -27,7 +25,6 @@ from ..detector import DetectorManager
 from ..effects import ExtraFitsKeywords
 from ..utils import from_currsys, top_level_catch, get_logger
 from ..source.source_templates import empty_sky
-from ..source.source_fields import SpectrumSourceField
 from .. import __version__
 
 
@@ -620,28 +617,12 @@ class OpticalTrain:
         # TODO: this is not sufficiently general
         # TODO: Maybe move this to source_fields??
 
-        for field in source.fields:
-            if not isinstance(field, SpectrumSourceField):
-                continue
-            for ispec, spec in field.spectra.items():
-                # Put on fov wavegrid
-                wave_min = min(fov.meta["wave_min"] for fov in self.fov_manager.fovs)
-                wave_max = max(fov.meta["wave_max"] for fov in self.fov_manager.fovs)
-                wave_unit = u.Unit(from_currsys("!SIM.spectral.wave_unit", self.cmds))
-                dwave = from_currsys("!SIM.spectral.spectral_bin_width", self.cmds)  # Not a quantity
-                fov_waveset = np.arange(wave_min.value, wave_max.value, dwave) * wave_unit
-                fov_waveset = fov_waveset.to(u.um)
-
-                field.spectra[ispec] = SourceSpectrum(Empirical1D,
-                                                      points=fov_waveset,
-                                                      lookup_table=spec(fov_waveset))
-
         for cube in source.cube_fields:
             header, data, wave = cube.header, cube.data, cube.waveset
 
             # Need to check whether BUNIT is per arcsec2 or per pixel
             inunit = u.Unit(header["BUNIT"])
-            data = data.astype(np.float32) * inunit
+            data = data.astype(np.float64, copy=False) * inunit
             factor = 1
             for base, power in zip(inunit.bases, inunit.powers):
                 if (base**power).is_equivalent(u.arcsec**(-2)):
@@ -670,35 +651,10 @@ class OpticalTrain:
             cube.header["CUNIT1"] = "deg"
             cube.header["CUNIT2"] = "deg"
 
-            # Put on fov wavegrid
-            wave_min = min(fov.meta["wave_min"] for fov in self.fov_manager.fovs)
-            wave_max = max(fov.meta["wave_max"] for fov in self.fov_manager.fovs)
-            wave_unit = u.Unit(from_currsys("!SIM.spectral.wave_unit", self.cmds))
-            dwave = from_currsys("!SIM.spectral.spectral_bin_width", self.cmds)  # Not a quantity
-            fov_waveset = np.arange(wave_min.value, wave_max.value, dwave) * wave_unit
-            fov_waveset = fov_waveset.to(u.um)
-
-            if (wave.to(u.um).min() > fov_waveset.max() or
-                    wave.to(u.um).max() < fov_waveset.min()):
-                logger.warning("Source and FOV wavesets disjoint.")
-
-            # Interpolate into new data cube.
-            # This is done layer by layer for memory reasons.
-            new_data = np.zeros((fov_waveset.shape[0], data.shape[1], data.shape[2]),
-                                dtype=np.float32)
-            for j in range(data.shape[1]):
-                cube_interp = interp1d(wave.to_value(u.um), data[:, j, :],
-                                       axis=0, kind="linear",
-                                       bounds_error=False, fill_value=0)
-                new_data[:, j, :] = cube_interp(fov_waveset.value)
-
-            cube.data = new_data
-            cube.header["CTYPE3"] = "WAVE"
-            cube.header["CRPIX3"] = 1
-            cube.header["CRVAL3"] = wave_min.value
-            cube.header["CDELT3"] = dwave
-            cube.header["CUNIT3"] = wave_unit.name
-
+            # Keep the native wavelength samples until the spatial FOV is cut.
+            # Rebinning the entire source here loses narrow lines and expands
+            # resolved cubes over the full instrument band unnecessarily.
+            cube.data = data
             cube.wcs = WCS(cube.field)
 
         return source
