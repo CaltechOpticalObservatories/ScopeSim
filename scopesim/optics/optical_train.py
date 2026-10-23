@@ -20,9 +20,12 @@ from astar_utils.nested_mapping import RecursiveNestedMapping, is_bangkey, recur
 from .optics_manager import OpticsManager
 from .fov_manager import FOVManager
 from .image_plane import ImagePlane
+from .fov import FieldOfView3D
 from ..commands.user_commands import UserCommands
 from ..detector import DetectorManager
-from ..effects import ExtraFitsKeywords
+from ..effects import ExtraFitsKeywords, SelectorWheel, MoffatPSF, TERCurve, SpectralEfficiency, EchelleSpectralEfficiency, SpectralTraceList
+from ..effects.ter_curves import DichroicTree, FilterWheelBase, TaperedQuantumEfficiency
+from ..effects.atmo_dispersion import ShiftFoV3D
 from ..utils import from_currsys, top_level_catch, get_logger
 from ..source.source_templates import empty_sky
 from .. import __version__
@@ -535,6 +538,15 @@ class OpticalTrain:
         for effect in self.optics_manager.source_effects:
             source = effect.apply_to(source)
 
+        # This source is a private copy, after all source effects. FOV extraction
+        # copies native-sampled spectra before FOV effects can modify them. Evaluate
+        # native sampling once for this observation; retain no cache on the
+        # source, spectrum, FOV or train, and never reuse it on the next call.
+        spectral_wavesets = {}
+        for spectrum in source.spectra.values():
+            waveset = spectrum.waveset
+            spectral_wavesets[spectrum] = None if waveset is None else waveset.to_value(u.AA)
+
         # [3D - Atmospheric shifts, PSF, NCPAs, Grating shift/distortion]
 
         # START OF MULTIPROCESSING
@@ -562,14 +574,59 @@ class OpticalTrain:
             fovs = self.fov_manager.fovs
             nobar = len(fovs) <= 1
             for fov in tqdm(fovs, desc=" FOVs", position=0, disable=nobar):
-                fov.extract_from(source)
+                # FOVManager can reuse a FOV whose previous observation is
+                # already mapped to detector coordinates. Prepare new sky
+                # illumination from its physical header, not that old HDU.
+                fov.hdu = None
+                foveffs = []
+                for effect in self.optics_manager.fov_effects:
+                    if isinstance(effect, SelectorWheel):
+                        effect = effect.get_effect(fov.meta[effect.meta['selector_key']])
+                    if isinstance(effect, FilterWheelBase):
+                        effect = effect.current_filter
+                    if effect is not None:
+                        foveffs.append(effect)
 
-                fov.view()
-                foveffs = self.optics_manager.fov_effects
+                for effect in foveffs:
+                    # Slit shear needs spectral support before extraction.
+                    # Fibre bundles have no single FOV trace and map separately.
+                    if isinstance(effect, SpectralTraceList) and isinstance(fov, FieldOfView3D) and fov.trace_id is not None:
+                        fov.meta['spectral_padding'] = effect.spectral_traces[fov.trace_id].spectral_padding(fov)
+
+                # Render at the PSF stage when preceding effects only multiply
+                # spectra. Point positions then stay continuous, and resolved
+                # images are convolved before clipping to the aperture.
+                psf_indices = [i for i, effect in enumerate(foveffs) if isinstance(effect, MoffatPSF)]
+                defer_render = isinstance(fov, FieldOfView3D) and len(psf_indices) == 1
+                if defer_render:
+                    psf_index = psf_indices[0]
+                    defer_render = all(isinstance(effect, (TERCurve, SpectralEfficiency, EchelleSpectralEfficiency, TaperedQuantumEfficiency)) for effect in foveffs[:psf_index])
+                spatial_shifts = []
+                if defer_render:
+                    for effect in foveffs[psf_index + 1:]:
+                        if isinstance(effect, ShiftFoV3D):
+                            spatial_shifts.append(effect)
+                        elif not isinstance(effect, (TERCurve, DichroicTree, SpectralEfficiency, EchelleSpectralEfficiency, TaperedQuantumEfficiency)):
+                            break
+                    # Wavelength-only multipliers commute with a displacement
+                    # within each spectral plane; stop before other spatial effects.
+                    point_sources = not (source.image_fields or source.cube_fields)
+                    spatial_header = foveffs[psf_index].padded_header(fov, point_sources=point_sources)
+                    for effect in spatial_shifts:
+                        spatial_header = effect._padded_header(spatial_header, effect.get_shifts(fov))
+                    fov.extract_from(source, spatial_header=spatial_header, _spectral_wavesets=spectral_wavesets)
+                else:
+                    fov.extract_from(source, _spectral_wavesets=spectral_wavesets)
+                    fov.view()
                 nobar = len(foveffs) <= 1
                 for effect in tqdm(foveffs, disable=nobar,
                                    desc=" FOV effects", position=1):#, leave=False):
-                    fov = effect.apply_to(fov)
+                    if effect in spatial_shifts:
+                        continue  # Applied to incoming illumination at the PSF stage.
+                    if defer_render and effect is foveffs[psf_index] and spatial_shifts:
+                        effect._apply_convolution(fov, spatial_shifts=spatial_shifts)
+                    else:
+                        fov = effect.apply_to(fov)
 
                 if fov.hdu is None:
                     logger.info("  Skipping empty FOV")
@@ -583,6 +640,10 @@ class OpticalTrain:
                     # HACK: to get sky WCS from FOV into image plane...
                     self.image_planes[fov.image_plane_id].header.update(
                         WCS(fov.hdu).to_header())
+
+                # Mapping is complete. Keep the rendered FOV and trace's
+                # rectified spectrum, without retaining every input cube.
+                fov.cube = None
 
                 # ..todo: finish off the multiple image plane stuff
 
@@ -793,10 +854,12 @@ class OpticalTrain:
 
         # Image HDUs
         for hdu in hdulist[1:]:
-            hdu.header["EXPTIME"] = from_currsys("!OBS.exptime", self.cmds), "[s]"
-            hdu.header["DIT"] = from_currsys("!OBS.dit", self.cmds), "[s]"
-            hdu.header["NDIT"] = from_currsys("!OBS.ndit", self.cmds)
-            hdu.header["DETECTOR"] = detector_array._detector_list.meta["detector"]
+            # Arm-specific integration effects already recorded their actual
+            # exposure. Global command values are only for minimal setups.
+            for key in ('EXPTIME', 'DIT', 'NDIT'):
+                if key not in hdu.header:
+                    hdu.header[key] = from_currsys(f'!OBS.{key.lower()}', self.cmds)
+            hdu.header['DETECTOR'] = detector_array._detector_list.display_name
         return hdulist
 
     def shutdown(self):
