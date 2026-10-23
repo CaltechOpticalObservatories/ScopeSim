@@ -287,6 +287,9 @@ class ExposureIntegration(Effect):
                 "readout call."
             )
 
+        obj.header["EXPTIME"] = (dit * ndit, "Total accumulated integration time [s]")
+        obj.header['DIT'] = (dit, 'Integration time per exposure [s]')
+        obj.header['NDIT'] = ndit
         obj.data = obj.data * dit * ndit
 
         return obj

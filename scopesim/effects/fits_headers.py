@@ -153,6 +153,9 @@ class ExtraFitsKeywords(Effect):
           header['HIERARCH ESO DET DIT'] = (5, '[s] exposure length')
           header['EXTNAME'] = "DET2.DATA"
 
+    A group may additionally specify ``detector_id``. It then applies only to
+    HDULists containing that ``DET_ID``, including their primary headers.
+
     Resolved and un-resolved keywords
     ---------------------------------
     ScopeSim uses bang-strings to resolve global parameters.
@@ -285,6 +288,12 @@ class ExtraFitsKeywords(Effect):
             return hdul
 
         for dic in self.dict_list:
+            # Each detector array produces its own HDUList. A detector selector
+            # also permits arm-specific metadata in that array's primary HDU.
+            if "detector_id" in dic:
+                detector_ids = [hdu.header["DET_ID"] for hdu in hdul if "DET_ID" in hdu.header]
+                if dic["detector_id"] not in detector_ids:
+                    continue
             resolved = flatten_dict(dic.get("keywords", {}), resolve=True,
                                     optics_manager=opt_train)
             unresolved = flatten_dict(dic.get("unresolved_keywords", {}))

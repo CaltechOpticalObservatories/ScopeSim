@@ -25,6 +25,7 @@ logger = get_logger(__name__)
 
 class Detector:
     def __init__(self, header, cmds=None, **kwargs):
+        self._native_header = header.copy()
         self._hdu = ImageHDU(header=header, data=zeros_from_header(header))
         self.meta = {}
         self.meta.update(header)
@@ -51,10 +52,9 @@ class Detector:
             self.header.update(sky_wcs.to_header())
 
     def reset(self):
-        """Reset internal HDU data to all-zeros-array."""
-        # The detector might have been converted to integers by the
-        # Quantization effect, so it is not possible to use zeros_like.
-        self._hdu.data = np.zeros(self._hdu.data.shape)
+        """Reset charge and restore the configured, unbinned detector geometry."""
+        self._hdu = ImageHDU(header=self._native_header, data=zeros_from_header(self._native_header))
+        self.meta.update(self._native_header)
 
     @property
     def hdu(self):
