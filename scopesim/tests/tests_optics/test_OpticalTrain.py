@@ -205,8 +205,8 @@ class TestTraceDetectorCoordinates:
 
         assert coordinates["trace_id"][0] == "linear"
         assert coordinates["readout_index"][0] == 0
-        assert coordinates["detector_x"][0].to_value(u.pixel) == approx(49)
-        assert coordinates["detector_y"][0].to_value(u.pixel) == approx(39)
+        assert coordinates['detector_x'][0].to_value(u.pixel) == approx(49.5)
+        assert coordinates['detector_y'][0].to_value(u.pixel) == approx(39.5)
 
     def test_includes_renderer_endpoint_sampling(self):
         train, _ = spectral_geometry_train()
@@ -214,12 +214,9 @@ class TestTraceDetectorCoordinates:
         coordinates = train.trace_detector_coordinates(
             wavelengths={"linear": [1.25] * u.um})
 
-        # The rendered subimage samples -0.65..0.65 mm at 13 inclusive
-        # positions. The trace's -0.25 mm point therefore lands here, rather
-        # than at the ideal detector-WCS coordinate x=47.
-        expected_x = 43 + (-0.25 + 0.65) / (0.65 + 0.65) * 12
-        assert coordinates["detector_x"][0].to_value(u.pixel) == approx(
-            expected_x)
+        # The upstream renderer now uses native detector centers, excluding
+        # the next pixel beyond the subimage's last column.
+        assert coordinates['detector_x'][0].to_value(u.pixel) == approx(47.)
 
     def test_returns_all_trace_wavelengths_and_requested_slit_positions(self):
         train, _ = spectral_geometry_train()
@@ -247,8 +244,8 @@ class TestTraceDetectorCoordinates:
             wavelengths={"linear": [1.5] * u.um})
 
         trace = trace_list.spectral_traces["linear"]
-        trace.meta["offset_y"] = 0.1
-        trace.compute_interpolation_functions()
+        trace.xilam2y.posttransform = (lambda y: y + .1, {})
+        trace.xy2lam.pretransform_y = (lambda y: y - .1, {})
         after = train.trace_detector_coordinates(
             wavelengths={"linear": [1.5] * u.um})
 

@@ -12,26 +12,44 @@ def make_detector(value=1000, size=10):
     hdr = header_from_list_of_xy([-size / 2, size / 2],
                                  [-size / 2, size / 2], 1, "D")
     dtcr = Detector(hdr)
-    dtcr._hdu.data[:] = value
+    dtcr.data[:] = value
     return dtcr
 
 
-def test_output_std_matches_prnu_std():
-    prnu_std = 0.05
-    dtcr = make_detector(value=1000, size=100)
-    PixelResponseNonUniformity(prnu_std=prnu_std, prnu_seed=42).apply_to(dtcr)
-    rel_std = dtcr._hdu.data.std() / dtcr._hdu.data.mean()
-    assert abs(rel_std - prnu_std) < 0.01
+class TestApplyTo:
+    def test_output_std_matches_prnu_std(self):
+        """Relative std of output should be close to prnu_std."""
+        prnu_std = 0.05
+        dtcr = make_detector(value=1000, size=100)
+        PixelResponseNonUniformity(prnu_std=prnu_std, prnu_seed=42).apply_to(dtcr)
+        rel_std = dtcr.data.std() / dtcr.data.mean()
+        assert abs(rel_std - prnu_std) < 0.01
 
+    def test_gain_map_is_reused(self):
+        """Same map should be applied on repeated calls (fixed pattern)."""
+        dtcr1 = make_detector()
+        dtcr2 = make_detector()
+        prnu = PixelResponseNonUniformity(prnu_std=0.01, prnu_seed=42)
+        prnu.apply_to(dtcr1)
+        prnu.apply_to(dtcr2)
+        np.testing.assert_array_equal(dtcr1.data, dtcr2.data)
 
-def test_gain_map_is_reused():
-    dtcr1 = make_detector()
-    dtcr2 = make_detector()
-    prnu = PixelResponseNonUniformity(prnu_std=0.01, prnu_seed=42)
-    prnu.apply_to(dtcr1)
-    prnu.apply_to(dtcr2)
-    np.testing.assert_array_equal(dtcr1._hdu.data, dtcr2._hdu.data)
+    def test_dict_prnu_std(self):
+        """Dict mode: different amplitude per detector ID."""
+        hdr = header_from_list_of_xy([-5, 5], [-5, 5], 1, "D")
+        dtcr = Detector(hdr)
+        dtcr.meta["id"] = 0
+        dtcr.data[:] = 1000
+        prnu = PixelResponseNonUniformity(
+            prnu_std={0: 0.005, 1: 0.020}, prnu_seed=42)
+        prnu.apply_to(dtcr)
+        assert dtcr.data.std() > 0
 
+    def test_multiplicative_zero_signal(self):
+        """Zero signal should remain zero — confirms multiplicative (not additive)."""
+        dtcr = make_detector(value=0)
+        PixelResponseNonUniformity(prnu_std=0.01, prnu_seed=42).apply_to(dtcr)
+        assert dtcr.data.sum() == 0
 
 def test_dict_prnu_std():
     hdr = header_from_list_of_xy([-5, 5], [-5, 5], 1, "D")

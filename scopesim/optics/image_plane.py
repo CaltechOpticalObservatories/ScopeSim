@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
 """Contains ``ImagePlane`` class."""
-
-from warnings import warn
-
 import numpy as np
 
 from astropy.io import fits
-from astropy.table import Table
 from astropy.wcs import WCS
 
-from .image_plane_utils import add_table_to_imagehdu, add_imagehdu_to_imagehdu
+from .image_plane_utils import add_imagehdu_to_imagehdu
 
 from ..utils import (
     from_currsys,
@@ -68,7 +64,7 @@ class ImagePlane:
             raise ValueError(f"header must have a valid image-plane WCS: "
                              f"{dict(header)}")
 
-        image = zeros_from_header(header)
+        image = zeros_from_header(header, dtype=np.float32)
         self.hdu = fits.ImageHDU(data=image, header=header)
         self.hdu.header["BUNIT"] = "ph s-1"  # photons per second (per pixel)
 
