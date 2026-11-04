@@ -11,7 +11,10 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
                          echelle_groove_length: float|u.Quantity,
                          pix_per_res_elem: float, disp_npix: int, xdisp_npix: int, pix_size: float|u.Quantity,
                          xdisp_groove_length: float|u.Quantity = 0.0, xdisp_beta_center: float|u.Quantity = 0.0,
-                         dispersion_focal_len: float|u.Quantity = None):
+                         dispersion_focal_len: float|u.Quantity = None,
+                         collimator1_focal_length: u.Quantity = None,
+                         collimator2_focal_length: u.Quantity = None,
+                         entrance_slit_scale: u.Quantity = None):
     """
     
     Parameters
@@ -47,6 +50,11 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
     dispersion_focal_len: float|u.Quantity
         Effective focal length for the echelle/main-dispersion detector
         coordinate. If float, assumed to be in mm. Defaults to focal_len.
+    collimator1_focal_length, collimator2_focal_length: u.Quantity
+        Physical collimator lengths. When supplied together, derive the
+        dispersion focal length from focal_len times their ratio.
+    entrance_slit_scale: u.Quantity
+        Entrance-slit length per on-sky angle, required with the collimators.
 
     Returns
     -------
@@ -98,6 +106,9 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
                                    pixels_per_res_elem=pix_per_res_elem,
                                    focal_length=focal_len,
                                    dispersion_focal_length=dispersion_focal_len,
+                                   collimator1_focal_length=collimator1_focal_length,
+                                   collimator2_focal_length=collimator2_focal_length,
+                                   entrance_slit_scale=entrance_slit_scale,
                                    grating=echelle_grating,
                                    detector=Detector(disp_npix, xdisp_npix, pix_size),
                                    cross_disperser=cross_disperser)
@@ -191,16 +202,21 @@ class GratingSetup:
         if not isinstance(d, u.Quantity):
             d = d * u.mm
 
-        # assume we want a dispersion at the midpoint that matches the range to the detector length
-        t = detector_length / focal_length
-        k = (l_max - l_min) / d
-        x = k * (1 + np.sqrt(1 + t ** 2)) / 2 / t
-        beta_center_guess = np.arccos(np.sqrt(x))
-        beta_half_range = np.arcsin(k / 2 / np.sqrt(x))
-        beta_max = beta_center_guess + beta_half_range
-        beta_min = beta_center_guess - beta_half_range
-        alpha = np.arcsin(l_max / d - np.sin(beta_max))
-        return alpha.to(u.rad), ((beta_min + beta_max) / 2).to(u.rad)
+        # The camera maps beta_center +/- half_angle to +/- detector_length/2.
+        # Subtracting the two grating equations eliminates the incidence angle:
+        # (l_max - l_min)/d = 2*cos(beta_center)*sin(half_angle).
+        if l_max <= l_min or detector_length <= 0 * u.mm or focal_length <= 0 * u.mm or d <= 0 * u.mm:
+            raise ValueError("Wavelength range, detector length, focal length and groove spacing must be positive.")
+        half_angle = np.arctan(detector_length / (2 * focal_length))
+        cos_center = (l_max - l_min) / (2 * d * np.sin(half_angle))
+        if not 0 < cos_center <= 1:
+            raise ValueError("The wavelength range cannot fit this detector with the specified groove spacing.")
+        beta_center = np.arccos(cos_center)
+        sin_alpha = l_min / d - np.sin(beta_center - half_angle)
+        if beta_center + half_angle >= 90 * u.deg or not -1 <= sin_alpha <= 1:
+            raise ValueError("The requested detector span requires a non-propagating grating angle.")
+        alpha = np.arcsin(sin_alpha)
+        return alpha.to(u.rad), beta_center.to(u.rad)
 
     @staticmethod
     def estimate_xdisp_freq_and_angle(l_min: float | u.Quantity,
@@ -364,6 +380,9 @@ class SpectrographSetup:
             detector: Detector,
             cross_disperser: GratingSetup = None,
             dispersion_focal_length: u.Quantity = None,
+            collimator1_focal_length: u.Quantity = None,
+            collimator2_focal_length: u.Quantity = None,
+            entrance_slit_scale: u.Quantity = None,
     ):
         """
 
@@ -398,6 +417,12 @@ class SpectrographSetup:
             if dispersion_focal_length is None
             else dispersion_focal_length.to(u.mm)
         )
+        if collimator1_focal_length is not None:
+            self.collimator1_focal_length = collimator1_focal_length.to(u.mm)
+            self.collimator2_focal_length = collimator2_focal_length.to(u.mm)
+            self.entrance_slit_scale = entrance_slit_scale.to(u.mm / u.arcsec)
+            # Angular dispersion is amplified by the asymmetric pupil relay.
+            self.dispersion_focal_length = self.focal_length * self.collimator1_focal_length / self.collimator2_focal_length
         self.pixel_scale = np.arctan(
             self.detector.pixel_size / self.dispersion_focal_length)
         self.beta_central_pixel = self.grating.beta_center
@@ -431,6 +456,22 @@ class SpectrographSetup:
         self.beta_central_pixel = beta
         if littrow:
             self.grating.alpha = beta
+
+    def slit_dispersion(self, wavelength, order):
+        """Apparent wavelength shift per across-slit arcsecond at fixed incident wavelength.
+
+        m*lambda = d*(sin(alpha) + sin(beta)); increasing entrance-slit eta
+        increases alpha and reduces the wavelength inferred at nominal alpha.
+        The first collimator sets this angle; the pupil relay is already in
+        the camera's dispersion focal length and must not enter a second time.
+        """
+        derivative = -self.grating.d * np.cos(self.grating.alpha) * self.entrance_slit_scale / (order * self.collimator1_focal_length)
+        return np.ones(np.shape(wavelength)) * derivative.to(u.um / u.arcsec)
+
+    def projected_slit_width(self, wavelength, order, slit_width):
+        """Unrotated echelle-coordinate slit width, including local anamorphism."""
+        half_shift = self.slit_dispersion(wavelength, order) * slit_width / 2
+        return abs(self.wavelength_to_x_pixel(wavelength + half_shift, order) - self.wavelength_to_x_pixel(wavelength - half_shift, order)) * u.pixel
 
     @property
     def orders(self):
@@ -558,17 +599,15 @@ class SpectrographSetup:
     def edge_wave(self, fsr=True):
         """
         :param fsr: True to return the FSR edge wavelengths, False to return the detector edges
-        :return: wavelengths at the edges of the detector (or FSR) for each order, always include central pixel wavelength
+        :return: the two endpoint wavelengths for each order
         """
-        pix = np.array([0, self.detector.n_pix_x // 2, self.detector.n_pix_x-1]) + .5
-        fiducial_waves = self.x_pixel_to_wavelength(pix, self.orders[:, None])
+        pixels = np.array([0, self.detector.n_pix_x//2, self.detector.n_pix_x - 1]) + .5
+        fiducial_waves = self.x_pixel_to_wavelength(pixels, self.orders[:, None])
         if not fsr:
             return fiducial_waves[:, [0, -1]]
-
+        # Retain the original central-pixel wavelength convention for the FSR.
         central_fsr = fiducial_waves[:, 1] / self.orders
-        fsr_edges = (u.Quantity([-central_fsr / 2, central_fsr / 2]) + fiducial_waves[:, 1]).T
-
-        return fsr_edges
+        return (u.Quantity([-central_fsr/2, central_fsr/2]) + fiducial_waves[:, 1]).T
 
     def central_wave(self, order):
         """
@@ -615,6 +654,22 @@ class SpectrographSetup:
 
     def wavelength_to_y_pixel(self, wave):
         return self.y_pixel_for_beta(self.cross_disperser.beta(wave, 1))
+
+    def _rotated_detector_pixels(self, wave, order):
+        x = self.wavelength_to_x_pixel(wave, order).to_value(u.dimensionless_unscaled)
+        y = self.wavelength_to_y_pixel(wave).to_value(u.dimensionless_unscaled)
+        xpix = np.broadcast_to(x, (self._slit_offset_pix.size, wave.size))
+        ypix = y[None, :] + self._slit_offset_pix[:, None]
+        return self._detector_cos*xpix - self._detector_sin*ypix, self._detector_sin*xpix + self._detector_cos*ypix
+
+    def _detector_pixels(self, wave, order):
+        """The trace generator's placed coordinates for all configured slit nodes.
+
+        Unlike the clipped trace table, this mapping can also inspect the full
+        FSR outside the detector. It uses the same rotation and placement.
+        """
+        x, y = self._rotated_detector_pixels(wave, order)
+        return x - self._detector_center[0] + self.detector.n_pix_x/2, y - self._detector_center[1] + self.detector.n_pix_y/2
 
     def y_pixel_to_wavelength(self, pixel, m):
         """
