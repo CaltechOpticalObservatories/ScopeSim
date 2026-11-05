@@ -59,7 +59,9 @@ class TestInit:
 
     def test_initialise_with_local_skycalc_file(self, mock_path):
         sky_ter = SkycalcTERCurve(
-            use_local_skycalc_file=str(mock_path / "skycalc_override.fits"))
+            use_local_skycalc_file=str(mock_path / "skycalc_override.fits"),
+            local_skycalc_wavelength_unit=u.um)
+        # This legacy fixture predates wavelength units in its FITS columns.
         assert sky_ter.skycalc_table is not None
 
 

@@ -64,7 +64,7 @@ class ImagePlane:
             raise ValueError(f"header must have a valid image-plane WCS: "
                              f"{dict(header)}")
 
-        image = zeros_from_header(header, dtype=np.float32)
+        image = zeros_from_header(header, dtype=np.float64)
         self.hdu = fits.ImageHDU(data=image, header=header)
         self.hdu.header["BUNIT"] = "ph s-1"  # photons per second (per pixel)
 

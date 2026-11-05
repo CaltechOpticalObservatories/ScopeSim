@@ -2,6 +2,7 @@
 """Exposure actions."""
 
 from typing import ClassVar
+from warnings import warn
 
 import numpy as np
 
@@ -292,4 +293,33 @@ class ExposureIntegration(Effect):
         obj.header['NDIT'] = ndit
         obj.data = obj.data * dit * ndit
 
+        return obj
+
+
+
+class ExposureLimit(Effect):
+    """Warn about expected charge per integration without changing the exposure.
+
+    Apply after integration, dark current and on-chip binning, before noise.
+    The configured usable well refers to a charge packet at this readout stage.
+    Software binning is deliberately later and does not change this limit.
+    """
+
+    required_keys = {"usable_well", "ndit"}
+    z_order = (819,)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        check_keys(self.meta, self.required_keys, action="error")
+
+    def apply_to(self, obj, **kwargs):
+        if isinstance(obj, Detector):
+            well = from_currsys(self.meta["usable_well"], self.cmds)
+            ndit = from_currsys(self.meta["ndit"], self.cmds)
+            peak = obj.data.max() / ndit
+            obj.header["PEAKDIT"] = (peak, "Expected peak charge per integration [electron]")
+            obj.meta["WELLDEP"] = well
+            obj.header["WELLDEP"] = (well, "Usable charge per integration [input electron]")
+            if peak > well:
+                warn(f"Detector {obj.det_id}: peak {peak:.1f} e per integration exceeds usable well {well:.1f} e; DIT/NDIT are unchanged.", UserWarning, stacklevel=2)
         return obj

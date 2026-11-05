@@ -2,22 +2,30 @@
 """Contains simple Vibration, NCPA, Seeing and Diffraction PSFs."""
 
 from typing import ClassVar, Any
-from functools import partial
+from functools import partial, lru_cache
+from pathlib import Path
 
 import numpy as np
 from astropy import units as u
 from astropy.convolution import Gaussian2DKernel
-from astropy.modeling.models import Moffat2D
 from scipy.interpolate import make_interp_spline
+from scipy.special import gammaln, stdtr
+from astropy.wcs import WCS
 
 from .. import DataContainer
 from ...optics import ImagePlane
-from ...optics.fov import FieldOfView
+from ...optics.fov import FieldOfView, FieldOfView3D
 from ...utils import (from_currsys, quantify, quantity_from_table, figure_factory, check_keys, get_logger, find_file,
                       get_zenith_angle, get_observation_info_from_cmds)
 from . import PSF, PoorMansFOV
 
 logger = get_logger(__name__)
+
+
+def _psf_table_key(filename, cmds):
+    path = Path(find_file(from_currsys(filename, cmds)))
+    return str(path), path.read_bytes()
+
 
 class AnalyticalPSF(PSF):
     """Base class for analytical PSFs."""
@@ -261,9 +269,13 @@ class MoffatPSF(AnalyticalPSF):
         fwhm = self.meta["fwhm"]
         if isinstance(fwhm, dict) and {"pivot_wave", "pivot_wave_unit"}.issubset(fwhm):
             target, location, time, _ = get_observation_info_from_cmds(self.cmds)
-            key = tuple(fwhm.items()), target, location, time
+            # The seeing law depends on zenith angle, not the coordinate frame
+            # instance (SkyCoord equality raises for different observation times).
+            key = tuple(fwhm.items()), get_zenith_angle(target, location, time)
         elif isinstance(fwhm, dict):
             key = tuple(fwhm.items())
+        elif isinstance(fwhm, str):
+            key = _psf_table_key(fwhm, self.cmds)
         else:
             key = fwhm
 
@@ -311,8 +323,9 @@ class MoffatPSF(AnalyticalPSF):
         raise TypeError("fwhm kwarg must be of type dict or float or str")
 
     def get_kernel(self, fov):
-        pixel_scale = fov.header["CDELT1"] * u.deg.to(u.arcsec)
+        pixel_scale = abs(fov.header["CDELT1"]) * u.deg.to(u.arcsec)
         pixel_scale = quantify(pixel_scale, u.arcsec)
+        ystep = abs(fov.header["CDELT2"] / fov.header["CDELT1"])
 
         # Sample the wavelength-dependent seeing law with a bounded number of
         # representative points. Kernel sizing is driven by the broadest PSF
@@ -324,14 +337,14 @@ class MoffatPSF(AnalyticalPSF):
 
         target = self._target_enclosed_energy()
         max_ksize = self._max_kernel_size()
-        ksize = self._minimum_kernel_size(np.max(fwhms))
+        ksize = self._minimum_kernel_size(np.max(fwhms) / min(1., ystep))
         if max_ksize is not None:
             ksize = min(ksize, max_ksize)
 
-        kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize)
+        kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize, ystep)
         while norm < target and (max_ksize is None or ksize < max_ksize):
             ksize = self._next_kernel_size(ksize, max_ksize)
-            kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize)
+            kernel, norm = self._make_moffat_kernel(gammas, alpha, ksize, ystep)
 
         if norm < target:
             logger.warning(
@@ -353,6 +366,65 @@ class MoffatPSF(AnalyticalPSF):
         if self._renormalize_clipped_kernel() and norm > 0:
             kernel /= norm
         return kernel
+
+    def point_source_image(self, fov, x, y):
+        """Pixel-integrated effective PSF at an actual sky position [arcsec]."""
+        dx, dy = abs(fov.header['CDELT1'])*3600, abs(fov.header['CDELT2'])*3600
+        xp, yp = WCS(fov.header, naxis=2).all_world2pix(x/3600, y/3600, 0)
+        xx = (np.arange(fov.header['NAXIS1']) - xp)[None, :]*dx
+        yy = (np.arange(fov.header['NAXIS2']) - yp)[:, None]*dy
+        wave = self._sample_kernel_wavelengths(fov.waveset)
+        gammas = self.fwhm2gamma(self.fwhm(wave), self.alpha).to_value(u.arcsec)
+        return moffat_cell_integrals(xx, yy, dx, dy, gammas, self.alpha)
+
+    def _apply_convolution(self, obj, spatial_shifts=()):
+        if isinstance(obj, FieldOfView3D) and obj.hdu is None:
+            if obj.trace_id is not None:
+                # Finite cross-slit cells carry a uniform illumination density.
+                # Resolve the effective PSF before shearing those cells in
+                # wavelength. Refine only as needed to resolve this effective PSF.
+                wave = self._sample_kernel_wavelengths(obj.waveset)
+                width = (obj.meta['eta_max'] - obj.meta['eta_min']).to_value(u.arcsec)
+                fwhm = self.fwhm(wave).to_value(u.arcsec).min()
+                obj.meta['effective_psf_fwhm'] = fwhm*u.arcsec
+                step = fwhm / 10
+                rows = max(obj.header['NAXIS2'], int(np.ceil(width / step)))
+                obj.header['NAXIS2'] = rows
+                obj.header['CDELT2'] = np.copysign(width / rows / 3600, obj.header['CDELT2'])
+                obj.header['CRPIX2'] = (rows + 1) / 2
+                obj.header['CRVAL2'] = ((obj.meta['eta_min'] + obj.meta['eta_max']) / 2).to_value(u.deg)
+                length = (obj.meta['xi_max'] - obj.meta['xi_min']).to_value(u.arcsec)
+                columns = max(obj.header['NAXIS1'], int(np.ceil(6*length/fwhm)))
+                obj.header['NAXIS1'] = columns
+                obj.header['CDELT1'] = np.copysign(length/columns/3600, obj.header['CDELT1'])
+                obj.header['CRPIX1'] = (columns+1)/2
+                obj.header['CRVAL1'] = ((obj.meta['xi_min'] + obj.meta['xi_max'])/2).to_value(u.deg)
+                obj.meta['pixel_area'] = None
+                obj._volume = None
+                if 'slit_spectral_width' in obj.meta:
+                    obj.meta['slit_spectral_width'] *= min(1., fwhm / width)
+            obj.hdu = obj.make_hdu(spatial_psf=self, spatial_shifts=spatial_shifts)
+        else:
+            super()._apply_convolution(obj)
+
+    def padded_header(self, fov, point_sources=False):
+        """Spatial support needed to illuminate this FOV through the PSF."""
+        if point_sources:
+            # Points use analytic cell integrals, so constructing a convolution
+            # kernel merely to determine source-selection bounds is redundant.
+            wave = self._sample_kernel_wavelengths(fov.waveset)
+            gamma = self.fwhm2gamma(self.fwhm(wave), self.alpha).to_value(u.arcsec).max()
+            radius = gamma*np.sqrt((1-self._target_enclosed_energy())**(1/(1-self.alpha))-1)
+            padding_x = int(np.ceil(radius/(abs(fov.header['CDELT1'])*3600)))
+            padding_y = int(np.ceil(radius/(abs(fov.header['CDELT2'])*3600)))
+        else:
+            kernel = self.get_kernel(fov)
+            padding_y, padding_x = kernel.shape[0]//2, kernel.shape[1]//2
+        header = fov.header.copy()
+        for axis, padding in ((1, padding_x), (2, padding_y)):
+            header[f'NAXIS{axis}'] += 2*padding
+            header[f'CRPIX{axis}'] += padding
+        return header
 
     def _sample_kernel_wavelengths(self, waveset: u.Quantity) -> u.Quantity:
         max_samples = max(2, int(from_currsys(
@@ -387,22 +459,9 @@ class MoffatPSF(AnalyticalPSF):
         kx = float(from_currsys(self.meta.get("kernel_size", 4.0), self.cmds))
         return self._ensure_odd_int(kx * max_fwhm_pix)
 
-    def _make_moffat_kernel(self, gammas: np.ndarray, alpha:float, ksize: int) -> tuple[np.ndarray, float]:
-        amplitude = (alpha - 1) / (np.pi * gammas**2)
-        x, y = np.meshgrid(
-            np.arange(ksize) - ksize // 2,
-            np.arange(ksize) - ksize // 2,
-        )
-        cube = Moffat2D.evaluate(
-            x=x[None, ...],
-            y=y[None, ...],
-            amplitude=amplitude[:, None, None],
-            x_0=0,
-            y_0=0,
-            gamma=gammas[:, None, None],
-            alpha=alpha,
-        )
-        kernel = np.mean(cube, axis=0)
+    def _make_moffat_kernel(self, gammas, alpha, ksize, ystep=1.):
+        positions = np.arange(ksize) - ksize//2
+        kernel = moffat_cell_integrals(positions[None, :], positions[:, None]*ystep, 1., ystep, gammas, alpha)
         if from_currsys(self.meta.get("rounded_edges", False), self.cmds):
             kernel = self._round_kernel_edges(kernel)
         return kernel, float(np.sum(kernel))
@@ -449,6 +508,33 @@ class MoffatPSF(AnalyticalPSF):
         fwhm_array = table["fwhm"]
         interp = make_interp_spline(wave_array, fwhm_array)
         return lambda wavelengths: interp(wavelengths.to_value(u.um))
+
+
+@lru_cache(maxsize=16)
+def _legendre_rule(order):
+    nodes, weights = np.polynomial.legendre.leggauss(order)
+    nodes.flags.writeable = weights.flags.writeable = False
+    return nodes, weights
+
+
+def moffat_cell_integrals(x, y, dx, dy, gammas, alpha):
+    """Integrate normalized Moffat profiles over rectangles, averaging wavelengths.
+
+    Integrate the conditional Student-t profile analytically along y and use
+    Gauss-Legendre quadrature along x. This resolves narrow profiles without
+    oversampling a spectral cube. All coordinates share one angular unit.
+    """
+    nodes, weights = _legendre_rule(max(8, int(np.ceil(8*dx/np.min(gammas)))))
+    xx = x[..., None] + dx*nodes/2
+    lower, upper = y[..., None] - dy/2, y[..., None] + dy/2
+    integral = np.zeros(np.broadcast_shapes(x.shape, y.shape))
+    normalization = np.exp(gammaln(alpha - .5) - gammaln(alpha - 1)) / np.sqrt(np.pi)
+    for gamma in gammas:
+        marginal = normalization/gamma * (1 + (xx/gamma)**2)**(.5 - alpha)
+        scale = np.sqrt((2*alpha - 1)/(gamma**2 + xx**2))
+        probability = stdtr(2*alpha - 1, upper*scale) - stdtr(2*alpha - 1, lower*scale)
+        integral += np.sum(marginal*probability*weights, axis=-1)*dx/2
+    return integral/len(gammas)
 
 
 class AOEnhanceablePSF(MoffatPSF):
@@ -505,9 +591,10 @@ class AOEnhanceablePSF(MoffatPSF):
 
     @property
     def ao_alpha(self):
-        if self._ao_alpha is None or self._ao_alpha[1] != self.meta['ao_table']:
+        key = _psf_table_key(self.meta['ao_table'], self.cmds), self.meta['alpha']
+        if self._ao_alpha is None or self._ao_alpha[1] != key:
             _, alpha = self.ao_table_data()
-            self._ao_alpha = alpha, self.meta['ao_table']
+            self._ao_alpha = alpha, key
         return self._ao_alpha[0]
 
     @property
@@ -530,9 +617,10 @@ class AOEnhanceablePSF(MoffatPSF):
 
     @property
     def ao_scale(self):
-        if self._ao_interp is None or self._ao_interp[1] != self.meta['ao_table']:
+        key = _psf_table_key(self.meta['ao_table'], self.cmds)
+        if self._ao_interp is None or self._ao_interp[1] != key:
             ao_table, _ = self.ao_table_data()
-            self._ao_interp = self.fwhm_from_table(ao_table), self.meta['ao_table']
+            self._ao_interp = self.fwhm_from_table(ao_table), key
         return self._ao_interp[0]
 
     def ao_fwhm(self, wavelengths):

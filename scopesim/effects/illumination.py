@@ -212,6 +212,7 @@ def _effect_from_spec(spec, cmds=None):
 
 
 def _detector_qe_from_spec(spec, filename=None, cmds=None):
+    spec = from_currsys(spec, cmds)
     if spec is not None:
         if isinstance(spec, str):
             return SpectralQuantumEfficiency(filename=spec, cmds=cmds)
@@ -538,6 +539,7 @@ class ImagePlaneBackground(Effect):
     trace list. The supplied value or model should already include downstream
     throughput and detector QE. For tapered QE maps, use an average or otherwise
     representative positional QE when deriving this non-dispersed background.
+    A FITS ``filename`` and ``extname`` can supply an already registered map.
     """
 
     z_order: ClassVar[tuple[int, ...]] = (760,)
@@ -562,7 +564,7 @@ class ImagePlaneBackground(Effect):
             return obj
 
         shape = obj.hdu.data.shape
-        if self._map is None or shape != self._map_shape:
+        if self._file is not None or self._map is None or shape != self._map_shape:
             self._map = self._make_map(shape)
             self._map_shape = shape
 
@@ -570,7 +572,13 @@ class ImagePlaneBackground(Effect):
         return obj
 
     def _make_map(self, shape):
-        if self._model is None:
+        if self._file is not None:
+            # The calibration image must be registered to this image plane.
+            extname = str(from_currsys(self.meta["extname"], self.cmds))
+            background = self._file[extname].data
+            if background.shape != shape:
+                raise ValueError("Background calibration shape differs from the image plane")
+        elif self._model is None:
             value = from_currsys(self.meta["value"], self.cmds)
             background = np.full(shape, value, dtype=np.float32)
         else:
