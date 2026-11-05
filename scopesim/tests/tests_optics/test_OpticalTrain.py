@@ -23,6 +23,11 @@ from scopesim.effects import (
     Effect,
     SpectralTraceList,
     UnequalBinnedImage,
+    OnChipBinning,
+    BasicReadoutNoise,
+    ImagePlaneBackground,
+    DetectorModePropertiesSetter,
+    SelectorWheel,
 )
 from scopesim.utils import find_file
 
@@ -197,6 +202,33 @@ class TestInit:
 
 
 class TestTraceDetectorCoordinates:
+    def test_explicit_detector_mode_resolves_its_binning_before_mapping(self):
+        train, _ = spectral_geometry_train()
+        before = train.trace_detector_coordinates()
+        train.cmds = UserCommands(properties={'!OBS.detector_readout_mode': 'slow'})
+        setter = DetectorModePropertiesSetter(mode_properties={'slow': {'!DET.binx': 2}}, cmds=train.cmds)
+        train.optics_manager.detector_array_effects = [setter]
+        train.optics_manager.detector_effects = [OnChipBinning(binx='!DET.binx', biny=1, cmds=train.cmds)]
+        after = train.trace_detector_coordinates()
+        np.testing.assert_allclose(after['detector_x'], (before['detector_x'] + .5*u.pixel)/2 - .5*u.pixel)
+        np.testing.assert_array_equal(after['detector_y'], before['detector_y'])
+
+    @pytest.mark.parametrize('selected', [False, True])
+    def test_additive_background_preserves_trace_coordinates(self, selected):
+        train, _ = spectral_geometry_train()
+        before = train.trace_detector_coordinates()
+        background = SelectorWheel(selector_key='image_plane_id', wheel=[{'selector_value': [0], 'effect_class': 'ImagePlaneBackground', 'effect_kwargs': {'value': 1.}}]) if selected else ImagePlaneBackground(value=1.)
+        train.optics_manager.image_plane_effects = [background]
+        after = train.trace_detector_coordinates()
+        np.testing.assert_array_equal(before['detector_x'], after['detector_x'])
+        np.testing.assert_array_equal(before['detector_y'], after['detector_y'])
+
+    def test_unsupported_image_plane_transform_is_not_silently_ignored(self):
+        train, _ = spectral_geometry_train()
+        train.optics_manager.image_plane_effects = [Effect()]
+        with pytest.raises(NotImplementedError, match='additive'):
+            train.trace_detector_coordinates()
+
     def test_maps_live_trace_to_zero_origin_detector_pixels(self):
         train, _ = spectral_geometry_train()
 
@@ -258,14 +290,19 @@ class TestTraceDetectorCoordinates:
         with pytest.raises(NotImplementedError, match="multiple detectors"):
             train.trace_detector_coordinates()
 
-    def test_rejects_post_extraction_binning(self):
+    @pytest.mark.parametrize('binning_class', [UnequalBinnedImage, OnChipBinning])
+    def test_binned_coordinates_match_before_and_after_readout_geometry(self, binning_class):
         train, _ = spectral_geometry_train()
-        train.optics_manager.detector_effects = [
-            UnequalBinnedImage(binx=2, biny=1),
-        ]
-
-        with pytest.raises(NotImplementedError, match="binning"):
-            train.trace_detector_coordinates()
+        native = train.trace_detector_coordinates()
+        binning = binning_class(binx=2, biny=1)
+        train.optics_manager.detector_effects = [binning]
+        before = train.trace_detector_coordinates()
+        np.testing.assert_allclose(before['detector_x'], (native['detector_x'] + .5*u.pixel)/2 - .5*u.pixel)
+        np.testing.assert_allclose(before['detector_y'], native['detector_y'])
+        binning.apply_to(train.detector_managers[0][0])
+        after = train.trace_detector_coordinates()
+        np.testing.assert_array_equal(before['detector_x'], after['detector_x'])
+        np.testing.assert_array_equal(before['detector_y'], after['detector_y'])
 
 
 @pytest.mark.slow
@@ -378,6 +415,28 @@ class TestObserve:
 
 @pytest.mark.usefixtures("patch_mock_path")
 class TestReadout:
+    def test_explicit_readout_keys_and_reset(self, unity_cmds):
+        opt = OpticalTrain(deepcopy(unity_cmds))
+        for seconds in (3600., 300., 3600.):
+            opt.readout(**{'!OBS.dit': seconds, '!OBS.ndit': 1, '!OBS.dit_blue': seconds / 2})
+            assert opt.cmds['!OBS.dit'] == seconds
+            assert opt.cmds['!OBS.dit_blue'] == seconds / 2
+        opt.readout(dit=17., ndit=2)
+        assert opt.cmds['!OBS.dit'] == 17.
+        assert opt.cmds['!OBS.ndit'] == 2
+
+    def test_successive_noise_realizations_can_be_replayed(self, unity_cmds, unity_src):
+        commands = deepcopy(unity_cmds)
+        commands['!SIM.random.seed'] = 17
+        opt = OpticalTrain(commands)
+        opt.optics_manager.add_effect(BasicReadoutNoise(noise_std=3., ndit=1, cmds=opt.cmds))
+        opt.observe(unity_src)
+        first = opt.readout()[0][1].data
+        second = opt.readout()[0][1].data
+        replay = opt.readout(roid=0)[0][1].data
+        assert not np.array_equal(first, second)
+        np.testing.assert_array_equal(first, replay)
+
     def test_readout_works_when_source_observed(self, unity_cmds, unity_src):
 
         opt = OpticalTrain(unity_cmds)

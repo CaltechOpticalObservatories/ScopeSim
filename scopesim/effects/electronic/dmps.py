@@ -23,6 +23,9 @@ class DetectorModePropertiesSetter(Effect):
     mode_properties : dict
         A dictionary containing the DET parameters to be changed for each mode.
         See below for an example yaml entry.
+    mode_key : str
+        Command selecting the mode, by default ``!OBS.detector_readout_mode``.
+        Separate keys allow independent detector arms to select their modes.
 
     Examples
     --------
@@ -70,21 +73,20 @@ class DetectorModePropertiesSetter(Effect):
         check_keys(self.meta, self.required_keys, action="error")
 
         self.mode_properties = kwargs["mode_properties"]
+        self.mode_key = kwargs.get("mode_key", "!OBS.detector_readout_mode")
 
     def apply_to(self, obj, **kwargs):
         logger.debug("Entering DetectorModePropertiesSetter.apply_to")
-        mode_name = kwargs.get(
-            "detector_readout_mode",
-            from_currsys("!OBS.detector_readout_mode", self.cmds),
-        )
-
+        mode_name = kwargs.get("detector_readout_mode",
+                               from_currsys(self.mode_key,
+                                            self.cmds))
         if isinstance(obj, ImagePlane) and mode_name == "auto":
             mode_name = self.select_mode(obj, **kwargs)
             logger.info("Detector mode set to %s", mode_name)
 
         self.meta["detector_readout_mode"] = mode_name
         props_dict = self.mode_properties[mode_name]
-        self.cmds["!OBS.detector_readout_mode"] = mode_name
+        self.cmds[self.mode_key] = mode_name
         for key, value in props_dict.items():
             self.cmds[key] = value
             logger.debug("DMPS setting %s: %s", key, value)

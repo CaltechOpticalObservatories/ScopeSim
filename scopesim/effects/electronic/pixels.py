@@ -93,19 +93,55 @@ class BinnedImageBase(ElectronicEffect):
 
     z_order: ClassVar[tuple[int, ...]] = (870,)
 
+    def __call__(self, data: ArrayLike) -> NDArray:
+        bx, by = self.bin_factors
+        ny, nx = data.shape
+        return data.reshape(ny//by, by, nx//bx, bx).sum(axis=(1, 3))
+
+    def bin_header(self, native_header):
+        """WCS of the summed pixel blocks, also used by trace coordinates."""
+        bx, by = self.bin_factors
+        if not isinstance(bx, int) or not isinstance(by, int) or min(bx, by) < 1:
+            raise ValueError('Bin factors must be positive integers')
+        if 'allowed_bins' in self.meta and [bx, by] not in self.meta['allowed_bins']:
+            raise ValueError(f'Unsupported binning: {bx} x {by}')
+        header = native_header.copy()
+        for axis, factor in ((1, bx), (2, by)):
+            if header[f'NAXIS{axis}'] % factor:
+                raise ValueError('Binning must divide the full detector dimensions')
+            header[f'NAXIS{axis}'] //= factor
+        for suffix in [''] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ'):
+            if f'CRPIX1{suffix}' not in header:
+                continue
+            for axis, factor in ((1, bx), (2, by)):
+                header[f'CRPIX{axis}{suffix}'] = (header[f'CRPIX{axis}{suffix}'] - .5)/factor + .5
+            if f'CD1_1{suffix}' in header:
+                for i in (1, 2):
+                    for j, factor in ((1, bx), (2, by)):
+                        header[f'CD{i}_{j}{suffix}'] *= factor
+            else:
+                header[f'CDELT1{suffix}'] *= bx
+                header[f'CDELT2{suffix}'] *= by
+                if f'PC1_2{suffix}' in header:
+                    header[f'PC1_2{suffix}'] *= by/bx
+                if f'PC2_1{suffix}' in header:
+                    header[f'PC2_1{suffix}'] *= bx/by
+        header['BINX'], header['BINY'] = bx, by
+        return header
+
+    def _apply_to_det(self, det):
+        header = self.bin_header(det.header)
+        det.data = self(det.data)
+        det.header.update(header)
+        det.meta.update(header)
+
 
 class BinnedImage(BinnedImageBase):
     required_keys = {"bin_size"}
 
-    def __call__(self, data: ArrayLike) -> NDArray:
-        height, width = data.shape
-        binned_data = data.reshape((
-            height//self.bin_size,
-            self.bin_size,
-            width//self.bin_size,
-            self.bin_size
-        )).sum(axis=3).sum(axis=1)
-        return binned_data
+    @property
+    def bin_factors(self):
+        return self.bin_size, self.bin_size
 
     @property
     def bin_size(self) -> int:
@@ -115,15 +151,9 @@ class BinnedImage(BinnedImageBase):
 class UnequalBinnedImage(BinnedImageBase):
     required_keys = {"binx","biny"}
 
-    def __call__(self, data: ArrayLike) -> NDArray:
-        height, width = data.shape
-        binned_data = data.reshape((
-            height//self.biny,
-            self.biny,
-            width//self.binx,
-            self.binx
-        )).sum(axis=3).sum(axis=1)
-        return binned_data
+    @property
+    def bin_factors(self):
+        return self.binx, self.biny
 
     @property
     def binx(self) -> int:
@@ -132,3 +162,14 @@ class UnequalBinnedImage(BinnedImageBase):
     @property
     def biny(self) -> int:
         return from_currsys(self.meta["biny"], self.cmds)
+
+
+class OnChipBinning(UnequalBinnedImage):
+    """Sum charge in FITS x/y pixel blocks before adding read noise.
+
+    Unlike a software sum after readout, each output pixel receives one read
+    noise draw. Configure this effect between charge integration and read noise.
+    WCS reference pixels refer to the centers of the new pixel blocks.
+    """
+
+    z_order = (815,)
