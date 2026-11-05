@@ -141,10 +141,9 @@ class RandomEffect(ElectronicEffect):
             New Generator instance.
 
         """
-        if det_id is not None:
-            seed = [det_id, *self.random_seed]
-        else:
-            seed = self.random_seed
+        seed = self.random_seed
+        if det_id is not None and seed is not None:
+            seed = [det_id, *seed]
         return np.random.default_rng(seed)
 
     def plot(self, det):
@@ -194,7 +193,7 @@ class BasicReadoutNoise(RandomEffect):
         logger.debug("Apply %s to %s", self.display_name, det)
 
         ndit = from_currsys(self.meta["ndit"], self.cmds)
-        det.data = self(det.data, ndit)
+        det.data = self(det.data, ndit, det_id=det.det_id)
 
 
 class PoorMansHxRGReadoutNoise(BasicReadoutNoise):
@@ -427,6 +426,9 @@ class ShotNoise(RandomEffect):
     """
     z_order: ClassVar[tuple[int, ...]] = (820,)
 
+    def _apply_to_det(self, det):
+        det.data = self(det.data, det_id=det.det_id)
+
     def __call__(self, data: ArrayLike, det_id: int | None = None) -> NDArray:
         rng = self.create_rng(det_id)
 
@@ -449,3 +451,37 @@ class ShotNoise(RandomEffect):
         )
 
         return data
+
+
+
+class AvalancheShotNoise(ShotNoise):
+    """Input-referred photon multiplication noise, with independent dark charge.
+
+    Conditional on N detected photons, a gamma variate of mean N and variance
+    N(F-1) gives total photon variance F*mu. F is a variance multiplier, not
+    an RMS factor. The adopted input-referred dark term remains Poisson.
+    Apply after ExposureIntegration and DarkCurrent, before read noise.
+    """
+
+    required_keys = {"excess_noise_factor", "dark_current", "dit", "ndit"}
+
+    @property
+    def excess_noise_factor(self):
+        return from_currsys(self.meta["excess_noise_factor"], self.cmds)
+
+    def __call__(self, data, dark_charge=0., det_id=None):
+        factor = self.excess_noise_factor
+        if factor < 1:
+            raise ValueError("The avalanche variance multiplier must be at least one.")
+        if factor == 1:
+            return super().__call__(data, det_id=det_id)
+        rng = self.create_rng(det_id)
+        photons = rng.poisson(data - dark_charge)
+        signal = rng.gamma(photons / (factor - 1), factor - 1)
+        return signal + rng.poisson(dark_charge, size=data.shape)
+
+    def _apply_to_det(self, det):
+        dark = from_currsys(self.meta["dark_current"], self.cmds)
+        dit = from_currsys(self.meta["dit"], self.cmds)
+        ndit = from_currsys(self.meta["ndit"], self.cmds)
+        det.data = self(det.data, dark * dit * ndit, det_id=det.det_id)

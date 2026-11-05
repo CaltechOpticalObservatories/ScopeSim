@@ -13,12 +13,13 @@ This module implements a SelectorWheel effect that allows the user to define mul
 import importlib
 from numbers import Integral
 
-from ..utils import (check_keys, get_logger, real_colname)
+from ..utils import from_currsys, check_keys, get_logger, real_colname
 from .effects import Effect
 from ..optics.fov_volume_list import FovVolumeList
 from ..optics.fov import FieldOfView
 from ..optics.image_plane import ImagePlane
 from ..detector.detector import Detector
+from ..source.source import Source
 
 logger = get_logger(__name__)
 
@@ -62,8 +63,10 @@ class SelectorWheel(Effect):
         self.wheel_effects = {}
         for wheel_entry in self.meta["wheel"]:
             selector_value = wheel_entry["selector_value"] # can be single value or list of values
-            effect_class_name = wheel_entry["effect_class"]
+            effect_class_name = from_currsys(wheel_entry["effect_class"], self.cmds)
             effect_kwargs = wheel_entry.get("effect_kwargs", {})
+            if isinstance(effect_kwargs, str):
+                effect_kwargs = from_currsys(effect_kwargs, self.cmds)
 
             # Dynamically import the effect class
             effect_module = importlib.import_module("scopesim.effects")
@@ -78,8 +81,14 @@ class SelectorWheel(Effect):
         self.z_order = self._resolve_z_order()
 
 
-    def apply_to(self, obj, **kwargs):
-        """Based on the selector_key's value in obj.meta, apply the corresponding effect from the wheel."""
+    def apply_to(self, obj, fov=None, **kwargs):
+        """Select from obj.meta, or fov.meta when applying branch effects to a Source."""
+        if isinstance(obj, Source) and fov is not None:
+            selector_value = fov.meta[self.meta["selector_key"]]
+            effect_to_apply = self.get_effect(selector_value)
+            if effect_to_apply is not None:
+                obj = effect_to_apply.apply_to(obj, fov=fov, **kwargs)
+
         if isinstance(obj, FieldOfView):
             if self.meta['selector_key'] not in obj.meta.keys():
                 raise ValueError(f"Selector key {self.meta['selector_key']} not found in FieldOfView meta.")
