@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """Defines FieldOfView class."""
 
+from copy import copy
 from warnings import warn
 from itertools import chain
 from collections.abc import Iterable, Generator
 
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
+from scipy.signal import fftconvolve
 
 from astropy import units as u
 from astropy.io import fits
@@ -73,6 +75,7 @@ class FieldOfView:
             "wave_max": quantify(waverange[1], u.um),
             "wave_bin_n": 1,
             "wave_bin_type": "linear",
+            'spectral_padding': 0*u.um,
 
             "area": 0 * u.m**2,
             "pixel_area": None,  # [arcsec]
@@ -132,7 +135,7 @@ class FieldOfView:
             self.meta["pixel_area"] = pixel_area(self.header)
         return self.meta["pixel_area"]
 
-    def extract_from(self, src) -> None:
+    def extract_from(self, src, spatial_header=None, _spectral_wavesets=None) -> None:
         """
         Extract relevent fields from source object.
 
@@ -154,17 +157,22 @@ class FieldOfView:
 
         """
         assert isinstance(src, Source), f"expected Source: {type(src)}"
+        self.fields = []
+        self.hdu = None
 
-        fields_in_fov = list(self.get_fields_in_fov(src.fields))
+        corners_arcsec, _ = self.get_corners("arcsec")
+        if spatial_header is not None:
+            corners_arcsec = imp_utils.calc_footprint(spatial_header, new_unit='arcsec')
+        corners_deg = corners_arcsec / 3600
+        fields_in_fov = list(self.get_fields_in_fov(src.fields, corners_arcsec))
 
         if not fields_in_fov:
             logger.warning("No fields in FOV.")
         else:
             logger.debug("%d fields in FOV", len(fields_in_fov))
 
-        corners_arcsec, _ = self.get_corners("arcsec")
-        corners_deg, _ = self.get_corners("deg")
         minmax = array_minmax(corners_arcsec) * u.arcsec
+        source_range = self.waverange + np.array([-1, 1])*self.meta['spectral_padding']
 
         for field in fields_in_fov:
             if isinstance(field, TableSourceField):
@@ -176,7 +184,7 @@ class FieldOfView:
                 new_fld = TableSourceField(
                     field=extracted,
                     spectra={
-                        ref: extract_range_from_spectrum(spec, self.waverange)
+                        ref: extract_range_from_spectrum(spec, source_range, _waveset=None if _spectral_wavesets is None else _spectral_wavesets[spec])
                         for ref, spec in field.spectra.items()
                         if ref in extracted["ref"]
                     },
@@ -190,7 +198,7 @@ class FieldOfView:
                 new_fld = ImageSourceField(
                     field=extracted,
                     spectra={
-                        ref: extract_range_from_spectrum(spec, self.waverange)
+                        ref: extract_range_from_spectrum(spec, source_range, _waveset=None if _spectral_wavesets is None else _spectral_wavesets[spec])
                         for ref, spec in field.spectra.items()
                     },
                 )
@@ -208,7 +216,7 @@ class FieldOfView:
                     field=None,
                     header=field.header,
                     spectra={
-                        ref: extract_range_from_spectrum(spec, self.waverange)
+                        ref: extract_range_from_spectrum(spec, source_range, _waveset=None if _spectral_wavesets is None else _spectral_wavesets[spec])
                         for ref, spec in field.spectra.items()
                     },
                 )
@@ -246,12 +254,13 @@ class FieldOfView:
     def flatten(self):
         """If cube, collapse along first axis."""
         if self.hdu and self.hdu.header["NAXIS"] == 3:
-            image = np.sum(self.hdu.data, axis=0)
+            image = np.sum(self.hdu.data, axis=0, dtype=np.float64)
             self.hdu.data = image
 
-    def get_fields_in_fov(self, fields: Iterable[SourceField]) -> Generator:
+    def get_fields_in_fov(self, fields: Iterable[SourceField], fov_corners=None) -> Generator:
         """Return True if Source.field footprint is inside FOV footprint."""
-        fov_corners, _ = self.get_corners("arcsec")
+        if fov_corners is None:
+            fov_corners, _ = self.get_corners("arcsec")
 
         for field in fields:
             field_corners = field.get_corners("arcsec")
@@ -356,7 +365,6 @@ class FieldOfView:
         # up a duplicated or a dropped row/column.
         new_wcs = image_wcs.deepcopy()
         new_wcs.wcs.crpix = image_wcs.wcs.crpix - xy0p
-        new_wcs.wcs.cdelt = np.abs(new_wcs.wcs.cdelt)
         new_naxis = xy1p - xy0p
         logger.debug("orig image wcs: %s", image_wcs)
         logger.debug("new cutout wcs: %s", new_wcs)
@@ -400,10 +408,14 @@ class FieldOfView:
             hdu_waves = hdu_waves.quantity.to(u.um)
 
         wdel = hdr["CDELT3"] * u.Unit(hdr.get("CUNIT3", "AA"))
-        fov_wmin, fov_wmax = self.waverange
+        fov_wmin, fov_wmax = self.waverange + np.array([-1, 1])*self.meta['spectral_padding']
         # need to go [+/-] half a bin
-        mask = ((hdu_waves > fov_wmin - 0.5 * wdel) *
-                (hdu_waves <= fov_wmax + 0.5 * wdel))
+        margin = abs(wdel)/2
+        if isinstance(self, FieldOfView3D):
+            # Spectroscopic inputs remain densities until bin integration;
+            # retain neighbours on both sides of the output bin edges.
+            margin = abs(wdel) + np.diff(self.cube_waveset[:2])[0]/2
+        mask = (hdu_waves > fov_wmin - margin) & (hdu_waves <= fov_wmax + margin)
 
         # OC [2021-12-14] if fov range is not covered by the source return nothing
         if not np.any(mask):
@@ -418,12 +430,11 @@ class FieldOfView:
         f0 = (abs(hdu_waves[i0p] - fov_wmin + 0.5 * wdel) % wdel) / wdel    # blue edge
         f1 = (abs(hdu_waves[i1p] - fov_wmax - 0.5 * wdel) % wdel) / wdel    # red edge
 
-        data = cubehdu.data[i0p:i1p+1,
-                            xy0p[1]:xy1p[1],
-                            xy0p[0]:xy1p[0]]
-        data[0, :, :] *= f0.to(1).round(11).value  # decompose dimensionless
-        if i1p > i0p:
-            data[-1, :, :] *= f1.to(1).round(11).value
+        data = cubehdu.data[i0p:i1p+1, xy0p[1]:xy1p[1], xy0p[0]:xy1p[0]].copy()
+        if not isinstance(self, FieldOfView3D):
+            data[0] *= f0.to_value(1).round(11)
+            if i1p > i0p:
+                data[-1] *= f1.to_value(1).round(11)
 
         # w0, w1 : the closest cube wavelengths outside the fov edge wavelengths
         # fov_waves : the fov edge wavelengths
@@ -745,7 +756,7 @@ class FieldOfView2D(FieldOfView):
                 u.Unit(field.header["CUNIT3"])
             ).to(u.Angstrom)
             # First collapse to image, then convert units
-            image = np.sum(field.data, axis=0) * PHOTLAM/u.arcsec**2
+            image = np.sum(field.data, axis=0, dtype=np.float64) * PHOTLAM/u.arcsec**2
             image = (image * self.area * field.pixel_area *
                      spectral_bin_width).to(u.ph/u.s)
             logger.debug("2D FOV make_cubefields: image.mean() = %f %s",
@@ -811,8 +822,8 @@ class FieldOfView2D(FieldOfView):
             else:
                 # Note: these had x/ypix+0.5 until a06ab75
                 # TODO: could these be something more numpythonic grid-ish?
-                x = np.array(xpix).astype(int)
-                y = np.array(ypix).astype(int)     # quickest way to round
+                x = np.floor(xpix + .5).astype(int)
+                y = np.floor(ypix + .5).astype(int)
                 flux = np.array([fluxes[int(ref)] for ref in field.field["ref"]])
                 yield flux, np.array(field.field["weight"]), x, y
 
@@ -870,14 +881,11 @@ class FieldOfView2D(FieldOfView):
                 # enabled, it is therefore not necessary to deploy the fix
                 # below in the else-branch.
                 assert not isinstance(x, Iterable), "x must be an integer"
-                try:
+                if 0 <= x < canvas_image_hdu.data.shape[1] and 0 <= y < canvas_image_hdu.data.shape[0]:
                     canvas_image_hdu.data[y, x] += flux * weight
-                except IndexError:
-                    continue
             else:
                 # Mask out any stars that were pushed out of the fov by rounding
-                mask = ((x < canvas_image_hdu.data.shape[1]) *
-                        (y < canvas_image_hdu.data.shape[0]))
+                mask = (x >= 0) & (y >= 0) & (x < canvas_image_hdu.data.shape[1]) & (y < canvas_image_hdu.data.shape[0])
 
                 # This used to contain this line:
                 #   canvas_image_hdu.data[y[mask], x[mask]] += flux[mask] * weight[mask]
@@ -918,6 +926,16 @@ class FieldOfView3D(FieldOfView):
 
     """
 
+    @property
+    def cube_waveset(self):
+        wave_unit = u.Unit(from_currsys('!SIM.spectral.wave_unit', self.cmds))
+        step = from_currsys('!SIM.spectral.spectral_bin_width', self.cmds)
+        if 'slit_spectral_width' in self.meta:
+            step = min(step, self.meta['slit_spectral_width'].to_value(wave_unit)/20)
+        start, stop = self.meta['wave_min'].value, self.meta['wave_max'].value
+        padding = int(np.ceil(self.meta['spectral_padding'].to_value(wave_unit)/step))
+        return (start + np.arange(-padding, int((stop - start)/step) + padding)*step)*wave_unit
+
     def _make_cubefields(self, fov_waveset):
         """
         Find Cube fields.
@@ -936,7 +954,7 @@ class FieldOfView3D(FieldOfView):
             field_hdu.header.update(CRPIX3=1., CRVAL3=fov_waveset[0].to_value(u.um), CDELT3=np.diff(fov_waveset[:2])[0].to_value(u.um), CUNIT3='um', CTYPE3='WAVE')
             yield field_hdu
 
-    def _make_imagefields(self, fov_waveset, spline_order):
+    def _make_imagefields(self, fov_waveset, spline_order, spatial_psf=None):
         """
         Find Image fields.
 
@@ -951,20 +969,19 @@ class FieldOfView3D(FieldOfView):
             # ImageHDUs have photons/second/pixel.
             field_hdu = self._make_scaled_hdu(field)
 
-            canvas_image_hdu = fits.ImageHDU(
-                data=zeros_from_header(self.header, ndims=2),
-                header=self.header)
-            canvas_image_hdu = imp_utils.add_imagehdu_to_imagehdu(
-                field_hdu,
-                canvas_image_hdu,
-                spline_order=spline_order,
-                conserve_flux=True,
-                differential=True,
-            )
+            if spatial_psf is None:
+                image = imp_utils.project_spatial_density(field_hdu, self.header)
+            else:
+                padded = spatial_psf.padded_header(self)
+                image = imp_utils.project_spatial_density(field_hdu, padded)
+                image = fftconvolve(image, spatial_psf.get_kernel(self), mode='same')
+                px = (padded['NAXIS1'] - self.header['NAXIS1'])//2
+                py = (padded['NAXIS2'] - self.header['NAXIS2'])//2
+                image = image[py:py + self.header['NAXIS2'], px:px + self.header['NAXIS1']]
 
             spec = average_spectrum(field.spectrum, fov_waveset)
             # 2D * 1D -> 3D
-            field_cube = canvas_image_hdu.data[None, :, :] * spec[:, None, None]
+            field_cube = image[None, :, :] * spec[:, None, None]
             yield field_cube.value
 
     def _make_tablefields(self, fov_waveset):
@@ -1003,7 +1020,7 @@ class FieldOfView3D(FieldOfView):
                     for i, j, k in zip(xs, ys, fracs):
                         yield flux_vector * k, i, j
                 else:
-                    yield flux_vector, int(xpix), int(ypix)
+                    yield flux_vector, int(np.floor(xpix + .5)), int(np.floor(ypix + .5))
 
     def _make_backfields(self, fov_waveset):
         for field in self._get_background_fields():
@@ -1015,81 +1032,47 @@ class FieldOfView3D(FieldOfView):
             spec = average_spectrum(field.spectrum, fov_waveset)
             yield spec[:, None, None].value
 
-    def make_hdu(self):
+    def make_hdu(self, spatial_psf=None, spatial_shifts=()):
+        """Render spectral surface-brightness density in ph/s/um/arcsec2.
+
+        Native spectra are integrated into the cube wavelength cells. Point
+        sources use cell-integrated PSF illumination; resolved fields are
+        convolved before the physical aperture is clipped. Collecting area is
+        applied here. Slit and detector cell integrals are applied by the trace.
         """
-        TBA.
+        if spatial_shifts:
+            # Keep incoming illumination outside the aperture until every
+            # atmospheric displacement is applied. The physical slit metadata
+            # and cell sizes stay unchanged; only temporary spatial support grows.
+            shifts = [(effect, effect.get_shifts(self)) for effect in spatial_shifts]
+            padded = copy(self)
+            padded.header = self.header.copy()
+            for effect, displacement in shifts:
+                # This is the final PSF grid. Earlier source selection keeps
+                # conservative support because its coarser grid can still change.
+                padded.header = effect._padded_header(padded.header, displacement, rounded=True)
+            padded.hdu = padded.make_hdu(spatial_psf=spatial_psf)
+            for effect, displacement in shifts:
+                effect.apply_to(padded, _shifts=displacement)
+            px = (padded.header['NAXIS1'] - self.header['NAXIS1'])//2
+            py = (padded.header['NAXIS2'] - self.header['NAXIS2'])//2
+            header = padded.hdu.header.copy()
+            header.update(CRPIX1=self.header['CRPIX1'], CRPIX2=self.header['CRPIX2'])
+            data = padded.hdu.data[:, py:py + self.header['NAXIS2'], px:px + self.header['NAXIS1']].copy()
+            return fits.ImageHDU(data=data, header=header)
 
-        Used for IFUs, slit spectrographs, and coherent MOSs (e.g.KMOS)
-
-        Returned cube units are ``ph s-1 voxel-1``
-
-        .. note:: ``self.make_cube()`` does NOT store anything in ``self.cube``
-
-            self.cube and self.make_cube() are deliberately kept seperately
-            so that self.cube will not be accidently overwritten by a rogue
-            call from an Effect object.
-
-            All Effect objects should specifically test whether
-            ``self.cube is None`` before assigning a new cube it
-
-        The cube is made with these steps:
-
-        1. Make waveset and canvas cube::
-
-            if at least one cube:
-                set waveset to equal largest cube waveset
-            else:
-                make waveset from self.meta values
-            make canvas cube based on waveset of largest cube and NAXIS1,2 from fov.header
-
-        2. Find Cube fields (see ``FieldOfView._make_cube_cubefields()``).
-        3. Find Image fields (see ``FieldOfView._make_cube_imagefields()``).
-        4. Find Table fields (see ``FieldOfView._make_cube_tablefields()``).
-
-        ``PHOTLAM = ph / (cm2 * s * AA)``.
-        Original source fields are in units of:
-
-        - tables: (PHOTLAM in spectrum)
-        - images: arcsec-2 (PHOTLAM in spectrum)
-        - cubes: PHOTLAM arcsec-2
-
-        .. warning:: Input Images and Cubes should have units of PHOTLAM arcsec-2
-
-        Returns
-        -------
-        canvas_cube_hdu : fits.ImageHDU
-            [ph s-1 um-1 arcsec-2]      # as needed by SpectralTrace
-
-        """
         # 1. Make waveset and canvas cube (area, bin_width are applied at end)
         # TODO: Why is this not self.waveset? What's different?
         # -> For non-cube input but cube output (e.g. 2D image in spec mode),
         #    waverange needs to be resampled (I guess) to spectral_bin_width,
         #    but self.waverange can only access the fields.
         # -> Perhaps change that??
-        wave_unit = u.Unit(from_currsys("!SIM.spectral.wave_unit", self.cmds))
-        fov_waveset = np.arange(
-            self.meta["wave_min"].value, self.meta["wave_max"].value,
-            from_currsys("!SIM.spectral.spectral_bin_width", self.cmds)) * wave_unit
+        fov_waveset = self.cube_waveset.to(u.um)
 
-        # Note: There is an edge case where some floating point madness
-        #       results in the arange ticking over by another bin by just
-        #       .000000000005 (yeah...), which creates and off-by-one error
-        #       further down the line.
-        # TODO: Find a better way to solve this, perhaps with linspace...
-        n_wave = int(
-            (self.meta["wave_max"].value - self.meta["wave_min"].value) /
-            from_currsys("!SIM.spectral.spectral_bin_width", self.cmds)
-        )
-        fov_waveset = fov_waveset[:n_wave].to(u.um)
-
-        # make canvas cube based on waveset of largest cube and NAXIS1,2
-        # from fov.header
-        canvas_cube_hdu = fits.ImageHDU(
-            data=np.zeros((len(fov_waveset),
-                           self.header["NAXIS2"],
-                           self.header["NAXIS1"])),
-            header=self.header)
+        # Retain double precision when combining faint sources with sky and
+        # thermal backgrounds; subtraction can expose storage-rounding error.
+        shape = (len(fov_waveset), self.header['NAXIS2'], self.header['NAXIS1'])
+        canvas_cube_hdu = fits.ImageHDU(data=np.zeros(shape, dtype=np.float64), header=self.header)
         # set BUNIT initially to PHOTLAM / arcsec**2
         canvas_cube_hdu.header["BUNIT"] = "ph cm-2 s-1 AA-1 arcsec-2"
 
@@ -1112,26 +1095,38 @@ class FieldOfView3D(FieldOfView):
             assert canvas_cube_hdu.header["NAXIS3"] == self.detector_header["NAXIS3"]
 
         for field_hdu in self._make_cubefields(fov_waveset):
-            canvas_cube_hdu = imp_utils.add_imagehdu_to_imagehdu(
-                field_hdu,
-                canvas_cube_hdu,
-                spline_order=self.spline_order,
-                conserve_flux=True,
-                differential=True,
-            )
+            if spatial_psf is None:
+                canvas_cube_hdu.data += imp_utils.project_spatial_density(field_hdu, self.header)
+            else:
+                padded = spatial_psf.padded_header(self)
+                kernel = spatial_psf.get_kernel(self)[None, :, :]
+                px = (padded['NAXIS1'] - self.header['NAXIS1'])//2
+                py = (padded['NAXIS2'] - self.header['NAXIS2'])//2
+                # Bound the temporary padded cube, even for long input spectra.
+                for start in range(0, len(fov_waveset), 64):
+                    chunk = fits.ImageHDU(data=field_hdu.data[start:start + 64], header=field_hdu.header)
+                    data = imp_utils.project_spatial_density(chunk, padded)
+                    data = fftconvolve(data, kernel, mode='same', axes=(-2, -1))
+                    canvas_cube_hdu.data[start:start + 64] += data[:, py:py + self.header['NAXIS2'], px:px + self.header['NAXIS1']]
 
-        canvas_cube_hdu.data = sum(
-            self._make_imagefields(fov_waveset, self.spline_order),
-            start=canvas_cube_hdu.data,
-        )
+        for image in self._make_imagefields(fov_waveset, self.spline_order, spatial_psf):
+            canvas_cube_hdu.data += image
 
-        for flux, x, y in self._make_tablefields(fov_waveset):
-            # To prevent adding array values in this manner.
-            assert not isinstance(x, Iterable), "x should be integer"
-            canvas_cube_hdu.data[:, y, x] += flux
+        if spatial_psf is None:
+            for flux, x, y in self._make_tablefields(fov_waveset):
+                if 0 <= x < self.header['NAXIS1'] and 0 <= y < self.header['NAXIS2']:
+                    canvas_cube_hdu.data[:, y, x] += flux
+        else:
+            for field in self._get_table_fields():
+                spectra = {ref: average_spectrum(spec, fov_waveset).value for ref, spec in field.spectra.items()}
+                for row in field.field:
+                    image = spatial_psf.point_source_image(self, row['x'], row['y'])/self.pixel_area.value
+                    for start in range(0, len(fov_waveset), 64):
+                        spectrum = spectra[row['ref']][start:start + 64]
+                        canvas_cube_hdu.data[start:start + 64] += spectrum[:, None, None]*image[None, :, :]*row['weight']
 
-        canvas_cube_hdu.data = sum(self._make_backfields(fov_waveset),
-                                   start=canvas_cube_hdu.data)
+        for background in self._make_backfields(fov_waveset):
+            canvas_cube_hdu.data += background
 
         # SpectralTrace wants ph/s/um/arcsec2 --> get rid of m2, leave um
         canvas_cube_hdu.data *= self.area.to(u.cm ** 2).value
