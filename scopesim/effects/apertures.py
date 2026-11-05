@@ -128,6 +128,8 @@ class ApertureMask(Effect):
             for vol in obj.volumes:
                 vol["meta"]["xi_min"] = min(x) * u.arcsec
                 vol["meta"]["xi_max"] = max(x) * u.arcsec
+                vol["meta"]["eta_min"] = min(y) * u.arcsec
+                vol["meta"]["eta_max"] = max(y) * u.arcsec
                 vol["meta"]["slit_name"] = self.meta["name"]
 
                 if "offset_type" in self.meta:
@@ -305,6 +307,8 @@ class ApertureList(Effect):
                     # ..todo: HUGE HACK - Get rid of this!
                     vol["meta"]["xi_min"] = row["left"] * u.arcsec
                     vol["meta"]["xi_max"] = row["right"] * u.arcsec
+                    vol["meta"]["eta_min"] = row["bottom"] * u.arcsec
+                    vol["meta"]["eta_max"] = row["top"] * u.arcsec
                     vol["conserve_image"] = row["conserve_image"]
                     vol["shape"] = row["shape"]
                     vol["angle"] = row["angle"]

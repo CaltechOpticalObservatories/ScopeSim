@@ -199,6 +199,15 @@ class TestFromCurrSys:
     def test_converts_numpy_array(self):
         assert utils.from_currsys(np.array(["!SIM.random.seed"]*2))[1] is None
 
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int32])
+    def test_numeric_calibration_array_keeps_values_and_precision(self, dtype):
+        values = np.arange(12, dtype=dtype).reshape(3, 4)
+        resolved = utils.from_currsys(values)
+        np.testing.assert_array_equal(resolved, values)
+        assert resolved.dtype == dtype
+        resolved[0, 0] = 20
+        assert values[0, 0] == 0
+
     def test_converts_dict(self):
         assert utils.from_currsys({"seed": "!SIM.random.seed"})["seed"] is None
 

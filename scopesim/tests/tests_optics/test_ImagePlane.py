@@ -284,6 +284,15 @@ class TestAddImageHDUToImageHDU:
 
 
 class TestImagePlaneAdd:
+    def test_faint_signal_is_retained_on_bright_background(self, image_hdu_square):
+        plane = opt_imp.ImagePlane(image_hdu_square.header)
+        background = fits.ImageHDU(np.full(image_hdu_square.data.shape, 1e8), image_hdu_square.header)
+        signal = fits.ImageHDU(np.ones(image_hdu_square.data.shape), image_hdu_square.header)
+        plane.add(background)
+        before = plane.data.copy()
+        plane.add(signal)
+        np.testing.assert_allclose(plane.data - before, 1., atol=1e-7)
+
     def test_simple_add_imagehdu_conserves_flux(
         self, image_hdu_square, image_hdu_rect,
     ):
