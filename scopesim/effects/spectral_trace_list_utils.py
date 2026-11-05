@@ -16,6 +16,7 @@ import numpy as np
 
 from scipy.interpolate import interp1d, RectBivariateSpline
 from scipy.ndimage import gaussian_filter1d, map_coordinates
+from scipy.sparse import csr_matrix
 
 from astropy.table import Table, vstack
 from astropy.modeling import fitting
@@ -90,6 +91,7 @@ class SpectralTrace:
     - x, y : [mm]
     """
 
+    _pixel_quadrature_order = 4
     _class_params = {
         "x_colname": "x",
         "y_colname": "y",
@@ -146,6 +148,7 @@ class SpectralTrace:
 
         # Declaration of other attributes
         self._xilamimg = None
+        self._slit_cache = {}
         self.dlam_per_pix = None
         self.fit_inverse = True
 
@@ -268,8 +271,8 @@ class SpectralTrace:
         xmin_mm, ymin_mm = fpa_wcsd.all_pix2world(xmin, ymin, 0)
         xmax_mm, ymax_mm = fpa_wcsd.all_pix2world(xmax, ymax, 0)
 
-        x_mm = np.linspace(xmin_mm, xmax_mm, sub_naxis1, endpoint=False, dtype=np.float32)
-        y_mm = np.linspace(ymin_mm, ymax_mm, sub_naxis2, endpoint=False, dtype=np.float32)
+        x_mm = np.linspace(xmin_mm, xmax_mm, sub_naxis1, endpoint=False)
+        y_mm = np.linspace(ymin_mm, ymax_mm, sub_naxis2, endpoint=False)
         return xmin, ymin, x_mm, y_mm, det_wcs
 
     def spectral_padding(self, fov):
@@ -286,6 +289,9 @@ class SpectralTrace:
             step = abs(fov.header['CDELT2'])*3600
             derivative = self.dlam_per_pix(wave)/step
         padding = np.max(abs(derivative))*width/2
+        # Resolve the physical slit profile rather than using one fixed
+        # wavelength step for all orders. The PSF may request a finer step.
+        fov.meta['slit_spectral_width'] = np.min(abs(derivative))*width*u.um
         if 'optical_resolving_power' in self.meta:
             padding += 5*upper/(self.meta['optical_resolving_power']*np.sqrt(8*np.log(2)))
         return padding*u.um
@@ -320,39 +326,57 @@ class SpectralTrace:
         sub_naxis2 = len(y_mm)
         xmax = xmin + sub_naxis1
         ymax = ymin + sub_naxis2
-        image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float32)
+        image = np.zeros((sub_naxis2, sub_naxis1), dtype=np.float64)
 
         self._set_dispersion(wave_min, wave_max, pixsize=pixsize)
         slit_dispersion = None
         if "slit_dispersion_colname" in self.meta:
             slit_dispersion = self.slit_dispersion
-        xilam = XiLamImage(fov, self.dlam_per_pix, slit_dispersion=slit_dispersion)
+        xilam = XiLamImage(fov, self.dlam_per_pix, slit_dispersion=slit_dispersion, _cache=self._slit_cache)
         if "optical_resolving_power" in self.meta:
             xilam.convolve_lsf(self.meta["optical_resolving_power"])
         self._xilamimg = xilam
 
-        # focal-plane coordinate images
-        ximg_fpa, yimg_fpa = np.meshgrid(x_mm, y_mm)
-
-        # Image mapping (xi, lambda) on the focal plane
-        xi_fpa = self.xy2xi(ximg_fpa, yimg_fpa).astype(np.float32)
-        lam_fpa = self.xy2lam(ximg_fpa, yimg_fpa).astype(np.float32)
-
-        # The physical slit ends include the outer half-cells. A truncated
-        # integer index incorrectly admits pixels below the lower boundary.
-        inside = (xi_fpa >= xi_min) & (xi_fpa < xi_max)
-        inside &= (lam_fpa >= wave_min) & (lam_fpa < wave_max)
-        image = xilam.interp(xi_fpa, lam_fpa, grid=False)*inside
-
-        # Scale to ph / s / pixel
-        image *= self._trace_flux_scale(
-            ximg_fpa, yimg_fpa, pixsize, pixscale, det_header)
+        # Integrate the density over each detector pixel. The inverse optical
+        # map is locally affine within a pixel. Recompute centers and gradients:
+        # configured transforms can be edited in place between observations.
+        xx, yy = np.meshgrid(np.arange(sub_naxis1), np.arange(sub_naxis2))
+        ximg_fpa, yimg_fpa = det_wcs.all_pix2world(xx, yy, 0)
+        lam_fpa = self.xy2lam(ximg_fpa, yimg_fpa)
+        matrix = det_wcs.pixel_scale_matrix
+        dxidx, dxidy = self.xy2xi.gradient()
+        dlamdx, dlamdy = self.xy2lam.gradient()
+        ax, ay = dxidx(ximg_fpa, yimg_fpa), dxidy(ximg_fpa, yimg_fpa)
+        bx, by = dlamdx(ximg_fpa, yimg_fpa), dlamdy(ximg_fpa, yimg_fpa)
+        xi_fpa = self.xy2xi(ximg_fpa, yimg_fpa)
+        xi_x, xi_y = ax*matrix[0, 0] + ay*matrix[1, 0], ax*matrix[0, 1] + ay*matrix[1, 1]
+        lam_x, lam_y = bx*matrix[0, 0] + by*matrix[1, 0], bx*matrix[0, 1] + by*matrix[1, 1]
+        scale = self._trace_flux_scale(ximg_fpa, yimg_fpa, pixsize, pixscale, det_header)
+        quadrature = np.full(2, self._pixel_quadrature_order)
+        if 'effective_psf_fwhm' in fov.meta:
+            middle = (wave_min + wave_max)/2
+            xm, ym = self.xilam2x(0., middle), self.xilam2y(0., middle)
+            dxidx, dxidy = self.xy2xi.gradient()
+            dlamdx, dlamdy = self.xy2lam.gradient()
+            angular_dispersion = self.slit_dispersion(middle) if slit_dispersion is not None else -self.dlam_per_pix(middle)/pixscale
+            angular_map = np.array([[dxidx(xm, ym), dxidy(xm, ym)], [dlamdx(xm, ym)/angular_dispersion, dlamdy(xm, ym)/angular_dispersion]])
+            angular_steps = np.linalg.norm(angular_map @ det_wcs.pixel_scale_matrix, axis=0)
+            psf_width = fov.meta['effective_psf_fwhm'].to_value(u.arcsec)
+            quadrature = np.maximum(quadrature, np.ceil(8*angular_steps/psf_width).astype(int))
+        xnodes, xweights = np.polynomial.legendre.leggauss(quadrature[0])
+        ynodes, yweights = np.polynomial.legendre.leggauss(quadrature[1])
+        for nx, wx in zip(xnodes/2, xweights/2):
+            for ny, wy in zip(ynodes/2, yweights/2):
+                xi = xi_fpa + nx*xi_x + ny*xi_y
+                lam = lam_fpa + nx*lam_x + ny*lam_y
+                inside = (xi >= xi_min) & (xi < xi_max) & (lam >= wave_min) & (lam < wave_max)
+                image[inside] += xilam.interp(xi[inside], lam[inside], grid=False) * scale[inside] * wx * wy
 
         detector_qe = fov.meta.get("detector_qe")
         if detector_qe is not None:
             xpix_img, ypix_img = np.meshgrid(
-                np.arange(xmin, xmax, dtype=np.float32),
-                np.arange(ymin, ymax, dtype=np.float32),
+                np.arange(xmin, xmax, dtype=np.float64),
+                np.arange(ymin, ymax, dtype=np.float64),
             )
             image = apply_detector_qe_to_trace_image(
                 image,
@@ -837,7 +861,41 @@ class SpectralTrace:
         return msg
 
 
-class XiLamImage():
+def _uniform_sum_cdf(position, width_a, width_b):
+    """CDF of two centered uniform intervals, including a zero-width interval."""
+    wide, narrow = np.maximum(width_a, width_b), np.minimum(width_a, width_b)
+    probability = np.clip(.5 + position / wide, 0, 1)
+    finite = narrow > 0
+    a, b, x = wide[finite], narrow[finite], position[:, finite]
+    tail = np.clip((a + b)/2 - abs(x), 0, b)**2 / (2*a*b)
+    probability[:, finite] = np.where(abs(x) <= (a - b)/2, .5 + x/a, np.where(x < 0, tail, 1 - tail))
+    return probability
+
+
+def _slit_cell_operator(wavelength, derivative, eta, deta):
+    """Conservative overlap of wavelength bins sheared across one finite slit cell.
+
+    Wavelength and its derivative use um and um/arcsec; eta uses arcsec.
+    Locally affine dispersion maps each rectangular (lambda, eta) cell to a
+    trapezoidal wavelength profile. Integrating its CDF at output edges keeps
+    the input photon integral, including lines narrower than a wavelength bin.
+    """
+    step = wavelength[1] - wavelength[0]
+    center = np.arange(len(wavelength)) + derivative * eta / step
+    spectral_width = 1 + eta * np.gradient(derivative, wavelength)
+    slit_width = abs(derivative * deta / step)
+    assert np.all(spectral_width > 0), 'Slit displacement must preserve wavelength ordering.'
+    span = spectral_width + slit_width
+    first = np.floor(center - span/2 + .5).astype(int)
+    output = first[None, :] + np.arange(int(np.ceil(span.max())) + 1)[:, None]
+    lower = output - .5 - center
+    probability = _uniform_sum_cdf(lower + 1, spectral_width, slit_width) - _uniform_sum_cdf(lower, spectral_width, slit_width)
+    source = np.broadcast_to(np.arange(len(wavelength)), output.shape)
+    valid = (output >= 0) & (output < len(wavelength)) & (probability > 0)
+    return csr_matrix((probability[valid], (output[valid], source[valid])), shape=(len(wavelength), len(wavelength)))
+
+
+class XiLamImage:
     """
     Class to compute a rectified 2D spectrum.
 
@@ -856,7 +914,7 @@ class XiLamImage():
           legacy coupling between sky-grid sampling and detector dispersion.
     """
 
-    def __init__(self, fov, dlam_per_pix, slit_dispersion=None):
+    def __init__(self, fov, dlam_per_pix, slit_dispersion=None, _cache=None):
         # ..todo: we assume that we always have a cube. We use SpecCADO's
         #         add_cube_layer method
         cube_wcs = WCS(fov.cube.header, key=" ")
@@ -888,7 +946,6 @@ class XiLamImage():
         cube_lam *= u.Unit(wcs_lam.wcs.cunit[0]).to(u.um)
 
         # Initialise the array to hold the xi-lambda image
-        self.image = np.zeros((n_xi, n_lam), dtype=np.float32)
         self.lam = cube_lam
         try:
             dlam_per_pix_val = dlam_per_pix(np.asarray(self.lam))
@@ -897,25 +954,25 @@ class XiLamImage():
             logger.warning("Using scalar dlam_per_pix = %.2g",
                            dlam_per_pix_val)
 
-        dlam_per_arcsec = dlam_per_pix_val / d_eta if slit_dispersion is None else slit_dispersion(self.lam)
-        for i, eta in enumerate(cube_eta):
-            # A positive calibrated derivative moves an input line to a larger
-            # apparent wavelength: sample the source at lambda_out - shift.
-            lam0 = self.lam + dlam_per_arcsec * eta if slit_dispersion is None else self.lam - dlam_per_arcsec * eta
-
-            # lam0 is the target wavelength. We need to check that this
-            # overlaps with the wavelength range covered by the cube
-            if lam0.min() < cube_lam.max() and lam0.max() > cube_lam.min():
-                # Only wavelength changes here; xi is already on its native
-                # grid. Building a 2D spline for every slit cell is redundant.
-                index = np.searchsorted(cube_lam, lam0, side='right') - 1
-                index = np.clip(index, 0, n_lam - 2)
-                fraction = (lam0 - cube_lam[index])/d_lam
-                valid = (lam0 >= cube_lam[0]) & (lam0 <= cube_lam[-1])
-                plane = fov.cube.data[:, i, :]
-                self.image += ((1 - fraction[:, None])*plane[index] + fraction[:, None]*plane[index + 1]).T*valid
-
-        self.image *= abs(d_eta)     # ph/s/um/arcsec2 --> ph/s/um/arcsec
+        derivative = -dlam_per_pix_val / d_eta if slit_dispersion is None else slit_dispersion(self.lam)
+        derivative = np.broadcast_to(derivative, self.lam.shape)
+        # The operator depends only on these evaluated physical arrays. Include
+        # every element, so direct WCS/table/callable changes cannot alias it.
+        key = (cube_lam.tobytes(), cube_eta.tobytes(), d_eta, derivative.tobytes())
+        if _cache is None:
+            _cache = {}
+        if _cache.get('key') != key:
+            _cache.clear()
+            operators = [_slit_cell_operator(cube_lam, derivative, eta, d_eta).tocoo() for eta in cube_eta]
+            rows = np.concatenate([operator.row for operator in operators])
+            columns = np.concatenate([operator.col*n_eta+i for i, operator in enumerate(operators)])
+            weights = np.concatenate([operator.data for operator in operators])*abs(d_eta)
+            # Interleaved wavelength/slit cells match the contiguous cube layout,
+            # avoiding a separate strided dense copy for every across-slit row.
+            _cache['operator'] = csr_matrix((weights, (rows, columns)), shape=(n_lam, n_lam*n_eta))
+            _cache['key'] = key
+        cells = fov.cube.data.reshape(n_lam*n_eta, n_xi)
+        self.image = (_cache['operator'] @ cells).T
 
         # WCS for the xi-lambda image, i.e. the rectified 2D spectrum
         # Default WCS with xi in arcsec

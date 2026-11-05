@@ -59,7 +59,7 @@ class TestOpticsManager:
         detector_setup_rows = tbl[tbl["phase"] == "detector_setup"]
 
         assert source_rows["effect"].tolist() == ["detector_qe_curve"]
-        assert fov_rows["effect"].tolist() == ["detector_qe_curve"]
+        assert len(fov_rows) == 0  # Ordinary QE is applied once, at the source.
         assert detector_setup_rows["effect"].tolist() == [
             "micado_detector_geometry"]
 
@@ -76,7 +76,7 @@ class TestOpticsManager:
                     "selector_key": "aperture_id",
                     "wheel": [{
                         "selector_value": [1, 2],
-                        "effect_class": "TERCurve",
+                        "effect_class": "SpectralQuantumEfficiency",
                         "effect_kwargs": {"filename": "TER_blank.dat"},
                     }],
                 },
@@ -86,14 +86,14 @@ class TestOpticsManager:
         opt_man = opt_mgr.OpticsManager([yaml_dict])
 
         tbl = opt_man.effect_order_table()
-        source_row = tbl[tbl["phase"] == "source"][0]
         fov_row = tbl[tbl["phase"] == "fov"][0]
 
-        assert source_row["effect"] == "selected_qe"
-        assert source_row["class"] == "SelectorWheel"
-        assert source_row["selector_key"] == "aperture_id"
-        assert source_row["selector_values"] == "1, 2"
-        assert source_row["selected_classes"] == "TERCurve"
+        assert len(tbl[tbl['phase'] == 'source']) == 0
+        assert fov_row['effect'] == 'selected_qe'
+        assert fov_row['class'] == 'SelectorWheel'
+        assert fov_row['selector_key'] == 'aperture_id'
+        assert fov_row['selector_values'] == '1, 2'
+        assert fov_row['selected_classes'] == 'SpectralQuantumEfficiency'
         assert fov_row["phase_z_orders"] == "610"
 
 
