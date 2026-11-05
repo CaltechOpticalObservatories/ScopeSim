@@ -1,4 +1,5 @@
 import logging
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -251,3 +252,33 @@ def test_ao_cache_tracks_resolved_path_contents_and_alpha(tmp_path):
     np.testing.assert_allclose(psf.fwhm(wave).value, .2)
     psf.meta['alpha'] = 3.
     assert psf.alpha == 3.
+
+
+@pytest.mark.parametrize("psf_class", [MoffatPSF, AOEnhanceablePSF])
+def test_observation_configuration_is_only_required_when_evaluating(psf_class, monkeypatch):
+    observation_info = Mock(side_effect=KeyError("!OBS.airmass"))
+    monkeypatch.setattr("scopesim.effects.psfs.analytical.get_observation_info_from_cmds", observation_info)
+    kwargs = {"alpha": 4.765, "fwhm": {"seeing": 0.7, "seeing_unit": "arcsec", "pivot_wave": 500, "pivot_wave_unit": "nm"}}
+    if psf_class is AOEnhanceablePSF:
+        kwargs.update(ao_table="unused.dat", enable_ao=False, is_absolute=False)
+    psf = psf_class(**kwargs)
+    observation_info.assert_not_called()
+    with pytest.raises(KeyError, match="airmass"):
+        psf.fwhm(np.array([0.5]) * u.um)
+
+
+
+def test_ao_toggle_preserves_natural_and_absolute_widths(tmp_path):
+    filename = tmp_path / "ao.ecsv"
+    table = Table({"wavelength": np.array([0.5, 1.0, 1.5, 2.0]) * u.um, "fwhm": [0.5, 0.5, 0.5, 0.5]})
+    table.write(filename, format="ascii.ecsv")
+    psf = AOEnhanceablePSF(alpha=4.765, fwhm=0.7, ao_table=str(filename), enable_ao=False, is_absolute=False)
+    wavelengths = np.array([1.0]) * u.um
+    np.testing.assert_allclose(psf.fwhm(wavelengths).to_value(u.arcsec), [0.7])
+    psf.meta["enable_ao"] = True
+    np.testing.assert_allclose(psf.fwhm(wavelengths).to_value(u.arcsec), [0.35])
+    psf.meta["is_absolute"] = True
+    np.testing.assert_allclose(psf.fwhm(wavelengths).to_value(u.arcsec), [0.5])
+    psf.meta["fwhm"] = 0.9
+    psf.meta["enable_ao"] = False
+    np.testing.assert_allclose(psf.fwhm(wavelengths).to_value(u.arcsec), [0.9])
