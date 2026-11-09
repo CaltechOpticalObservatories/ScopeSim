@@ -338,3 +338,38 @@ class TestZerosFromHeader:
         })
         data = utils.zeros_from_header(hdr, ndims=2)
         assert data.shape == (5, 3)
+
+
+class TestGetObservationInfoFromCmds:
+    """A missing !OBS coordinate key is optional; a real failure is not."""
+
+    @staticmethod
+    def _cmds(**extra):
+        from scopesim.commands import UserCommands
+        properties = {"!ATMO.longitude": -70.19, "!ATMO.latitude": -24.59,
+                      "!ATMO.altitude": 3060, "!OBS.mjdobs": 60310.25}
+        properties.update(extra)
+        return UserCommands(properties=properties)
+
+    def test_absent_coordinate_keys_fall_back_to_alt_az(self):
+        # !OBS.ra/!OBS.dec/!OBS.airmass are simply not configured here.
+        target, location, time, brightness = utils.get_observation_info_from_cmds(
+            self._cmds(**{"!OBS.alt": 60, "!OBS.az": 0}))
+        assert target.alt.to_value(u.deg) == approx(60)
+        assert location.lat.to_value(u.deg) == approx(-24.59)
+        assert time.mjd == approx(60310.25)
+        assert brightness is None
+
+    def test_unrelated_failure_propagates_instead_of_becoming_none(self, monkeypatch):
+        # A bare except here used to turn any error into a missing coordinate,
+        # which then surfaced as a misleading "No valid target coordinates".
+        real_from_currsys = utils.from_currsys
+
+        def exploding_from_currsys(item, cmds=None, **kwargs):
+            if item == "!OBS.ra":
+                raise RuntimeError("entirely unrelated failure")
+            return real_from_currsys(item, cmds, **kwargs)
+
+        monkeypatch.setattr(utils, "from_currsys", exploding_from_currsys)
+        with pytest.raises(RuntimeError, match="entirely unrelated failure"):
+            utils.get_observation_info_from_cmds(self._cmds(**{"!OBS.alt": 60, "!OBS.az": 0}))

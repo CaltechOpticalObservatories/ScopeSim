@@ -1071,7 +1071,9 @@ def get_observation_info_from_cmds(cmds):
     for k, v in target_kwargs.items():
         try:
             target_kwargs[k] = from_currsys(v, cmds)
-        except:
+        except ValueError:
+            # from_currsys raises ValueError when the bang-key is absent.
+            # Anything else is a real failure and must not be flattened to None.
             logger.debug(f'Target coord {v} not set in !OBS config.')
             target_kwargs[k] = None
     target_kwargs["obstime"] = time
@@ -1187,10 +1189,6 @@ def resolve_time(time_str: int | float | Literal['bright', 'gray', 'grey', 'dark
         logger.error(f"Invalid time input type: {type(time_str)}, should be a string or numeric MJD value.")
         raise ValueError(f"Invalid time input type: {type(time_str)}, should be a string or numeric MJD value.")
 
-    # if t is None:
-    #     kw = {"bright":"full", "gray":"half", "dark":"new"}
-    #     t = Time(get_next_moon(kw[time_str], location), format="isot", location=location)
-
     # check if t is at night
     if location is not None:
         nighttime = is_night(t, location, return_midnight=True)
@@ -1225,43 +1223,3 @@ def get_moon_fli(phase_angle: u.Quantity):
         return (1 + np.cos(phase_angle.to(u.rad).value)) / 2
     else:
         raise ValueError(f"Invalid phase angle type: {type(phase_angle)}, should be astropy Quantity object with angle units.")
-
-def get_next_moon(moontype="full", location: EarthLocation = None):
-    """
-    Get time of the next closest moon phase of given moon type (full, half or new).
-    """
-    geodetic = location.to_geodetic()
-    location_key = (float(geodetic.lon.to_value(u.deg)), float(geodetic.lat.to_value(u.deg)),
-                    float(geodetic.height.to_value(u.m)))
-    today = Time.now().isot.split("T")[0]
-    return _get_next_moon_cached(moontype, today, location_key)
-
-@functools.lru_cache(maxsize=32)
-def _get_next_moon_cached(moontype="full", today=None, location_key=None):
-    if location_key is None:
-        raise ValueError("location_key must be provided.")
-    lon_deg, lat_deg, height_m = location_key
-    location = EarthLocation.from_geodetic(lon=lon_deg * u.deg, lat=lat_deg * u.deg, height=height_m * u.m)
-
-    now = Time.now()
-    utctimes = now + np.linspace(0, 28, 1000) * u.day
-    sunalts = np.array([get_sun(utctime).transform_to(AltAz(obstime=utctime, location=location)).alt.deg
-                        for utctime in utctimes])
-
-    times = utctimes[sunalts < 0.0]  # sun down
-    flis = get_moon_fli(get_moon_phase(times))  # fractional lunar illum
-    moonalts = np.array([get_body("moon", utctime).transform_to(AltAz(obstime=utctime, location=location)).alt.deg
-                         for utctime in times])
-
-    if moontype == "full":
-        mask = (flis > 0.95) & (moonalts > 0.0)  # few days around full moon, moon is up
-        nextm = (times[mask])[np.argmax(moonalts[mask])]  # when moon is at peak altitude during full moon
-    elif moontype == "new":
-        mask = (flis < 0.05) & (moonalts < 0.0)  # few days around new moon, moon is down
-        nextm = times[mask][np.argmin(flis[mask])]
-    elif moontype == "half":
-        mask = (moonalts > 0.0) & (flis > 0.4) & (flis < 0.6)  # few days around half moon, moon is up
-        nextm = times[mask][np.argmax(moonalts[mask])]
-    else:
-        raise ValueError(f"Invalid moon type: {moontype}, should be 'full', 'new' or 'half'.")
-    return nextm
