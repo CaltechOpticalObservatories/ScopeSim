@@ -106,6 +106,7 @@ class SpectralTrace:
         "description": "<no description>",
         "trace_flux_jacobian": "!SIM.spectral.trace_flux_jacobian",
         "fit_degree": 4,
+        "fit_normalize": False,
     }
 
     def __init__(self, trace_tbl, cmds=None, **kwargs):
@@ -202,12 +203,16 @@ class SpectralTrace:
         self.wave_max = quantify(np.max(lam_arr), u.um).value
 
         degree = self.meta["fit_degree"]
-        self.xy2xi = Transform2D.fit(x_arr, y_arr, xi_arr, degree=degree)
-        self.xy2lam = Transform2D.fit(x_arr, y_arr, lam_arr, degree=degree)
-        self.xilam2x = Transform2D.fit(xi_arr, lam_arr, x_arr, degree=degree)
-        self.xilam2y = Transform2D.fit(xi_arr, lam_arr, y_arr, degree=degree)
-        self._xiy2x = Transform2D.fit(xi_arr, y_arr, x_arr, degree=degree)
-        self._xiy2lam = Transform2D.fit(xi_arr, y_arr, lam_arr, degree=degree)
+        # Rescaling the inputs to [-1, 1] conditions the Vandermonde matrix
+        # for coordinates far from the origin. It also changes what .matrix
+        # means, so like fit_degree it is a per-trace setting, default off.
+        normalize = self.meta["fit_normalize"]
+        self.xy2xi = Transform2D.fit(x_arr, y_arr, xi_arr, degree=degree, normalize=normalize)
+        self.xy2lam = Transform2D.fit(x_arr, y_arr, lam_arr, degree=degree, normalize=normalize)
+        self.xilam2x = Transform2D.fit(xi_arr, lam_arr, x_arr, degree=degree, normalize=normalize)
+        self.xilam2y = Transform2D.fit(xi_arr, lam_arr, y_arr, degree=degree, normalize=normalize)
+        self._xiy2x = Transform2D.fit(xi_arr, y_arr, x_arr, degree=degree, normalize=normalize)
+        self._xiy2lam = Transform2D.fit(xi_arr, y_arr, lam_arr, degree=degree, normalize=normalize)
         if "slit_dispersion_colname" in self.meta:
             center = xi_arr == 0
             derivative = self.table[self.meta["slit_dispersion_colname"]].quantity.to_value(u.um / u.arcsec)
@@ -1158,7 +1163,7 @@ class Transform2D():
         return result
 
     @classmethod
-    def fit(cls, xin, yin, xout, degree=4, normalize=True):
+    def fit(cls, xin, yin, xout, degree=4, normalize=False):
         """Determine polynomial fits."""
         xin = np.asarray(xin, dtype=float)
         yin = np.asarray(yin, dtype=float)
