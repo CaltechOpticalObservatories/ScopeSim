@@ -1,4 +1,4 @@
-from typing import ClassVar, Any
+from typing import ClassVar
 from functools import partial, lru_cache
 import numpy as np
 from astropy import units as u
@@ -6,7 +6,7 @@ from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.table import Table
 from astropy.wcs import WCS
 from astropy.time import Time
-from astropy.coordinates import SkyCoord, HADec
+from astropy.coordinates import HADec
 from scipy.interpolate import make_interp_spline, RegularGridInterpolator
 from scipy.ndimage import map_coordinates
 from scipy.sparse import csr_array
@@ -17,6 +17,11 @@ from ..utils import (from_currsys, get_zenith_angle, get_observation_info_from_c
                      get_logger, check_keys, is_night, quantity_from_table)
 
 logger = get_logger(__name__)
+
+# Dispersion shifts are rounded to this many decimal places in pixels (0.1 pix)
+# so that many wavelength planes share one cached interpolation operator. This
+# is also a hard floor on the accuracy of the applied dispersion.
+SHIFT_QUANTIZATION_DECIMALS = 1
 
 class ShiftFoV3D(Effect):
     """
@@ -62,10 +67,13 @@ class ShiftFoV3D(Effect):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.meta.setdefault("method", None)
+        # How the shift is applied is a physical choice about the data, so it
+        # is configured, never inferred from whichever FOV happens to arrive
+        # first and then frozen on this shared effect instance.
+        check_keys(self.meta, {"method"}, action="error")
 
-        if self.meta["method"] not in [None, "roll", "map_coords"]:
-            raise ValueError("Method must be 'roll' or 'map_coords' if provided.")
+        if self.meta["method"] not in ["roll", "map_coords"]:
+            raise ValueError(f"Method must be 'roll' or 'map_coords', not {self.meta['method']!r}.")
 
     def get_shifts(self, obj):
         """
@@ -95,7 +103,7 @@ class ShiftFoV3D(Effect):
         for axis, displacement in enumerate(shifts, start=1):
             cells = (displacement/(abs(header[f'CDELT{axis}'])*u.deg)).decompose().value
             if rounded:
-                cells = np.round(cells, 1)
+                cells = np.round(cells, SHIFT_QUANTIZATION_DECIMALS)
                 if self.meta['method'] == 'roll':
                     cells = np.round(np.asarray(cells, dtype=np.float32))
             padding = int(np.ceil(np.max(np.abs(cells)))) + guard if np.any(cells) else 0
@@ -108,15 +116,10 @@ class ShiftFoV3D(Effect):
             dxs, dys = kwargs['_shifts'] if '_shifts' in kwargs else self.get_shifts(obj)
 
             # get bin widths in spatial axis and divide to get dxs and dys in steps
-            dxs = np.round((dxs / (obj.hdu.header["CDELT1"]*u.deg)).decompose().value, 1)
-            dys = np.round((dys / (obj.hdu.header["CDELT2"]*u.deg)).decompose().value, 1)
+            dxs = np.round((dxs / (obj.hdu.header["CDELT1"]*u.deg)).decompose().value, SHIFT_QUANTIZATION_DECIMALS)
+            dys = np.round((dys / (obj.hdu.header["CDELT2"]*u.deg)).decompose().value, SHIFT_QUANTIZATION_DECIMALS)
 
-            if self.meta.get("method", None) is None:
-                if np.sqrt(np.median(dxs) ** 2 + np.median(dys) ** 2) >= 10:
-                    self.meta["method"] = "roll"
-                else:
-                    self.meta["method"] = "map_coords"
-            shift_func = getattr(self, self.meta["method"]+"_shift")
+            shift_func = self.roll_shift if self.meta["method"] == "roll" else self.map_coords_shift
 
             obj.hdu.data = shift_func(obj.data, dxs, dys)
 
@@ -210,7 +213,9 @@ def _spatial_shift_operator(length, shift, order):
     row, column = np.indices((length, length), dtype=float)
     response = map_coordinates(np.eye(length), [row, column - shift], order=order, mode='nearest', prefilter=order > 1)
     response[abs(response) < 1e-13] = 0
-    return csr_array(response.T)
+    operator = csr_array(response.T)
+    operator.data.flags.writeable = False
+    return operator
 
 
 class ADShift(ShiftFoV3D):
@@ -254,9 +259,6 @@ class ADShift(ShiftFoV3D):
         humidity = humidity if humidity <=1 else humidity / 100.
         xc = from_currsys(self.meta.get("x_co2", 450.), self.cmds)
         self.n = partial(refractive_index, temp=temp, pressure=pressure, frac_humidity=humidity, xc=xc)
-
-    def apply_to(self, obj, **kwargs):
-        return super().apply_to(obj, **kwargs)
 
     def get_shifts(self, obj: FieldOfView3D):
         shift_arcsec = self._get_shifts_arcsec(obj)
@@ -314,7 +316,7 @@ class ADCShift(ShiftFoV3D):
         3.0         0      0.1
 
     """
-    z_order = (652, )
+    z_order: ClassVar[tuple[int, ...]] = (652, )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -367,6 +369,10 @@ class ADCShift(ShiftFoV3D):
                     ad_kwargs[k] = v
                 else:
                     ad_kwargs[k] = self.meta[k]
+            # This inner effect only ever supplies shift amounts; it never
+            # applies them. It still inherits our method so that the required
+            # key is satisfied from one configured place.
+            ad_kwargs['method'] = self.meta['method']
             ad = self._get_ad_shift(ad_kwargs)
             ad.zenith_angle = self.zenith_angle
             ad_shift = ad._get_shifts_arcsec(obj)  # get shift at zenith angle
