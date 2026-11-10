@@ -384,7 +384,10 @@ class TestMakeSpectrum:
 class TestMakeSpectrumImageCubeAllPlayNicely:
     @pytest.mark.parametrize("kind", ["table", "image", "cube", "two_cubes", "mixed"])
     @pytest.mark.parametrize("spectral_step", [.01, .005])
-    def test_photon_integrals_agree_between_representations(self, kind, spectral_step):
+    def test_photon_integrals_agree_between_representations(self, kind, spectral_step,
+                                                           integrate_spectral_bins):
+        # The invariant that a table, an image and a cube deliver the same
+        # photon rate only holds on the bin-integrated path.
         from synphot import SourceSpectrum, Empirical1D
         from scopesim.commands import UserCommands
         from scopesim.optics.optical_train import OpticalTrain
@@ -411,7 +414,8 @@ class TestMakeSpectrumImageCubeAllPlayNicely:
         expected = spatial_weight[kind]*np.trapezoid(profile, wave.to_value(u.um))
         source = OpticalTrain().prepare_source(source)
 
-        commands = UserCommands(properties={'!SIM.spectral.spectral_bin_width': spectral_step})
+        commands = UserCommands(properties={'!SIM.spectral.spectral_bin_width': spectral_step,
+                                            '!SIM.spectral.integrate_spectral_bins': True})
         rates = []
         for cls in (FieldOfView1D, FieldOfView2D, FieldOfView3D):
             fov = cls(ho._fov_header(), [1.9, 2.1]*u.um, area=1*u.m**2, cmds=commands)

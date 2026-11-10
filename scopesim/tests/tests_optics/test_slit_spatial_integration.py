@@ -63,7 +63,8 @@ def physical_fov(width=.33):
     header = slit_fov(width).header
     detector_wcs, _ = det_wcs_from_sky_wcs(WCS(header), .1570545, 10.)
     header.update(detector_wcs.to_header())
-    cmds = UserCommands(properties={'!SIM.spectral.spectral_bin_width': .01})
+    cmds = UserCommands(properties={'!SIM.spectral.spectral_bin_width': .01,
+                                    '!SIM.spectral.integrate_spectral_bins': True})
     return FieldOfView3D(header, [.5, .6], cmds=cmds, area=1*u.cm**2)
 
 
