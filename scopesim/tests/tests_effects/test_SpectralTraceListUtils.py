@@ -83,7 +83,8 @@ class TestSpectralTrace:
         assert jacobian_scale[0, 0] == pytest.approx(1e-3, rel=1e-5)
 
 
-def _tilted_linear_trace_table():
+def _tilted_linear_trace_table(tilt=0.1):
+    """x = wave + tilt*xi, y = xi/10, so the slit is sheared in dispersion."""
     xi_grid, wave_grid = np.meshgrid(
         np.linspace(-1, 1, 5),
         np.linspace(1, 3, 5),
@@ -96,7 +97,7 @@ def _tilted_linear_trace_table():
         data=[
             wave * u.um,
             xi * u.arcsec,
-            (wave + 0.1 * xi) * u.mm,
+            (wave + tilt * xi) * u.mm,
             (xi / 10) * u.mm,
         ],
         names=["wavelength", "s", "x", "y"],
@@ -343,3 +344,38 @@ class TestImageInterpolations:
         interps = make_image_interpolations(hdul, kx=1, ky=1)
         imginterp = interps[0](yy, xx, grid=False)
         assert np.allclose(imginterp, img)
+
+
+class TestTraceFluxJacobianMagnitude:
+    """How far the upstream sqrt(gradient) scale is from the true cell area."""
+
+    @pytest.mark.parametrize("tilt", [0., .05, .1, .2, .3])
+    def test_projected_scale_overcounts_by_a_known_factor(self, tilt):
+        # For this trace family the inverse transforms are
+        #   xi = 10y, lam = x - 10*tilt*y
+        # so the area Jacobian |d(xi,lam)/d(x,y)| is 10 for every tilt, while
+        # the projected scale picks up sqrt(1 + (10*tilt)**2). The upstream
+        # formula therefore over-counts flux without bound as the slit shears.
+        spt = SpectralTrace(_tilted_linear_trace_table(tilt))
+        det_header = header_from_list_of_xy([-1, 1], [-1, 1], 0.01, "D")
+        x_mm, y_mm = np.array([[2.0]]), np.array([[0.0]])
+
+        spt.meta["trace_flux_jacobian"] = False
+        projected = spt._trace_flux_scale(x_mm, y_mm, pixsize=.01, pixscale=.1, det_header=det_header)[0, 0]
+        spt.meta["trace_flux_jacobian"] = True
+        jacobian = spt._trace_flux_scale(x_mm, y_mm, pixsize=.01, pixscale=.1, det_header=det_header)[0, 0]
+
+        assert jacobian == pytest.approx(1e-3, rel=1e-5)
+        assert projected/jacobian == pytest.approx(np.sqrt(1 + (10*tilt)**2), rel=1e-5)
+
+    def test_the_two_agree_only_for_an_unsheared_trace(self):
+        spt = SpectralTrace(_tilted_linear_trace_table(0.))
+        det_header = header_from_list_of_xy([-1, 1], [-1, 1], 0.01, "D")
+        x_mm, y_mm = np.array([[2.0]]), np.array([[0.0]])
+
+        spt.meta["trace_flux_jacobian"] = False
+        projected = spt._trace_flux_scale(x_mm, y_mm, pixsize=.01, pixscale=.1, det_header=det_header)[0, 0]
+        spt.meta["trace_flux_jacobian"] = True
+        jacobian = spt._trace_flux_scale(x_mm, y_mm, pixsize=.01, pixscale=.1, det_header=det_header)[0, 0]
+
+        assert projected == pytest.approx(jacobian, rel=1e-9)
