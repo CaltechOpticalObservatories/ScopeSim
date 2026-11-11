@@ -91,8 +91,8 @@ class SpectralTrace:
     - x, y : [mm]
     """
 
-    _pixel_quadrature_order = 4
     _class_params = {
+        "pixel_quadrature_order": "!SIM.spectral.pixel_quadrature_order",
         "x_colname": "x",
         "y_colname": "y",
         "s_colname": "s",
@@ -296,6 +296,19 @@ class SpectralTrace:
             padding += 5*upper/(self.meta['optical_resolving_power']*np.sqrt(8*np.log(2)))
         return padding*u.um
 
+    def quadrature_order(self) -> int:
+        """Gauss-Legendre order used to integrate the density over one pixel.
+
+        Order 1 is a single sample at the pixel centre with weight 1, which is
+        upstream's sampling scheme. Higher orders resolve structure that varies
+        across a pixel, at proportionally more interpolations.
+        """
+        order = int(from_currsys(self.meta["pixel_quadrature_order"], self.cmds))
+        if order < 1:
+            raise ValueError(
+                f"pixel_quadrature_order must be at least 1, got {order}.")
+        return order
+
     def map_spectra_to_focal_plane(self, fov):
         """
         Apply the spectral trace mapping to a spectral cube.
@@ -352,7 +365,7 @@ class SpectralTrace:
         xi_x, xi_y = ax*matrix[0, 0] + ay*matrix[1, 0], ax*matrix[0, 1] + ay*matrix[1, 1]
         lam_x, lam_y = bx*matrix[0, 0] + by*matrix[1, 0], bx*matrix[0, 1] + by*matrix[1, 1]
         scale = self._trace_flux_scale(ximg_fpa, yimg_fpa, pixsize, pixscale, det_header)
-        quadrature = np.full(2, self._pixel_quadrature_order)
+        quadrature = np.full(2, self.quadrature_order())
         if 'effective_psf_fwhm' in fov.meta:
             middle = (wave_min + wave_max)/2
             xm, ym = self.xilam2x(0., middle), self.xilam2y(0., middle)
