@@ -3,8 +3,12 @@ from pytest import approx
 
 import numpy as np
 
-from scopesim.effects.atmo_dispersion import ADCShift
+from astropy import units as u
 
+from scopesim.effects.atmo_dispersion import (ADCShift, ShiftFoV3D,
+                                              refractive_index, compressibility)
+
+from scopesim.tests.tests_optics.test_slit_spatial_integration import physical_fov
 from scopesim.effects.shifts import AtmosphericDispersion, \
                                     get_pixel_border_waves_from_atmo_disp
 
@@ -131,3 +135,71 @@ class TestGetPixelBorderWavesFromAtmoDisp:
         waves, shifts = get_pixel_border_waves_from_atmo_disp(**atmo_params)
         assert shifts[0] - shifts[-1] == approx(0.49, rel=2e-2)
         assert waves[0] == 0.5 and waves[-1] == 1.5
+
+
+
+class TestCiddorRefractiveIndex:
+    """Reference values from Ciddor 1996, https://doi.org/10.1364/AO.35.001566"""
+
+    def test_standard_air_matches_published_refractive_index(self):
+        # Ciddor's reference condition: 633 nm, 15 deg C, 101325 Pa, dry air,
+        # 450 ppm CO2, for which the published n is 1.00027653.
+        n = refractive_index(0.633*u.um, 15*u.deg_C, 101325*u.Pa, 0.0, 450.)
+        assert n == approx(1.00027653, abs=5e-9)
+
+    @pytest.mark.parametrize("wavelength, expected", [(0.35, 1.00028612), (0.633, 1.00027653), (1.5, 1.00027330)])
+    def test_normal_dispersion_across_the_band(self, wavelength, expected):
+        # n falls monotonically with wavelength away from any resonance.
+        n = refractive_index(wavelength*u.um, 15*u.deg_C, 101325*u.Pa, 0.0, 450.)
+        assert n == approx(expected, abs=5e-9)
+
+    def test_moist_air_is_less_refractive_than_dry_air(self):
+        dry = refractive_index(0.633*u.um, 20*u.deg_C, 101325*u.Pa, 0.0, 450.)
+        saturated = refractive_index(0.633*u.um, 20*u.deg_C, 101325*u.Pa, 1.0, 450.)
+        assert saturated < dry
+        assert (dry - saturated) == approx(8.503e-7, rel=1e-3)
+
+    def test_refractivity_is_nearly_proportional_to_pressure(self):
+        full = refractive_index(0.633*u.um, 15*u.deg_C, 101325*u.Pa, 0.0, 450.)
+        half = refractive_index(0.633*u.um, 15*u.deg_C, 50000*u.Pa, 0.0, 450.)
+        assert (half - 1)/(full - 1) == approx(50000/101325, rel=1e-3)
+
+    def test_dry_air_compressibility_matches_ciddor_appendix(self):
+        # Ciddor quotes Z_a = 0.9995922115 at 288.15 K and 101325 Pa.
+        assert compressibility(288.15*u.K, 101325*u.Pa, 0) == approx(0.9995922115, abs=1e-10)
+
+    def test_compressibility_approaches_the_ideal_gas_limit(self):
+        assert compressibility(288.15*u.K, 1*u.Pa, 0) == approx(1.0, abs=1e-8)
+
+
+class TestShiftMethodIsConfigured:
+    def test_missing_method_is_an_error(self):
+        # The interpolation method must not be guessed from the first FOV.
+        with pytest.raises(ValueError, match="method"):
+            ShiftFoV3D()
+
+    def test_unknown_method_is_an_error(self):
+        with pytest.raises(ValueError, match="roll"):
+            ShiftFoV3D(method="nearest")
+
+    @pytest.mark.parametrize("method", ["roll", "map_coords"])
+    def test_configured_method_is_accepted(self, method):
+        assert ShiftFoV3D(method=method).meta["method"] == method
+
+    def test_adc_residual_shifts_inherit_the_configured_method(self):
+        # ADCShift builds an inner ADShift to get the uncorrected dispersion;
+        # that inner effect must not need its own method configured.
+        from scopesim.commands import UserCommands
+        cmds = UserCommands(properties={
+            "!ATMO.longitude": -70.19, "!ATMO.latitude": -24.59, "!ATMO.altitude": 3060,
+            "!ATMO.temperature": 0., "!ATMO.pressure": 0.6, "!ATMO.humidity": 0.1,
+            "!ATMO.x_co2": 450., "!OBS.mjdobs": 60310.25, "!OBS.alt": 60, "!OBS.az": 0,
+        })
+        adc = ADCShift(method="roll", zenith_angle_error=0.1, wave_ref_um=0.5, cmds=cmds)
+        assert adc.meta["method"] == "roll"
+
+        # Exercising get_shifts is the point: it is what builds the inner
+        # ADShift, which used to be constructed without a method.
+        dxs, dys = adc.get_shifts(physical_fov(.7))
+        assert len(dxs) == len(dys)
+        assert np.any(np.abs(dys.to_value(u.arcsec)) > 0)
