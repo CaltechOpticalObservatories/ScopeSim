@@ -147,38 +147,10 @@ class EchelleSpectralEfficiency(Effect):
         trace_params = from_currsys(self.table, self.cmds)
         spectrographs = {}
         for row in trace_params:
-            prefix = row["prefix"]  # note trance ids are assumed to be prefix_{order}
-            min_order = row['m0'] - row['n'] + 1
-            max_order = row['m0']
-            min_wave = row['min_wave'] * u.Unit(trace_params.meta["min_wave_unit"])
-            max_wave = row['max_wave'] * u.Unit(trace_params.meta["max_wave_unit"])
-            design_res = row['design_res']
-            focal_len = row['focal_length'] * u.Unit(trace_params.meta["focal_length_unit"])
-            dispersion_focal_len = None
-            if "dispersion_focal_length" in trace_params.colnames:
-                dispersion_focal_len = (row["dispersion_focal_length"] *
-                                        u.Unit(trace_params.meta.get("dispersion_focal_length_unit",
-                                                                     trace_params.meta["focal_length_unit"])))
-            disp_npix = row['n_disp'] - 2 * row['detector_pad']
-            xdisp_npix = row['n_xdisp']- 2 * row['detector_pad']
-            pix_size = row['pixel_size'] * u.Unit(trace_params.meta["pixel_size_unit"])
-            echelle_angle = np.deg2rad(row['echelle_blaze'])*u.rad
-            xdisp_beta_center = np.deg2rad(row['xbeta_center'])*u.rad
-
-            xdisp_groove_length = u.Unit(trace_params.meta["xdisp_freq_unit"]) / row['xdisp_freq']
-            echelle_groove_length = u.Unit(trace_params.meta["disp_freq_unit"]) / row['disp_freq']
-            pix_per_res_elem = row['fwhm']
-            prescription = {}
-            if 'collimator1_focal_length' in trace_params.colnames:
-                for key in ('collimator1_focal_length', 'collimator2_focal_length', 'entrance_slit_scale'):
-                    prescription[key] = row[key] * u.Unit(trace_params.meta[key + '_unit'])
-
-            spectrographs[prefix] = echelle.spectrograph_factory(min_wave, max_wave, focal_len,
-                                                        design_res, echelle_angle, min_order, max_order,
-                                                        echelle_groove_length, pix_per_res_elem, disp_npix, xdisp_npix,
-                                                        pix_size, xdisp_groove_length=xdisp_groove_length,
-                                                        xdisp_beta_center=xdisp_beta_center,
-                                                        dispersion_focal_len=dispersion_focal_len, **prescription)
+            # Trace ids are assumed to be prefix_{order}.
+            spectrograph, _ = echelle.spectrograph_from_trace_row(
+                row, trace_params.meta, trace_params.colnames)
+            spectrographs[row["prefix"]] = spectrograph
         self._spectrographs = spectrographs
 
         def efficiency_curve(trace_id, wavelength):

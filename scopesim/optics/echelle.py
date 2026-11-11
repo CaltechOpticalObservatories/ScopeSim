@@ -6,6 +6,64 @@ import astropy.units as u
 from ..utils import get_logger
 logger = get_logger(__name__)
 
+def spectrograph_from_trace_row(row, meta, colnames):
+    """Build a SpectrographSetup from one analytic echelle parameter row.
+
+    Shared by EchelleSpectralTraceList and EchelleSpectralEfficiency, which
+    read the same file and must agree on how to interpret it.
+
+    Returns the model plus the parsed intermediates callers still need, so
+    neither of them has to re-read the row.
+    """
+    min_wave = row["min_wave"] * u.Unit(meta["min_wave_unit"])
+    max_wave = row["max_wave"] * u.Unit(meta["max_wave_unit"])
+    focal_len = row["focal_length"] * u.Unit(meta["focal_length_unit"])
+    pix_size = row["pixel_size"] * u.Unit(meta["pixel_size_unit"])
+
+    dispersion_focal_len = None
+    if "dispersion_focal_length" in colnames:
+        dispersion_focal_len = row["dispersion_focal_length"] * u.Unit(
+            meta.get("dispersion_focal_length_unit", meta["focal_length_unit"]))
+
+    # The full detector is modelled. detector_pad is recorded for provenance
+    # only; see the DETPAD header card.
+    disp_npix = int(row["n_disp"])
+    xdisp_npix = int(row["n_xdisp"])
+    detector_pad = int(row["detector_pad"]) if "detector_pad" in colnames else 0
+
+    prescription = {}
+    pix_per_res_elem = row["fwhm"]
+    if "collimator1_focal_length" in colnames:
+        for key in ("collimator1_focal_length", "collimator2_focal_length",
+                    "entrance_slit_scale"):
+            prescription[key] = row[key] * u.Unit(meta[key + "_unit"])
+        nominal_width = row["nominal_slit_width"] * u.Unit(meta["nominal_slit_width_unit"])
+        pix_per_res_elem = (nominal_width * prescription["entrance_slit_scale"] * focal_len
+                            / prescription["collimator2_focal_length"] / pix_size
+                            ).to_value(u.dimensionless_unscaled)
+
+    spectrograph = spectrograph_factory(
+        min_wave, max_wave, focal_len, row["design_res"],
+        np.deg2rad(row["echelle_blaze"])*u.rad,
+        row["m0"] - row["n"] + 1, row["m0"],
+        u.Unit(meta["disp_freq_unit"]) / row["disp_freq"],
+        pix_per_res_elem, disp_npix, xdisp_npix, pix_size,
+        xdisp_groove_length=u.Unit(meta["xdisp_freq_unit"]) / row["xdisp_freq"],
+        xdisp_beta_center=np.deg2rad(row["xbeta_center"])*u.rad,
+        dispersion_focal_len=dispersion_focal_len, **prescription)
+
+    return spectrograph, {
+        "prefix": row["prefix"],
+        "pix_size": pix_size,
+        "pix_per_res_elem": pix_per_res_elem,
+        "detector_pad": detector_pad,
+        "design_res": row["design_res"],
+        "echelle_angle": np.deg2rad(row["echelle_blaze"])*u.rad,
+        "disp_npix": disp_npix,
+        "xdisp_npix": xdisp_npix,
+    }
+
+
 def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity, focal_len: float|u.Quantity,
                          design_res: float, echelle_angle: float|u.Quantity, min_order: int, max_order: int,
                          echelle_groove_length: float|u.Quantity,
@@ -430,6 +488,13 @@ class SpectrographSetup:
         self.nominal_pixels_per_res_elem = pixels_per_res_elem
         self.cross_disperser = cross_disperser
         self._orders = None
+        # Detector placement is a second, separate step: the centre can only be
+        # computed once this model exists. Configure it with set_slit_rotation
+        # and set_detector_center rather than by assigning attributes.
+        self._slit_offset_pix = None
+        self._detector_cos = None
+        self._detector_sin = None
+        self._detector_center = None
 
         self.nondimensional_lsf_width = 1 / self.design_res
         logger.debug(f'\nThe spectrograph has been setup with the following properties:'
@@ -655,7 +720,40 @@ class SpectrographSetup:
     def wavelength_to_y_pixel(self, wave):
         return self.y_pixel_for_beta(self.cross_disperser.beta(wave, 1))
 
+    def set_slit_rotation(self, slit_offset_pix, detector_angle_deg):
+        """Configure slit sampling and detector rotation for placement.
+
+        :param slit_offset_pix: cross-dispersion offsets of the slit nodes [pix]
+        :param detector_angle_deg: detector rotation [deg]
+        """
+        self._slit_offset_pix = np.asarray(slit_offset_pix, dtype=float)
+        angle = np.deg2rad(detector_angle_deg)
+        self._detector_cos = np.cos(angle)
+        self._detector_sin = np.sin(angle)
+
+    @property
+    def slit_offset_pix(self):
+        """Cross-dispersion offsets of the configured slit nodes [pix]."""
+        self._require_placement(need_center=False)
+        return self._slit_offset_pix
+
+    def set_detector_center(self, center):
+        """Rotated pixel coordinates the placed trace is centred on."""
+        x_center, y_center = center
+        self._detector_center = (float(x_center), float(y_center))
+
+    def _require_placement(self, need_center: bool):
+        if self._slit_offset_pix is None:
+            raise AttributeError(
+                "Detector placement is not configured; "
+                "call set_slit_rotation() first.")
+        if need_center and self._detector_center is None:
+            raise AttributeError(
+                "Detector centre is not configured; "
+                "call set_detector_center() first.")
+
     def _rotated_detector_pixels(self, wave, order):
+        self._require_placement(need_center=False)
         x = self.wavelength_to_x_pixel(wave, order).to_value(u.dimensionless_unscaled)
         y = self.wavelength_to_y_pixel(wave).to_value(u.dimensionless_unscaled)
         xpix = np.broadcast_to(x, (self._slit_offset_pix.size, wave.size))
@@ -668,6 +766,7 @@ class SpectrographSetup:
         Unlike the clipped trace table, this mapping can also inspect the full
         FSR outside the detector. It uses the same rotation and placement.
         """
+        self._require_placement(need_center=True)
         x, y = self._rotated_detector_pixels(wave, order)
         return x - self._detector_center[0] + self.detector.n_pix_x/2, y - self._detector_center[1] + self.detector.n_pix_y/2
 

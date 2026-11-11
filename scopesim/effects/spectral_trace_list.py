@@ -615,14 +615,13 @@ def _warn_if_echelle_design_res_inconsistent(
         dispersion_focal_len,
         tolerance=0.05):
     """Warn if analytical order-center R is inconsistent with design_res."""
-    try:
-        design_res = float(design_res)
-        pix_per_res_elem = float(pix_per_res_elem)
-        pix_size = u.Quantity(pix_size).to(u.mm)
-        dispersion_focal_len = u.Quantity(dispersion_focal_len).to(u.mm)
-        echelle_angle_rad = u.Quantity(echelle_angle).to_value(u.rad)
-    except (TypeError, ValueError, u.UnitConversionError):
-        return
+    # These come straight from the configured model, so a coercion failure is
+    # a broken parameter file, not a reason to skip the check silently.
+    design_res = float(design_res)
+    pix_per_res_elem = float(pix_per_res_elem)
+    pix_size = u.Quantity(pix_size).to(u.mm)
+    dispersion_focal_len = u.Quantity(dispersion_focal_len).to(u.mm)
+    echelle_angle_rad = u.Quantity(echelle_angle).to_value(u.rad)
     if (
             not np.isfinite(design_res) or design_res <= 0
             or not np.isfinite(pix_per_res_elem) or pix_per_res_elem <= 0
@@ -654,28 +653,40 @@ class EchelleSpectralTraceList(SpectralTraceList):
     a txt file containing a table of parameters using the filename kwarg.
     ``m0`` is the highest order number and ``n`` is the number of orders.
 
-    Below is an example of how to define the echelle trace parameters (see irdb/ZShooter_v1/traces/echelle_trace_parameters.txt):
+    Required columns: ``prefix``, ``aperture_id``, ``image_plane_id``, ``m0``,
+    ``n``, ``min_wave``, ``max_wave``, ``design_res``, ``echelle_blaze``,
+    ``focal_length``, ``fwhm``, ``pixel_size``, ``n_disp``, ``n_xdisp``,
+    ``disp_freq``, ``xdisp_freq``, ``xbeta_center``, ``slitlength``,
+    ``dispdir``.
+
+    Optional columns: ``dispersion_focal_length``, ``detector_pad`` (recorded
+    only, see DETPAD), ``plate_scale`` (else ``!INST.pixel_scale``),
+    ``detector_angle``, ``detector_offset_x`` and ``detector_offset_y`` (which
+    must be supplied together), and the physical prescription
+    ``collimator1_focal_length``, ``collimator2_focal_length``,
+    ``entrance_slit_scale`` with ``nominal_slit_width``.
+
+    ``echelle_blaze`` and ``xbeta_center`` are always read as degrees; they
+    take no unit comment. Every other column above needs a matching
+    ``# <column>_unit :`` comment line.
+
+    See irdb/ZShooter_v2/traces/echelle_trace_parameters.dat for a working
+    file. Below is a minimal example:
     ----------------------------------------------------------------
     # min_wave_unit : nm
     # max_wave_unit : nm
-    # echelle_blaze_unit : deg
     # focal_length_unit : mm
-    # dispersion_focal_length_unit : mm
     # fwhm_unit : pixel
-    # nominal_slit_width_unit : arcsec
     # plate_scale_unit : arcsec/mm
-    # detector_pad_unit : pixel
     # pixel_size_unit : mm
-    # n_disp_unit : pixel
-    # n_xdisp_unit : pixel
     # disp_freq_unit : mm
     # xdisp_freq_unit : mm
-    # slitwidth_unit : arcsec
+    # slitlength_unit : arcsec
 
-    prefix    aperture_id    image_plane_id    m0    n    min_wave    max_wave   design_res    echelle_blaze    focal_length    dispersion_focal_length    fwhm    nominal_slit_width    plate_scale    detector_pad    pixel_size    n_disp    n_xdisp     disp_freq    xdisp_freq    slitwidth    dispdir
-    ub         0              2                29    11    315         515          20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        200          1000          10           x
-    gri        1              1                36    18    490         1020         20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        100          500           10           x
-    nIR        2              0                40    24    970         2500         20000        64.2             225             225                         4.7     0.7                   10.0           10              0.015         4096      4096        45           175           10           x
+    prefix    aperture_id    image_plane_id    m0    n    min_wave    max_wave   design_res    echelle_blaze    focal_length    fwhm    plate_scale    pixel_size    n_disp    n_xdisp     disp_freq    xdisp_freq    xbeta_center    slitlength    dispdir
+    ub         0              2                29    11    315         515          20000        64.2             225             4.7     10.0           0.015         4096      4096        200          1000          21.2            10            x
+    gri        1              1                36    18    490         1020         20000        64.2             225             4.7     10.0           0.015         4096      4096        100          500           16.8            10            x
+    nIR        2              0                40    24    970         2500         20000        64.2             225             4.7     10.0           0.015         4096      4096        45           175           10.9            10            x
     ----------------------------------------------------------------
 
     Optional ``detector_offset_x`` and ``detector_offset_y`` columns specify
@@ -730,46 +741,16 @@ class EchelleSpectralTraceList(SpectralTraceList):
         trace_ids, ap_ids, im_ids = [], [], []
         self._spectrographs = {}
         for row in trace_params.table:
-            prefix = row["prefix"]
-            min_order = row['m0'] - row['n'] + 1
-            max_order = row['m0']
-            min_wave = row['min_wave'] * u.Unit(trace_params.meta["min_wave_unit"])
-            max_wave = row['max_wave'] * u.Unit(trace_params.meta["max_wave_unit"])
-            design_res = row['design_res']
-            focal_len = row['focal_length'] * u.Unit(trace_params.meta["focal_length_unit"])
-            dispersion_focal_len = None
-            if "dispersion_focal_length" in trace_params.table.colnames:
-                dispersion_focal_len = row["dispersion_focal_length"] * u.Unit(
-                    trace_params.meta.get(
-                        "dispersion_focal_length_unit",
-                        trace_params.meta["focal_length_unit"],
-                    ))
-            disp_npix = int(row['n_disp'])
-            xdisp_npix = int(row['n_xdisp'])
-            detector_pad = (
-                int(row['detector_pad'])
-                if 'detector_pad' in trace_params.table.colnames else 0
-            )
-            pix_size = row['pixel_size'] * u.Unit(trace_params.meta["pixel_size_unit"])
-            echelle_angle = np.deg2rad(row['echelle_blaze'])*u.rad
-            xdisp_beta_center = np.deg2rad(row['xbeta_center'])*u.rad
-
-            xdisp_groove_length = u.Unit(trace_params.meta["xdisp_freq_unit"]) / row['xdisp_freq']
-            echelle_groove_length = u.Unit(trace_params.meta["disp_freq_unit"]) / row['disp_freq']
-            pix_per_res_elem = row['fwhm']
-            prescription = {}
-            if 'collimator1_focal_length' in trace_params.table.colnames:
-                for key in ('collimator1_focal_length', 'collimator2_focal_length', 'entrance_slit_scale'):
-                    prescription[key] = row[key] * u.Unit(trace_params.meta[key + '_unit'])
-                nominal_width = row['nominal_slit_width'] * u.Unit(trace_params.meta['nominal_slit_width_unit'])
-                pix_per_res_elem = (nominal_width * prescription['entrance_slit_scale'] * focal_len / prescription['collimator2_focal_length'] / pix_size).to_value(u.dimensionless_unscaled)
-
-            ss = echelle.spectrograph_factory(min_wave, max_wave, focal_len,
-                                              design_res, echelle_angle, min_order, max_order,
-                                              echelle_groove_length, pix_per_res_elem, disp_npix, xdisp_npix,
-                                              pix_size, xdisp_groove_length=xdisp_groove_length,
-                                              xdisp_beta_center=xdisp_beta_center,
-                                              dispersion_focal_len=dispersion_focal_len, **prescription)
+            ss, parsed = echelle.spectrograph_from_trace_row(
+                row, trace_params.meta, trace_params.table.colnames)
+            prefix = parsed["prefix"]
+            pix_size = parsed["pix_size"]
+            pix_per_res_elem = parsed["pix_per_res_elem"]
+            detector_pad = parsed["detector_pad"]
+            design_res = parsed["design_res"]
+            echelle_angle = parsed["echelle_angle"]
+            disp_npix = parsed["disp_npix"]
+            xdisp_npix = parsed["xdisp_npix"]
             _warn_if_echelle_design_res_inconsistent(
                 prefix,
                 design_res,
@@ -799,8 +780,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
                 ).to_value(u.deg)
             cang = np.cos(np.deg2rad(detector_angle))
             sang = np.sin(np.deg2rad(detector_angle))
-            ss._detector_cos, ss._detector_sin = cang, sang
-            ss._slit_offset_pix = slit_offset_pix
+            ss.set_slit_rotation(slit_offset_pix, detector_angle)
             self._spectrographs[prefix] = ss
             if 'detector_offset_x' in trace_params.table.colnames or 'detector_offset_y' in trace_params.table.colnames:
                 # Multiplying an ASCII table's masked cell by a Unit yields
@@ -838,7 +818,7 @@ class EchelleSpectralTraceList(SpectralTraceList):
                     rotated_y_max = max(rotated_y_max, yrot.max())
                 rotated_x_center = rotated_x_min + (rotated_x_max - rotated_x_min)/2
                 rotated_y_center = rotated_y_min + (rotated_y_max - rotated_y_min)/2
-            ss._detector_center = (rotated_x_center, rotated_y_center)
+            ss.set_detector_center((rotated_x_center, rotated_y_center))
 
             def on_detector(wave, order):
                 xpix, ypix = ss._detector_pixels(wave, order)
@@ -900,7 +880,9 @@ class EchelleSpectralTraceList(SpectralTraceList):
                     ss.dispersion_focal_length.to_value(u.mm),
                     "Effective echelle dispersion focal length [mm]")
                 trace_hdu.header["DETPAD"] = (
-                    detector_pad, "Legacy detector padding [pix]; not applied")
+                    # Recorded for provenance only: the generator models the
+                    # full array, so the pad is not subtracted anywhere.
+                    detector_pad, "Detector padding [pix]; full array modelled")
                 trace_hdu.header["DETANG"] = (
                     detector_angle, "Detector rotation angle [deg]")
                 if "nominal_slit_width" in trace_params.table.colnames:
