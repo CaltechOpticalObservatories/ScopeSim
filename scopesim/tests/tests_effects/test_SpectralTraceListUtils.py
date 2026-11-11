@@ -259,7 +259,7 @@ class TestTransform2D:
             + 0.2 * x
         )
 
-        tf2d = Transform2D.fit(x, y, z, degree=4)
+        tf2d = Transform2D.fit(x, y, z, degree=4, normalize=False)
 
         assert tf2d.matrix.dtype == np.float64
         assert np.max(np.abs(tf2d(x, y) - z)) < 1e-5
@@ -274,7 +274,7 @@ class TestTransform2D:
         y = y_grid.ravel()
         z = 3 + 2 * x + 5 * y + 7 * x * y + 11 * y**2
 
-        tf2d = Transform2D.fit(x, y, z, degree=2)
+        tf2d = Transform2D.fit(x, y, z, degree=2, normalize=True)
         dz_dx, dz_dy = tf2d.gradient()
 
         assert dz_dx(x, y) == pytest.approx(2 + 7 * y, rel=1e-10, abs=1e-10)
@@ -343,3 +343,67 @@ class TestImageInterpolations:
         interps = make_image_interpolations(hdul, kx=1, ky=1)
         imginterp = interps[0](yy, xx, grid=False)
         assert np.allclose(imginterp, img)
+
+    def test_normalization_conditions_poorly_scaled_inputs(self):
+        # Inputs far from the origin are where rescaling to [-1, 1] pays off.
+        # ScopeSim's focal-plane mm are centred, so this is a safeguard for
+        # other coordinate conventions rather than a general improvement.
+        x_grid, y_grid = np.meshgrid(np.linspace(0, 2048, 40), np.linspace(0, 2048, 40), indexing="ij")
+        x, y = x_grid.ravel(), y_grid.ravel()
+        xs, ys = (x - 1024)/2048, (y - 1024)/2048
+        z = 1. + .35*(ys + .02*xs + .1*ys**2 + .03*xs*ys + .005*ys**3)
+
+        plain = Transform2D.fit(x, y, z, degree=4, normalize=False)
+        scaled = Transform2D.fit(x, y, z, degree=4, normalize=True)
+
+        plain_residual = np.max(np.abs(plain(x, y) - z))
+        scaled_residual = np.max(np.abs(scaled(x, y) - z))
+        assert scaled_residual < plain_residual / 100
+
+    def test_normalization_is_immaterial_for_centred_focal_plane_mm(self):
+        # The coordinates ScopeSim actually fits. Both routes reach machine
+        # precision, so enabling the flag must not move anybody's trace.
+        x_grid, y_grid = np.meshgrid(np.linspace(-50, 50, 40), np.linspace(-25, 25, 40), indexing="ij")
+        x, y = x_grid.ravel(), y_grid.ravel()
+        z = 1. + .35*(y/50 + .02*x/100 + .1*(y/50)**2)
+
+        plain = Transform2D.fit(x, y, z, degree=4, normalize=False)
+        scaled = Transform2D.fit(x, y, z, degree=4, normalize=True)
+
+        assert np.max(np.abs(plain(x, y) - z)) < 1e-12
+        assert np.max(np.abs(scaled(x, y) - z)) < 1e-12
+
+
+class TestSpectralTraceFitNormalize:
+    def test_defaults_to_the_upstream_unnormalized_fit(self):
+        spt = SpectralTrace(_tilted_linear_trace_table())
+        assert spt.meta["fit_normalize"] is False
+        assert spt.xy2lam.pretransform_x is None
+
+    def test_opting_in_rescales_the_fit_inputs(self):
+        spt = SpectralTrace(_tilted_linear_trace_table(), fit_normalize=True)
+        assert spt.xy2lam.pretransform_x is not None
+        assert spt.xy2lam.dpretransform_x != 1.0
+
+    def test_both_routes_agree_on_this_trace(self):
+        # Focal-plane mm are centred, so the two fits must describe the same
+        # trace; enabling the option is not allowed to move anybody's spectrum.
+        table = _tilted_linear_trace_table()
+        plain = SpectralTrace(table.copy())
+        scaled = SpectralTrace(table.copy(), fit_normalize=True)
+
+        x_mm = np.linspace(1.2, 2.8, 17)
+        y_mm = np.linspace(-0.08, 0.08, 17)
+        assert scaled.xy2lam(x_mm, y_mm) == pytest.approx(plain.xy2lam(x_mm, y_mm), abs=1e-9)
+        assert scaled.xy2xi(x_mm, y_mm) == pytest.approx(plain.xy2xi(x_mm, y_mm), abs=1e-9)
+
+    def test_gradients_are_in_input_units_either_way(self):
+        # The chain-rule factor is what keeps the normalized gradient in
+        # per-mm rather than per-rescaled-unit.
+        table = _tilted_linear_trace_table()
+        plain = SpectralTrace(table.copy())
+        scaled = SpectralTrace(table.copy(), fit_normalize=True)
+
+        x_mm, y_mm = np.linspace(1.2, 2.8, 9), np.linspace(-0.08, 0.08, 9)
+        for plain_grad, scaled_grad in zip(plain.xy2lam.gradient(), scaled.xy2lam.gradient()):
+            assert scaled_grad(x_mm, y_mm) == pytest.approx(plain_grad(x_mm, y_mm), abs=1e-7)
