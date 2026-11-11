@@ -276,7 +276,7 @@ class TestTaperedQuantumEfficiency:
         )
 
         assert qe.apply_to(fov) is fov
-        assert fov.meta["detector_qe"] is qe
+        assert fov.detector_qe is qe
 
 
 class TestTERCurvePlot:
@@ -430,3 +430,38 @@ class TestTopHatFilterList:
         assert filt_wheel.filters["J"].throughput(1.15*u.um) == 0.9
         assert filt_wheel.filters["J"].throughput(1.13*u.um) == 0.
         assert filt_wheel.meta["current_filter"] == "K"
+
+
+class TestDetectorQePositionDispatch:
+    """detector_qe_at decides from the signature, not from a caught TypeError."""
+
+    def test_position_aware_throughput_receives_the_coordinates(self):
+        class PositionalThroughput:
+            def throughput(self, wave, detector_x=None, detector_y=None, **kwargs):
+                return np.full(np.size(wave), 0.25) + np.asarray(detector_y, dtype=float)
+
+        values = tc.detector_qe_at(PositionalThroughput(), [1., 2.]*u.um,
+                                   detector_x=np.array([0., 0.]),
+                                   detector_y=np.array([0., .5]))
+        assert values == pytest.approx([.25, .75])
+
+    def test_spectral_only_throughput_is_called_without_coordinates(self):
+        class SpectralOnly:
+            def throughput(self, wave):
+                return np.full(np.size(wave), .4)
+
+        values = tc.detector_qe_at(SpectralOnly(), [1., 2.]*u.um,
+                                   detector_x=np.array([0., 1.]),
+                                   detector_y=np.array([0., 1.]))
+        assert values == pytest.approx([.4, .4])
+
+    def test_a_failure_inside_a_position_aware_throughput_propagates(self):
+        # The old `except TypeError: pass` silently degraded to
+        # position-independent QE when the implementation itself was broken.
+        class BrokenPositional:
+            def throughput(self, wave, detector_x=None, detector_y=None, **kwargs):
+                raise TypeError("something is genuinely wrong in here")
+
+        with pytest.raises(TypeError, match="genuinely wrong"):
+            tc.detector_qe_at(BrokenPositional(), [1.]*u.um,
+                              detector_x=np.array([0.]), detector_y=np.array([0.]))

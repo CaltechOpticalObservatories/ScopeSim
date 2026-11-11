@@ -27,7 +27,8 @@ def line_cube(step, offset=0):
     profile = np.exp(-.5*((wave-1)/.00002)**2)
     cube = profile[:, None, None]*spatial[None, :, None]*np.ones((1, 1, 3))
     header = fits.Header({'CTYPE1': 'LINEAR', 'CTYPE2': 'LINEAR', 'CTYPE3': 'WAVE', 'CUNIT1': 'arcsec', 'CUNIT2': 'arcsec', 'CUNIT3': 'um', 'CDELT1': .1, 'CDELT2': step, 'CDELT3': wave[1]-wave[0], 'CRPIX1': 1., 'CRPIX2': 1., 'CRPIX3': 1., 'CRVAL1': 0., 'CRVAL2': eta[0], 'CRVAL3': wave[0]})
-    return SimpleNamespace(cube=fits.ImageHDU(cube, header), meta={'xi_min': 0*u.arcsec, 'eta_min': -.5*u.arcsec, 'eta_max': .5*u.arcsec})
+    # detector_qe mirrors the real FieldOfView attribute; None means no QE effect ran.
+    return SimpleNamespace(cube=fits.ImageHDU(cube, header), detector_qe=None, meta={'xi_min': 0*u.arcsec, 'eta_min': -.5*u.arcsec, 'eta_max': .5*u.arcsec})
 
 
 

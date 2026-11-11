@@ -372,7 +372,7 @@ class SpectralTrace:
                 inside = (xi >= xi_min) & (xi < xi_max) & (lam >= wave_min) & (lam < wave_max)
                 image[inside] += xilam.interp(xi[inside], lam[inside], grid=False) * scale[inside] * wx * wy
 
-        detector_qe = fov.meta.get("detector_qe")
+        detector_qe = fov.detector_qe
         if detector_qe is not None:
             xpix_img, ypix_img = np.meshgrid(
                 np.arange(xmin, xmax, dtype=np.float64),

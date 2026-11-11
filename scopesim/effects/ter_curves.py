@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Transmission, emissivity, reflection curves."""
 
+import inspect
 import warnings
 from typing import ClassVar
 from collections.abc import Collection, Iterable
@@ -68,11 +69,12 @@ def detector_qe_at(
             wave, detector_x=detector_x, detector_y=detector_y, **kwargs)
 
     if detector_x is not None or detector_y is not None:
-        try:
+        parameters = inspect.signature(detector_qe.throughput).parameters
+        accepts_position = "detector_x" in parameters or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+        if accepts_position:
             return detector_qe.throughput(
                 wave, detector_x=detector_x, detector_y=detector_y, **kwargs)
-        except TypeError:
-            pass
 
     return detector_qe.throughput(wave)
 
@@ -741,7 +743,7 @@ class TaperedQuantumEfficiency(Effect):
                 detector_pixels = obj.detector_header[detector_axis]
                 if self._position_min() != 0 or self._position_max() != detector_pixels:
                     warnings.warn(f"Tapered QE {axis}-axis span {self._position_min():g}..{self._position_max():g} pix differs from detector {detector_axis} span 0..{detector_pixels} pix.", stacklevel=2)
-            obj.meta["detector_qe"] = self
+            obj.detector_qe = self
         return obj
 
     def throughput(self, wave):
@@ -758,7 +760,7 @@ class TaperedQuantumEfficiency(Effect):
     def effective_diffuse_throughput(self, wave, footprint=None, **kwargs):
         """Return QE averaged over a representative detector footprint."""
         wave_values = np.atleast_1d(self._wave_values(wave))
-        positions = self._diffuse_positions(footprint)
+        positions = self._diffuse_positions()
         centers = self._center_wave_values(positions)
         values = self._flattop_response(
             wave_values[:, None],
@@ -861,7 +863,15 @@ class TaperedQuantumEfficiency(Effect):
             raise ValueError("transition_width must not be negative.")
         return width
 
-    def _diffuse_positions(self, footprint=None) -> np.ndarray:
+    def _diffuse_positions(self) -> np.ndarray:
+        """Positions sampled when averaging the coating for diffuse light.
+
+        Non-dispersed light reaches the whole detector, so the average is taken
+        over the full configured taper span. That is the detector span by
+        construction: ``apply_to`` warns when the two differ. The ``footprint``
+        offered by the diffuse protocol is therefore not needed here, and is
+        deliberately not accepted.
+        """
         nsamp = int(from_currsys(
             self.meta["diffuse_position_samples"], self.cmds))
         nsamp = max(nsamp, 2)

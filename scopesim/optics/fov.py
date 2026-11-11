@@ -95,6 +95,11 @@ class FieldOfView:
 
         self.cmds = cmds
 
+        # Set by a detector-QE effect in the FOV phase, read by the spectral
+        # trace mapping in the same phase. The QE effect must be listed before
+        # the trace list in the instrument YAML; see SpectralTrace.
+        self.detector_qe = None
+
         if not any(has_needed_keywords(header, s) for s in {"", "S"}):
             raise ValueError(
                 f"Header must contain a valid sky-plane WCS: {dict(header)}")
