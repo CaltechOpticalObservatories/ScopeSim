@@ -13,6 +13,9 @@ from astropy.io.fits import HDUList
 
 from tqdm.auto import tqdm
 
+from scipy.interpolate import interp1d
+
+from synphot import SourceSpectrum, Empirical1D
 from synphot.units import PHOTLAM
 
 from astar_utils.nested_mapping import RecursiveNestedMapping, is_bangkey, recursive_update
@@ -28,6 +31,7 @@ from ..effects.ter_curves import DichroicTree, FilterWheelBase, TaperedQuantumEf
 from ..effects.atmo_dispersion import ShiftFoV3D
 from ..utils import from_currsys, top_level_catch, get_logger
 from ..source.source_templates import empty_sky
+from ..source.source_fields import SpectrumSourceField
 from .. import __version__
 
 
@@ -539,6 +543,7 @@ class OpticalTrain:
         else:
             source = orig_source.make_copy()
         source = self.prepare_source(source)
+        integrate_bins = from_currsys("!SIM.spectral.integrate_spectral_bins", self.cmds)
 
         # [1D - transmission curves]
         source_effects = self.optics_manager.source_effects
@@ -604,7 +609,7 @@ class OpticalTrain:
                 for effect in foveffs:
                     # Slit shear needs spectral support before extraction.
                     # Fibre bundles have no single FOV trace and map separately.
-                    if isinstance(effect, SpectralTraceList) and isinstance(fov, FieldOfView3D) and fov.trace_id is not None:
+                    if integrate_bins and isinstance(effect, SpectralTraceList) and isinstance(fov, FieldOfView3D) and fov.trace_id is not None:
                         fov.meta['spectral_padding'] = effect.spectral_traces[fov.trace_id].spectral_padding(fov)
 
                 # Render at the PSF stage when preceding effects only multiply
@@ -674,6 +679,14 @@ class OpticalTrain:
         self._last_fovs = fovs
         self._last_source = source
 
+    def _global_fov_waveset(self):
+        """The single wavelength grid upstream resamples every source onto."""
+        wave_min = min(fov.meta["wave_min"] for fov in self.fov_manager.fovs)
+        wave_max = max(fov.meta["wave_max"] for fov in self.fov_manager.fovs)
+        wave_unit = u.Unit(from_currsys("!SIM.spectral.wave_unit", self.cmds))
+        dwave = from_currsys("!SIM.spectral.spectral_bin_width", self.cmds)
+        return (np.arange(wave_min.value, wave_max.value, dwave) * wave_unit).to(u.um)
+
     def prepare_source(self, source):
         """
         Prepare source for observation.
@@ -691,6 +704,18 @@ class OpticalTrain:
         # Convert to PHOTLAM per arcsec2
         # TODO: this is not sufficiently general
         # TODO: Maybe move this to source_fields??
+        integrate_bins = from_currsys("!SIM.spectral.integrate_spectral_bins", self.cmds)
+
+        if not integrate_bins:
+            # Upstream puts every spectrum on the global FOV grid up front.
+            for field in source.fields:
+                if not isinstance(field, SpectrumSourceField):
+                    continue
+                for ispec, spec in field.spectra.items():
+                    fov_waveset = self._global_fov_waveset()
+                    field.spectra[ispec] = SourceSpectrum(Empirical1D,
+                                                          points=fov_waveset,
+                                                          lookup_table=spec(fov_waveset))
 
         for cube in source.cube_fields:
             header, data, wave = cube.header, cube.data, cube.waveset
@@ -726,10 +751,33 @@ class OpticalTrain:
             cube.header["CUNIT1"] = "deg"
             cube.header["CUNIT2"] = "deg"
 
-            # Keep the native wavelength samples until the spatial FOV is cut.
-            # Rebinning the entire source here loses narrow lines and expands
-            # resolved cubes over the full instrument band unnecessarily.
-            cube.data = data
+            if integrate_bins:
+                # Keep the native wavelength samples until the spatial FOV is
+                # cut. Rebinning the entire source here loses narrow lines and
+                # expands resolved cubes over the full instrument band
+                # unnecessarily.
+                cube.data = data
+            else:
+                fov_waveset = self._global_fov_waveset()
+                if (wave.to(u.um).min() > fov_waveset.max()
+                        or wave.to(u.um).max() < fov_waveset.min()):
+                    logger.warning("Source and FOV wavesets disjoint.")
+
+                # Interpolate into new data cube.
+                # This is done layer by layer for memory reasons.
+                new_data = np.zeros((fov_waveset.shape[0], data.shape[1], data.shape[2]), dtype=np.float64)
+                for j in range(data.shape[1]):
+                    cube_interp = interp1d(wave.to_value(u.um), data[:, j, :],
+                                           axis=0, kind="linear", bounds_error=False, fill_value=0)
+                    new_data[:, j, :] = cube_interp(fov_waveset.value)
+
+                cube.data = new_data
+                cube.header["CTYPE3"] = "WAVE"
+                cube.header["CRPIX3"] = 1
+                cube.header["CRVAL3"] = fov_waveset[0].value
+                cube.header["CDELT3"] = from_currsys("!SIM.spectral.spectral_bin_width", self.cmds)
+                cube.header["CUNIT3"] = "um"
+
             cube.wcs = WCS(cube.field)
 
         return source

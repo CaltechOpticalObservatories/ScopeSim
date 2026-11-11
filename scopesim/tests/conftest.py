@@ -121,3 +121,13 @@ def protect_search_path():
     """Prevent modification of global search_path."""
     with patch("scopesim.rc.__search_path__"):
         yield
+
+
+@pytest.fixture(scope="function")
+def integrate_spectral_bins():
+    """Opt in to bin-integrated spectral sampling for a single test."""
+    key = "!SIM.spectral.integrate_spectral_bins"
+    previous = sim.rc.__currsys__[key]
+    sim.rc.__currsys__[key] = True
+    yield
+    sim.rc.__currsys__[key] = previous

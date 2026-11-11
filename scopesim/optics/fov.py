@@ -8,6 +8,7 @@ from collections.abc import Iterable, Generator
 
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
+from scipy.interpolate import interp1d
 from scipy.signal import fftconvolve
 
 from astropy import units as u
@@ -409,11 +410,14 @@ class FieldOfView:
 
         wdel = hdr["CDELT3"] * u.Unit(hdr.get("CUNIT3", "AA"))
         fov_wmin, fov_wmax = self.waverange + np.array([-1, 1])*self.meta['spectral_padding']
+        # Spectroscopic inputs stay densities until bin integration, so they
+        # need neighbours on both sides of the output bin edges and must not
+        # be pre-scaled for partial coverage. Everything else keeps the
+        # upstream half-bin margin and edge-slice scaling.
+        density_input = isinstance(self, FieldOfView3D) and self.integrate_spectral_bins
         # need to go [+/-] half a bin
         margin = abs(wdel)/2
-        if isinstance(self, FieldOfView3D):
-            # Spectroscopic inputs remain densities until bin integration;
-            # retain neighbours on both sides of the output bin edges.
+        if density_input:
             margin = abs(wdel) + np.diff(self.cube_waveset[:2])[0]/2
         mask = (hdu_waves > fov_wmin - margin) & (hdu_waves <= fov_wmax + margin)
 
@@ -431,7 +435,7 @@ class FieldOfView:
         f1 = (abs(hdu_waves[i1p] - fov_wmax - 0.5 * wdel) % wdel) / wdel    # red edge
 
         data = cubehdu.data[i0p:i1p+1, xy0p[1]:xy1p[1], xy0p[0]:xy1p[0]].copy()
-        if not isinstance(self, FieldOfView3D):
+        if not density_input:
             data[0] *= f0.to_value(1).round(11)
             if i1p > i0p:
                 data[-1] *= f1.to_value(1).round(11)
@@ -529,6 +533,12 @@ class FieldOfView:
         """Return meta["sub_pixel"] from cmds."""
         # TODO: Make this an attribute once meta resolving is implemented.
         return from_currsys(self.meta["sub_pixel"], self.cmds)
+
+    @property
+    def integrate_spectral_bins(self) -> bool:
+        """Return "!SIM.spectral.integrate_spectral_bins" from cmds."""
+        # TODO: Make this an attribute once meta resolving is implemented.
+        return from_currsys("!SIM.spectral.integrate_spectral_bins", self.cmds)
 
     @property
     def spline_order(self) -> int:
@@ -930,11 +940,26 @@ class FieldOfView3D(FieldOfView):
     def cube_waveset(self):
         wave_unit = u.Unit(from_currsys('!SIM.spectral.wave_unit', self.cmds))
         step = from_currsys('!SIM.spectral.spectral_bin_width', self.cmds)
+        if not self.integrate_spectral_bins:
+            start, stop = self.meta['wave_min'].value, self.meta['wave_max'].value
+            # Note: There is an edge case where some floating point madness
+            #       results in the arange ticking over by another bin by just
+            #       .000000000005 (yeah...), which creates an off-by-one error
+            #       further down the line.
+            n_wave = int((stop - start) / step)
+            return np.arange(start, stop, step)[:n_wave] * wave_unit
+
         if 'slit_spectral_width' in self.meta:
             step = min(step, self.meta['slit_spectral_width'].to_value(wave_unit)/20)
         start, stop = self.meta['wave_min'].value, self.meta['wave_max'].value
         padding = int(np.ceil(self.meta['spectral_padding'].to_value(wave_unit)/step))
         return (start + np.arange(-padding, int((stop - start)/step) + padding)*step)*wave_unit
+
+    def _sampled_spectrum(self, spectrum, fov_waveset):
+        """PHOTLAM at the cube cells: bin integrals, or upstream bin-centre samples."""
+        if self.integrate_spectral_bins:
+            return average_spectrum(spectrum, fov_waveset)
+        return spectrum(fov_waveset)
 
     def _make_cubefields(self, fov_waveset):
         """
@@ -949,7 +974,11 @@ class FieldOfView3D(FieldOfView):
             # Assumption is that ImageHDUs have units of PHOTLAM arcsec-2
 
             # TODO: Deal with this bounds_error in a more elegant way
-            field_data = rebin_spectral_density(field.waveset.to_value(u.um), field.data, spectral_bin_edges(fov_waveset.to_value(u.um)))
+            if self.integrate_spectral_bins:
+                field_data = rebin_spectral_density(field.waveset.to_value(u.um), field.data, spectral_bin_edges(fov_waveset.to_value(u.um)))
+            else:
+                # Upstream point-samples the native cube onto the FOV grid.
+                field_data = interp1d(field.waveset.to_value(u.um), field.data, axis=0, kind="linear", bounds_error=False, fill_value=0)(fov_waveset.to_value(u.um))
             field_hdu = fits.ImageHDU(data=field_data, header=field.header)
             field_hdu.header.update(CRPIX3=1., CRVAL3=fov_waveset[0].to_value(u.um), CDELT3=np.diff(fov_waveset[:2])[0].to_value(u.um), CUNIT3='um', CTYPE3='WAVE')
             yield field_hdu
@@ -979,7 +1008,7 @@ class FieldOfView3D(FieldOfView):
                 py = (padded['NAXIS2'] - self.header['NAXIS2'])//2
                 image = image[py:py + self.header['NAXIS2'], px:px + self.header['NAXIS1']]
 
-            spec = average_spectrum(field.spectrum, fov_waveset)
+            spec = self._sampled_spectrum(field.spectrum, fov_waveset)
             # 2D * 1D -> 3D
             field_cube = image[None, :, :] * spec[:, None, None]
             yield field_cube.value
@@ -1002,7 +1031,7 @@ class FieldOfView3D(FieldOfView):
             #       if this is the case and if yes, remove the condition here!!
             # Fluxes (yes that's the correct plural) in PHOTLAM
             fluxes = {
-                ref: average_spectrum(spec, fov_waveset)
+                ref: self._sampled_spectrum(spec, fov_waveset)
                 for ref, spec in field.spectra.items()
                 if ref in field.field["ref"]
             }
@@ -1029,7 +1058,7 @@ class FieldOfView3D(FieldOfView):
             #        Remember, cube output needs PHOTLAM arcsec-2 !
             #        So if SOLIDANG or BUNIT or whatever is not in arcsec-2,
             #        the spectrum shoule be scaled accordingly!
-            spec = average_spectrum(field.spectrum, fov_waveset)
+            spec = self._sampled_spectrum(field.spectrum, fov_waveset)
             yield spec[:, None, None].value
 
     def make_hdu(self, spatial_psf=None, spatial_shifts=()):
@@ -1118,7 +1147,7 @@ class FieldOfView3D(FieldOfView):
                     canvas_cube_hdu.data[:, y, x] += flux
         else:
             for field in self._get_table_fields():
-                spectra = {ref: average_spectrum(spec, fov_waveset).value for ref, spec in field.spectra.items()}
+                spectra = {ref: self._sampled_spectrum(spec, fov_waveset).value for ref, spec in field.spectra.items()}
                 for row in field.field:
                     image = spatial_psf.point_source_image(self, row['x'], row['y'])/self.pixel_area.value
                     for start in range(0, len(fov_waveset), 64):
