@@ -58,7 +58,7 @@ def test_fixed_groove_endpoints_fill_camera(low, high, density, height):
     pixels = instrument.wavelength_to_y_pixel(wavelength)
     # Algebraic inverse/forward evaluation; 1e-7 pixel allows floating-point cancellation.
     np.testing.assert_allclose(pixels.value, [0, height], atol=1e-7, rtol=0)
-    recovered = instrument.y_pixel_to_wavelength(pixels, 1)
+    recovered = instrument.y_pixel_to_wavelength(pixels)
     np.testing.assert_allclose(recovered.to_value(u.nm), wavelength.value, atol=1e-9, rtol=0)
 
 
@@ -100,3 +100,55 @@ def test_fsr_retains_the_central_pixel_wavelength_convention():
     center = instrument.x_pixel_to_wavelength(instrument.detector.n_pix_x//2 + .5, instrument.orders)
     np.testing.assert_allclose(edges.mean(axis=1).to_value(u.nm), center.to_value(u.nm), rtol=1e-12)
     np.testing.assert_allclose(np.diff(edges, axis=1).ravel().to_value(u.nm), (center/instrument.orders).to_value(u.nm), rtol=1e-12)
+
+
+class TestEchelleHygiene:
+    """Defects that were unreachable from production but trivially wrong."""
+
+    @staticmethod
+    def _echelle():
+        return GratingSetup(alpha=65.6*u.deg, beta_center=65.6*u.deg,
+                            delta=65.6*u.deg, groove_length=u.mm/50.15)
+
+    def test_blaze_accepts_a_scalar_angle(self):
+        # k[k > 1] = 1 needed a writable array, so a scalar beta used to raise.
+        grating = self._echelle()
+        scalar = grating.blaze(np.deg2rad(65.)*u.rad, 100)
+        array = grating.blaze(np.deg2rad(np.array([64., 65., 66.]))*u.rad, 100)
+        assert np.ndim(scalar) == 0
+        assert scalar == pytest.approx(array[1])
+
+    def test_blaze_is_capped_at_unity(self):
+        grating = self._echelle()
+        values = grating.blaze(np.deg2rad(np.linspace(55., 75., 41))*u.rad, 100)
+        assert np.all(values <= 1.)
+
+    def test_str_works_for_a_vph_grating_without_a_blaze_facet(self):
+        # delta is None for VPH, so np.rad2deg(delta) used to raise.
+        vph = GratingSetup(grating_type="vph", alpha=.1*u.rad, beta_center=.1*u.rad,
+                           groove_length=u.mm/2000, vph_center_wave=500*u.nm)
+        assert "delta=n/a" in str(vph)
+
+    def test_order_cache_refreshes_without_relying_on_assert(self):
+        # The old guard used `assert`, which python -O strips, leaving the
+        # cached order array permanently stale.
+        model = spectrograph_factory(310, 430, 225, 18000, 65.6, 85, 118, 1/50.15,
+                                     4.46, 2048, 4096, .015,
+                                     xdisp_groove_length=1/2000, xdisp_beta_center=21.2)
+        before = len(model.orders)
+        model.m_max = model.m_max + 2
+        assert len(model.orders) == before + 2
+
+    def test_detector_class_does_not_shadow_the_core_detector(self):
+        from scopesim.optics import echelle
+        from scopesim.detector import Detector as CoreDetector
+        assert echelle.EchelleDetector is not CoreDetector
+        assert not hasattr(echelle, "Detector")
+
+    def test_dead_diagnostics_are_gone(self):
+        # average_res raised AttributeError on every call (detector.n_pixels
+        # does not exist); neither it nor implied_design_res had any caller.
+        from scopesim.optics.echelle import SpectrographSetup
+        assert not hasattr(SpectrographSetup, "average_res")
+        assert not hasattr(SpectrographSetup, "implied_design_res")
+        assert not hasattr(SpectrographSetup, "plot_echellogram")

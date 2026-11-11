@@ -42,7 +42,7 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
     xdisp_npix: int
         Number of cross-dispersion pixels.
     pix_size: float|u.Quantity
-        Pixel size. If float, assumed to be in um.
+        Pixel size. If float, assumed to be in mm.
     xdisp_groove_length: float|u.Quantity
         Cross disperser groove length. If float, assumed to be in mm.
     xdisp_beta_center: float|u.Quantity
@@ -110,7 +110,7 @@ def spectrograph_factory(min_wave: float|u.Quantity, max_wave: float|u.Quantity,
                                    collimator2_focal_length=collimator2_focal_length,
                                    entrance_slit_scale=entrance_slit_scale,
                                    grating=echelle_grating,
-                                   detector=Detector(disp_npix, xdisp_npix, pix_size),
+                                   detector=EchelleDetector(disp_npix, xdisp_npix, pix_size),
                                    cross_disperser=cross_disperser)
 
 
@@ -276,8 +276,10 @@ class GratingSetup:
         return nu.to('mm-1'), beta.to('rad')
 
     def __str__(self) -> str:
+        # VPH gratings have no blaze facet, so delta is None for them.
+        delta = "n/a" if self.delta is None else f"{np.rad2deg(self.delta):.2f}"
         return (f"alpha={np.rad2deg(self.alpha):.2f}\n"
-                f"delta={np.rad2deg(self.delta):.2f}\n"
+                f"delta={delta}\n"
                 f"beta={np.rad2deg(self.beta_center):.2f}\n"
                 f"l={self.d.to('mm'):.2f}/l ({1 / self.d.to('mm'):.2f})")
 
@@ -292,7 +294,7 @@ class GratingSetup:
         if self.grating_type == 'vph':
             raise ValueError('Cannot calculate blaze for vph gratings.')
         k = np.cos(beta) * np.cos(self.alpha - self.delta) / (np.cos(self.alpha) * np.cos(beta - self.delta))
-        k[k > 1] = 1
+        k = np.minimum(np.asarray(k, dtype=float), 1.)
         # q1 = np.cos(alpha) / np.cos(alpha - delta)
         # q3=np.cos(delta)-np.sin(delta)*np.cot((alpha+beta)/2)
         # return k*np.sinc(m*q1*q3)**2
@@ -364,7 +366,7 @@ class GratingSetup:
 
 
 @dataclasses.dataclass
-class Detector:
+class EchelleDetector:
     n_pix_x: int
     n_pix_y: int
     pixel_size: u.Quantity
@@ -377,7 +379,7 @@ class SpectrographSetup:
             pixels_per_res_elem: float,
             focal_length: u.Quantity,
             grating: GratingSetup,
-            detector: Detector,
+            detector: EchelleDetector,
             cross_disperser: GratingSetup = None,
             dispersion_focal_length: u.Quantity = None,
             collimator1_focal_length: u.Quantity = None,
@@ -399,7 +401,7 @@ class SpectrographSetup:
             focal_length when the prescription has already folded relay
             magnification into the dispersion scale.
         :param GratingSetup grating: configured grating
-        :param MKIDDetector detector: configured detector
+        :param EchelleDetector detector: configured detector
         :return spectrograph simulation object
         """
         assert len(order_range) == 2, 'order_range must be a tuple of length 2.'
@@ -427,6 +429,7 @@ class SpectrographSetup:
             self.detector.pixel_size / self.dispersion_focal_length)
         self.beta_central_pixel = self.grating.beta_center
         self.nord = int(self.m_max - self.m0 + 1)
+        # Configured design value. Kept as supplied; no geometry depends on it.
         self.nominal_pixels_per_res_elem = pixels_per_res_elem
         self.cross_disperser = cross_disperser
         self._orders = None
@@ -438,12 +441,12 @@ class SpectrographSetup:
                      f'\n\tOrders: {self.orders}'
                      f'\n\tFocal length: {self.focal_length}'
                      f'\n\tDispersion focal length: {self.dispersion_focal_length}'
+                     f'\n\tPixels per res. element: {self.nominal_pixels_per_res_elem}'
                      f'\n\tIncidence angle: {np.rad2deg(self.grating.alpha):.3f}'
                      f'\n\tReflectance angle: {np.rad2deg(self.beta_central_pixel):.2f}'
                      f'\n\tGroove length: {self.grating.d:.2f}'
                      f'\n\t# of pixels: {self.detector.n_pix_x}x{self.detector.n_pix_y}'
-                     f'\n\tPixel size: {self.detector.pixel_size}'
-                     f'\n\tPixels per res. element: {self.nominal_pixels_per_res_elem}\n')
+                     f'\n\tPixel size: {self.detector.pixel_size}')
 
     def set_beta_center(self, beta, littrow: bool = False):
         """
@@ -475,9 +478,9 @@ class SpectrographSetup:
 
     @property
     def orders(self):
-        try:
-            assert self._orders[0] == (self.m0, self.m_max)
-        except (TypeError, AssertionError):
+        # Recompute whenever the order range changes. Must not rely on assert,
+        # which python -O strips, leaving the cache permanently stale.
+        if self._orders is None or self._orders[0] != (self.m0, self.m_max):
             self._orders = (self.m0, self.m_max), np.arange(self.m0, self.m_max + 1, dtype=int)
         return self._orders[1]
 
@@ -671,11 +674,12 @@ class SpectrographSetup:
         x, y = self._rotated_detector_pixels(wave, order)
         return x - self._detector_center[0] + self.detector.n_pix_x/2, y - self._detector_center[1] + self.detector.n_pix_y/2
 
-    def y_pixel_to_wavelength(self, pixel, m):
+    def y_pixel_to_wavelength(self, pixel):
         """
         :param pixel: pixel
-        :param m: order
         :return: wavelength for given pixel as u.Quantity
+
+        The cross-disperser works in first order, so there is no order to pass.
         """
         return self.cross_disperser.wave(self.beta_for_y_pixel(pixel), 1)
 
@@ -700,31 +704,6 @@ class SpectrographSetup:
         """
         return self.pixel_scale / self.angular_dispersion
 
-    # def pixel_rescale(self, oversampling):
-    #     """
-    #     :param oversampling: factor by which to oversample smallest wavelength extent
-    #     :return: The sample size in wavelength units for every pixel. Every MKID resolution width divided by the
-    #              total # of samples that are in the largest width, which is the largest width divided by the
-    #              smallest sample size.
-    #     """
-    #     return self.dl_mkid_pixel * self.sampling(oversampling) / self.dl_mkid_max
-    #
-    # def pixel_samples_frac(self, oversampling):
-    #     """
-    #     :return: number of samples for every pixel, retrieved by dividing change in wavelength for a pixel
-    #              by the sample size for that pixel.
-    #     """
-    #     return (self.dl_pixel / self.pixel_rescale(oversampling)).si.value
-    #
-    # def pixel_max_npoints(self, oversampling):
-    #     """
-    #     :return: the maximum number of points in any given pixel, as an integer value, ensuring there is at least one
-    #              sample at pixel center
-    #     """
-    #     pixel_max_npoints = np.ceil(self.pixel_samples_frac(oversampling).max()).astype(int)
-    #     if not pixel_max_npoints % 2:  # ensure there is a point at the pixel center
-    #         pixel_max_npoints += 1
-    #     return pixel_max_npoints
 
     @property
     def angular_cross_dispersion(self):
@@ -741,82 +720,3 @@ class SpectrographSetup:
         """
         beta = self.beta_for_x_pixel(np.arange(self.detector.n_pix_x) + .5)
         return self.grating.angular_dispersion(self.orders[:, None], beta)
-
-    @property
-    def implied_design_res(self):
-        """
-        :return: design resolution for spectrometer
-        Assumes that m0 (the longest wavelength order) FSR fills detector with some sampling
-        """
-        dlambda = self.fsr(self.m0) / self.detector.n_pix_x * self.nominal_pixels_per_res_elem
-        return self.l0 / dlambda
-
-    @property
-    def average_res(self):
-        """
-        :return:
-        """
-        w = self.edge_wave(fsr=False)
-        return (w.mean(1) / (np.diff(w, axis=1).T / self.detector.n_pixels * self.nominal_pixels_per_res_elem)).ravel()
-
-    def plot_echellogram(self, center_orders=True, title='', blaze=False, cross_disperse=False):
-        if cross_disperse and self.cross_disperser is None:
-            raise ValueError('No cross disperser defined')
-        if cross_disperse:
-            raise NotImplementedError('Cross dispersion not yet implemented')
-
-        import matplotlib.pyplot as plt
-        w = self.x_pixel_wavelengths()
-        b = self.blaze(w)
-
-        fig, axes = plt.subplots(2 + int(blaze), 1, figsize=(6, 10 + 4 * int(blaze)))
-        if title:
-            plt.suptitle(title)
-        plt.sca(axes[0])
-        plt.title(f'a={self.beta_central_pixel:.1f} m={self.m0}-{self.m_max}')
-        fsr_edges = self.edge_wave(fsr=True)
-        for ii, i in enumerate(self.orders):
-            waves = w[ii, [0, self.detector.n_pix_x // 2, -1]]
-            plt.plot(self.wavelength_to_x_pixel(waves, i), [i] * 3, '*', color=f'C{ii}')
-            plt.plot(self.wavelength_to_x_pixel(fsr_edges[ii], i), [i] * 2, '.', color=f'C{ii}')
-        plt.xlabel('Pixel')
-        plt.ylabel('Order')
-        plt.sca(axes[1])
-        for ii, i in enumerate(self.orders):
-            waves = w[ii, [0, self.detector.n_pix_x // 2, -1]]
-            oset = waves[1] if center_orders else 0
-            plt.plot(waves - oset, [i] * 3, '*', color=f'C{ii}')
-            plt.plot(fsr_edges[ii] - oset, [i] * 2, '.', color=f'C{ii}',
-                     label=f'$\\lambda=${waves[1]:.0f}')
-        plt.legend()
-        plt.xlabel('Center relative wavelength (nm)')
-        plt.ylabel('Order')
-        if blaze:
-            plt.sca(axes[2])
-            plt.plot(w.T, b.T)
-            plt.xlabel('Wavelength (nm)')
-            plt.ylabel('Blaze')
-        plt.tight_layout()
-        plt.show()
-
-
-# GRATING_CATALOG = np.loadtxt('newport_masters.txt', delimiter=',',
-#                              dtype=[('name', 'U10'), ('l', 'f4'), ('blaze', 'f4'),
-#                                     ('width', 'f4'), ('height', 'f4'), ('stock', 'U10')])
-# GRATING_CATALOG['l'] = 1e6/GRATING_CATALOG['l']
-#
-# NEWPORT_GRATINGS = {x['name']: GratingSetup(
-#     0,
-#     (x['blaze']*u.deg).to(u.rad).value,
-#     0,
-#     x['l'] * u.nm) for x in GRATING_CATALOG}
-
-
-# ss = SpectrographSetup((18,29),
-#                   515*u.nm,
-#                   4.7,
-#                   225*u.mm,
-#                   GratingSetup(alpha=np.deg2rad(64.2), beta_center=np.deg2rad(64.2), delta=np.deg2rad(64.2), groove_length=u.mm/200),
-#                   Detector(4096,4096,15*u.micron),
-#                   cross_disperser=GratingSetup(groove_length=u.mm/1000, guess_littrow=(310*u.nm, 515*u.nm, (4096-20)*0.015*u.mm, 225*u.mm)),
-#                   )
